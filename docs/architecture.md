@@ -1,13 +1,32 @@
 # Architecture
 
 Status: proposed design, nothing in this document is implemented yet.
-Last updated: 2026-10-13.
+Last updated: 2026-10-13 (revised after review).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
 [ADR 0001](adr/0001-tauri-svelte.md).
 
+## How to read the version markers
+
+Every section starts with a line that says from which version it is needed. Only two versions
+are defined so far: **v1** and **after v1**. A roadmap that splits v1 into milestones does not
+exist yet. To make that split mechanical later, each marker also names the v1 feature that
+first needs the section:
+
+| Feature           | Meaning                                                       |
+| ----------------- | ------------------------------------------------------------- |
+| local calendars   | Calendars that live only in SQLite, with create, edit, delete |
+| ICS subscriptions | Read-only feeds                                               |
+| Google read       | Sign-in and syncing Google calendars into SQLite              |
+| Google write      | Creating, editing and deleting Google events                  |
+| reminders         | Desktop notifications                                         |
+
+The markers state dependencies, not an order. The order is for the roadmap to decide.
+
 ## 1. Goals and non-goals
+
+_Needed from: v1. Applies to every feature._
 
 ### In scope for v1
 
@@ -25,12 +44,15 @@ reference for the implementation plan. The stack choice itself is recorded in
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
 | CalDAV                               | Comes after v1. The provider trait and the cursor model are designed for it (§5).                                |
 | "This and following events"          | Needs series splitting, the most error-prone calendar operation.                                                 |
-| Attendees, invitations, RSVP         | Adds a table and partial-update rules. Guest data from Google is not stored.                                     |
+| Attendees, invitations, RSVP         | Adds a table and partial-update rules. Guest lists are not stored; only whether you may edit an event is (§4).   |
 | Tray icon, background sync           | Sync and reminders only run while the app is open. The scheduler has no window dependency, so this can be added. |
 | Asking the user to resolve conflicts | Server wins in v1. The outbox keeps the rejected change, so a UI can come later.                                 |
 | Mobile                               | The core crate has no Tauri or desktop dependency, which is the preparation for it.                              |
 
 ## 2. Overview
+
+_Needed from: v1, first needed by local calendars. The sync engine, providers and secrets
+boxes are first needed by ICS subscriptions._
 
 Three rules from `CLAUDE.md` shape everything below:
 
@@ -50,11 +72,11 @@ flowchart TB
         PLG["Plugins: notification, opener"]
     end
 
-    subgraph CORE["Core crate: src-tauri/crates/core (no Tauri dependency)"]
+    subgraph CORE["simplecalendar-core: src-tauri/crates/core (no Tauri dependency)"]
         SVC["CalendarService"]
         REC["recurrence"]
         REM["reminders"]
-        DB["db"]
+        DB["db: one write and one read connection"]
         ENG["sync engine + outbox"]
         SEC["secrets"]
         subgraph PRV["provider"]
@@ -102,6 +124,8 @@ How to read it:
 
 ## 3. Crate layout
 
+_Needed from: v1, first needed by local calendars._
+
 `src-tauri/` becomes a small Cargo workspace. `cargo` commands keep running from `src-tauri/`
 and `Cargo.lock` stays where it is.
 
@@ -112,23 +136,33 @@ src-tauri/
 ├── src/
 │   ├── lib.rs              # builder, managed state, plugins, event forwarder
 │   └── commands/           # #[tauri::command] wrappers
-└── crates/core/
+└── crates/core/            # package simplecalendar-core
     └── src/
         ├── lib.rs          # CalendarService, CoreEvent
         ├── model/          # Source, Calendar, Event, Occurrence
-        ├── db/             # connection, migrations, queries
+        ├── db/             # connections, migrations, queries
         ├── provider/       # traits, ics, google
         ├── sync/           # engine, outbox, backoff
-        ├── recurrence/     # RRULE expansion
+        ├── recurrence/     # RRULE expansion, time zone resolution
         ├── reminders/      # scheduler
         └── secrets/        # keychain
 ```
 
-The rule: `core` never depends on `tauri`. The compiler enforces it, because `tauri` is simply
-not in that crate's `Cargo.toml`. Two practical benefits: the recurrence and sync tests compile
-without the Tauri and WebKit stack, and the same crate can sit behind a mobile shell later.
+The package is named **`simplecalendar-core`** and is imported as `simplecalendar_core`. It
+must not be named `core`: that is the name of Rust's built-in library that every crate links
+(`core::fmt`, `core::option`, and so on), and a package with the same name makes those paths
+ambiguous. The directory can stay `crates/core`, since the directory name plays no role in name
+resolution. "The core" in this document always means this package.
+
+The rule: `simplecalendar-core` never depends on `tauri`. The compiler enforces it, because
+`tauri` is simply not in that package's `Cargo.toml`. Two practical benefits: the recurrence
+and sync tests compile without the Tauri and WebKit stack, and the same crate can sit behind a
+mobile shell later.
 
 ## 4. Data model
+
+_Needed from: v1, first needed by local calendars. Fields that only matter for remote
+calendars are marked below._
 
 Three persisted entities and one computed value.
 
@@ -161,33 +195,61 @@ Three persisted entities and one computed value.
 ### Event
 
 - **Times.** `start_utc` and `end_utc` are seconds since the Unix epoch, with `end_utc`
-  exclusive. `start_tz` is the IANA zone the event was created in (for example
-  `Europe/Brussels`). The zone is needed for recurrence: a weekly meeting at 09:00 in Brussels
-  must stay at 09:00 local time when daylight saving changes, which moves its UTC time.
-- **All-day events** have no zone: "25 December" is the same date everywhere. They are stored
-  with `all_day = 1` and both timestamps at midnight UTC of their dates. Rust converts them to
-  plain dates when reading.
+  exclusive. `start_tz` says how to interpret them:
+
+  | `start_tz`              | `all_day` | Kind          | Meaning                                                   |
+  | ----------------------- | --------- | ------------- | --------------------------------------------------------- |
+  | IANA name               | 0         | zoned         | The normal case, for example `Europe/Brussels`            |
+  | offset such as `+05:30` | 0         | fixed offset  | Only for ICS events whose zone could not be mapped (§7.7) |
+  | `NULL`                  | 0         | floating time | The same wall-clock time wherever the viewer is (§7.7)    |
+  | `NULL`                  | 1         | all-day       | A date. "25 December" is the same date everywhere         |
+
+  The zone is needed for recurrence: a weekly meeting at 09:00 in Brussels must stay at 09:00
+  local time when daylight saving changes, which moves its UTC time. Floating and all-day
+  values store their wall-clock time as if it were UTC, and Rust reinterprets it in the
+  viewer's zone when reading.
+
 - **Recurring series.** The master row carries the recurrence lines (`RRULE`, `RDATE`,
   `EXDATE`) exactly as iCalendar and Google express them. Its `start_utc` and `end_utc`
   describe the first occurrence.
-- **Exceptions.** An edited occurrence is its own row that points at the master through
-  `recurring_event_id` and names the occurrence it replaces through `original_start_utc`. A
-  deleted occurrence is the same kind of row with `status = 'cancelled'`. Google sends
-  exceptions in exactly this shape, so nothing has to be translated.
+- **Exceptions.** An edited occurrence is its own row. It names its series twice:
+  `recurring_remote_id` is the master's remote id and is always set; `recurring_event_id` is the
+  local row id of the master and is filled in as soon as that row exists (§7.2 explains why
+  both are needed). `original_start_utc` names the occurrence it replaces. A deleted occurrence
+  is the same kind of row with `status = 'cancelled'`. Google sends exceptions in exactly this
+  shape.
 - **Identity.** `remote_id` is the provider's id. For events created in this app it is
   generated here, before the event is sent (§7.3).
+- **Editability** (first needed by Google read). An event on a writable calendar can still be
+  one you are not allowed to change, typically a meeting someone else organised. Two flags are
+  stored from the provider: `is_organizer` (Google: `organizer.self`) and `guests_can_modify`
+  (Google: `guestsCanModify`).
+
+  **An event is editable only if** its calendar is writable **and** (`is_organizer` **or**
+  `guests_can_modify`).
+
+  A non-editable event is fully read-only in v1: no edit, no delete, no "only this event".
+  `CalendarService` enforces this and returns a `NotEditable` error; it does not rely on the UI
+  hiding a button. The alternative, sending the edit and letting Google decide, is rejected:
+  the result would either be a rollback after the fact or a change that only exists in your own
+  copy of the event. Local events are always `is_organizer = 1`. The two flags are never sent
+  back to the server.
 
 ### Occurrence
 
 `list_occurrences(from, to)` returns occurrences, not events. An occurrence is identified by
 `(event_id, original_start)`. For a single event `original_start` equals its start. For a
-recurring one it is the start the rule produced, even if an exception moved it.
+recurring one it is the start the rule produced, even if an exception moved it. Each occurrence
+carries an `editable` flag computed by the rule above.
 
 Occurrences are computed for the requested range only and are never written to the database.
 A series without an end date has infinitely many, so storing them is not an option, and
 computing a month of them is cheap.
 
 ## 5. Provider trait
+
+_Needed from: v1. `CalendarProvider` is first needed by ICS subscriptions, `WritableProvider`
+by Google write. A CalDAV implementation is after v1._
 
 ### Shape
 
@@ -244,7 +306,7 @@ pub trait WritableProvider: CalendarProvider {
         &self,
         cx: &SourceContext,
         calendar: &CalendarRef,
-        draft: &EventDraft,
+        update: &EventUpdate,
         if_match: Option<&Etag>,
     ) -> Result<RemoteEvent, ProviderError>;
 
@@ -255,6 +317,15 @@ pub trait WritableProvider: CalendarProvider {
         id: &RemoteId,
         if_match: Option<&Etag>,
     ) -> Result<(), ProviderError>;
+}
+
+/// An edit, as the engine hands it to a provider.
+pub struct EventUpdate {
+    pub id: RemoteId,
+    /// The complete state the user wants.
+    pub desired: EventDraft,
+    /// Which fields differ from the state the server last confirmed.
+    pub changed: FieldSet,
 }
 
 pub struct ChangeSet {
@@ -308,6 +379,11 @@ Rust notes, since these parts are not obvious:
 provider. `Capabilities` exists because the UI needs plain data to decide whether to show an
 edit button.
 
+`EventUpdate` carries both the full desired state and the set of changed fields, because
+providers need different things. Google sends only the changed fields (§7.5). CalDAV will have
+to write a whole iCalendar object and needs the full state. The engine computes `changed` once,
+by comparing the outbox row's `base` and `payload`, so that logic is not repeated per provider.
+
 ### Rules for providers
 
 - **No database access.** A provider receives what it needs (`SourceContext` carries the HTTP
@@ -315,46 +391,96 @@ edit button.
   database work. This keeps providers testable against a mock HTTP server, and the engine
   testable with a fake provider.
 - **The cursor is opaque.** The engine stores `SyncCursor` and hands it back, nothing else.
+- **No ordering promise.** Events in a change set may come in any order, and an exception may
+  arrive pages before its master. The engine deals with that (§7.2), so providers do not sort.
 - **Errors are classified by the provider.** The engine only reacts to the six variants above.
 
 ### Providers
 
-| Provider | Writable | Cursor contents                                                                                      |
-| -------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| ICS      | no       | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                                    |
-| Google   | yes      | `nextSyncToken`                                                                                      |
-| CalDAV   | yes      | Later: a WebDAV sync-token, or the collection ctag plus the per-event ETags already in `events.etag` |
+| Provider | Writable | Needed from               | Cursor contents                                                                               |
+| -------- | -------- | ------------------------- | --------------------------------------------------------------------------------------------- |
+| ICS      | no       | v1, ICS subscriptions     | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                             |
+| Google   | yes      | v1, Google read and write | `nextSyncToken`                                                                               |
+| CalDAV   | yes      | after v1                  | A WebDAV sync-token, or the collection ctag plus the per-event ETags already in `events.etag` |
 
 **Local calendars are not a provider.** A source of kind `local` has no provider at all. The
 sync engine skips it, and writes to its calendars do not create outbox rows.
 
 ### What CalDAV needs from this design
 
+_After v1._
+
 Nothing in v1, but the trait was shaped so it fits later without changes:
 
 - `pull` with an opaque cursor covers both CalDAV strategies (sync-token reports, or comparing
   ETags).
 - `if_match` on update and delete is how CalDAV does optimistic locking too.
+- `EventUpdate.desired` gives it the full state for a whole-object write.
 - `events.etag` and `events.ical_uid` exist from the first migration.
 - `full = true` covers servers without incremental sync.
 
 ## 6. SQLite schema
 
+_Needed from: v1, first needed by local calendars. The table after the DDL says which feature
+first needs each table._
+
 One database file in the app-data directory. The schema is created by numbered migrations; the
 current migration number is stored in SQLite's built-in `PRAGMA user_version`.
 
-Set on every connection:
+### Two connections
+
+There is one **write connection** and one **read connection**, each behind its own mutex.
+
+| Connection | Used by                                                | Opened                  |
+| ---------- | ------------------------------------------------------ | ----------------------- |
+| write      | `CalendarService` writes, the sync engine, migrations  | read-write              |
+| read       | Everything the UI asks for, and the reminder scheduler | read-only, `query_only` |
+
+The reason is rule 2 of §2: the UI never waits. With a single connection, a
+`list_occurrences` call would queue behind whatever the sync engine is writing, and applying a
+page of a first sync can take long enough to be noticed. In WAL mode a reader on its own
+connection is not blocked by a writer and sees the last committed state. A read never observes
+half a transaction.
+
+Details:
+
+- All writes go through the one write connection, so there is never a second writer to wait
+  for and `SQLITE_BUSY` cannot occur between our own components.
+- A command that writes computes its return value on the write connection, inside or right
+  after its transaction, so it cannot return a stale view of its own change.
+- `calendar:changed` is emitted after commit, so the re-query it triggers sees the new data.
+- The cost is a second page cache. Both connections cap theirs with `PRAGMA cache_size`.
+- SQLite calls are blocking, so both connections are used through
+  `tokio::task::spawn_blocking`, which moves the call to a thread where blocking is allowed.
+- Rust note: a `rusqlite::Connection` may be moved between threads (`Send`) but not used from
+  two at once (not `Sync`). Wrapping each in a `Mutex` inside an `Arc` is what makes sharing it
+  between tasks legal.
+
+On the write connection:
 
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+PRAGMA cache_size = -2000;
 ```
 
-`WAL` lets a read proceed while a write is in progress. `foreign_keys` is off by default in
-SQLite and has to be switched on, otherwise `ON DELETE CASCADE` does nothing.
+On the read connection:
 
-Migration 1:
+```sql
+PRAGMA query_only = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA cache_size = -2000;
+```
+
+`foreign_keys` is off by default in SQLite and has to be switched on, otherwise
+`ON DELETE CASCADE` does nothing. `cache_size = -2000` means 2000 KiB. `journal_mode` is stored
+in the database file, so the read connection inherits it.
+
+### Tables
+
+The DDL shows the state at the end of v1. Tables can be introduced by later migrations when
+their feature lands; they do not all have to be in migration 1.
 
 ```sql
 CREATE TABLE sources (
@@ -401,19 +527,24 @@ CREATE TABLE events (
     all_day               INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1)),
     start_utc             INTEGER NOT NULL,     -- epoch seconds
     end_utc               INTEGER NOT NULL,     -- epoch seconds, exclusive
-    start_tz              TEXT,                 -- IANA name; NULL for all-day events
+    start_tz              TEXT,                 -- IANA name, '+hh:mm', or NULL (floating, all-day)
     end_tz                TEXT,
     recurrence            TEXT,                 -- RRULE/RDATE/EXDATE lines; NULL if not a master
     recurrence_end_utc    INTEGER,              -- end of the last occurrence; NULL = no end
+    recurring_remote_id   TEXT,                 -- exceptions: remote id of the master, always set
     recurring_event_id    INTEGER REFERENCES events (id) ON DELETE CASCADE,
+                                                -- exceptions: master's row id, once it exists
     original_start_utc    INTEGER,              -- the occurrence an exception replaces
+    is_organizer          INTEGER NOT NULL DEFAULT 1 CHECK (is_organizer IN (0, 1)),
+    guests_can_modify     INTEGER NOT NULL DEFAULT 0 CHECK (guests_can_modify IN (0, 1)),
     use_default_reminders INTEGER NOT NULL DEFAULT 1 CHECK (use_default_reminders IN (0, 1)),
     pending_delete        INTEGER NOT NULL DEFAULT 0 CHECK (pending_delete IN (0, 1)),
     remote_updated_at     INTEGER,
     UNIQUE (calendar_id, remote_id),
     CHECK (end_utc >= start_utc),
-    CHECK ((recurring_event_id IS NULL) = (original_start_utc IS NULL)),
-    CHECK (recurrence IS NULL OR recurring_event_id IS NULL)
+    CHECK ((recurring_remote_id IS NULL) = (original_start_utc IS NULL)),
+    CHECK (recurring_event_id IS NULL OR recurring_remote_id IS NOT NULL),
+    CHECK (recurrence IS NULL OR recurring_remote_id IS NULL)
 ) STRICT;
 
 CREATE INDEX events_single ON events (calendar_id, start_utc, end_utc)
@@ -422,6 +553,8 @@ CREATE INDEX events_masters ON events (calendar_id)
     WHERE recurrence IS NOT NULL;
 CREATE INDEX events_exceptions ON events (recurring_event_id)
     WHERE recurring_event_id IS NOT NULL;
+CREATE INDEX events_unlinked ON events (calendar_id, recurring_remote_id)
+    WHERE recurring_remote_id IS NOT NULL AND recurring_event_id IS NULL;
 
 CREATE TABLE event_reminders (
     event_id       INTEGER NOT NULL REFERENCES events (id) ON DELETE CASCADE,
@@ -464,9 +597,20 @@ CREATE TABLE settings (
 ) STRICT, WITHOUT ROWID;
 ```
 
+| Table or column                                                     | First needed by   |
+| ------------------------------------------------------------------- | ----------------- |
+| `sources`, `calendars`, `events`, `settings`                        | local calendars   |
+| `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked` | ICS subscriptions |
+| `events.etag`, `events.is_organizer`, `events.guests_can_modify`    | Google read       |
+| `outbox`, `events.pending_delete`                                   | Google write      |
+| `event_reminders`, `fired_reminders`, `calendars.default_reminders` | reminders         |
+
 Notes:
 
 - `STRICT` makes SQLite reject a value of the wrong type instead of storing it anyway.
+- Rows are always updated with `INSERT ... ON CONFLICT DO UPDATE`, never `INSERT OR REPLACE`.
+  The latter deletes and re-creates the row: it would get a new `id`, and the cascade would
+  delete the exceptions of a series every time its master is synced.
 - `event_reminders.method` keeps Google's `email` reminders intact when an event is saved back.
   Only `popup` reminders produce a notification.
 - `settings` holds non-secret preferences (week start, sync intervals, an optional OAuth client
@@ -475,18 +619,20 @@ Notes:
 
 ### Reading a date range
 
-Two queries, then expansion in Rust. Both ranges are widened by 14 hours on each side before
-querying, because an all-day event stored at midnight UTC can fall on the neighbouring day in
-the viewer's zone. Rust filters the result precisely.
+Two queries on the read connection, then expansion in Rust. Both ranges are widened by 14 hours
+on each side before querying, because all-day and floating events are stored as if in UTC and
+can fall on the neighbouring day in the viewer's zone. Rust filters the result precisely.
 
 ```sql
--- Single events and exceptions that overlap the range.
+-- Single events and linked exceptions that overlap the range.
 SELECT e.*
 FROM events e
 JOIN calendars c ON c.id = e.calendar_id
 WHERE c.visible = 1
   AND e.recurrence IS NULL
   AND e.pending_delete = 0
+  AND e.status <> 'cancelled'
+  AND (e.recurring_remote_id IS NULL OR e.recurring_event_id IS NOT NULL)
   AND e.start_utc < :to
   AND e.end_utc > :from;
 
@@ -502,20 +648,18 @@ WHERE c.visible = 1
 ```
 
 For each series the `recurrence` module expands the rule inside the range, in the event's own
-zone. All exceptions of that series are loaded through `events_exceptions`; each one removes the
-occurrence it replaces. Exceptions that are not cancelled already appear in the first query, at
-their own (possibly moved) time.
-
-### Access from Rust
-
-One `rusqlite::Connection` behind a mutex, shared through an `Arc`. SQLite calls are blocking,
-so they run through `tokio::task::spawn_blocking`, which moves them to a thread where blocking
-is allowed and keeps the async threads free. One connection is enough: queries take
-microseconds to low milliseconds, and a pool would only cost memory.
+zone. All exceptions of that series, cancelled ones included, are loaded through
+`events_exceptions`; each one removes the occurrence it replaces. Exceptions that are not
+cancelled appear through the first query, at their own (possibly moved) time. An exception that
+is not linked to a master yet is invisible to both queries (§7.2).
 
 ## 7. Sync engine
 
+_Needed from: v1, first needed by ICS subscriptions. Subsections that need more are marked._
+
 ### 7.1 Structure
+
+_First needed by ICS subscriptions._
 
 One long-lived task owns a queue of commands (`SyncNow(source)`, `LocalWrite(source)`,
 `Shutdown`). At most one sync cycle runs per source at a time. A request that arrives during a
@@ -534,6 +678,8 @@ Triggers:
 
 ### 7.2 One cycle for one source
 
+_First needed by ICS subscriptions. Step 2 is first needed by Google write._
+
 1. **Authenticate.** Get an access token, refreshing it if needed.
 2. **Push.** Send due outbox rows in order (§7.3).
 3. **List calendars.** Add new ones, update names, colours and access, remove those that are
@@ -546,15 +692,81 @@ Triggers:
 
 Push comes before pull so that the pull already sees the result of our own writes.
 
-Applying a page:
+#### Applying a page
 
-- Series masters are applied before exceptions, since an exception references its master.
 - For a full pull (`full = true`) the engine remembers every remote id it saw. After the last
   page it deletes local events that were not seen, except those that still have a pending
   `create` in the outbox.
 - An upsert for an event that has a pending outbox row is a conflict (§7.4).
+- Exceptions and masters are linked as described next.
+
+#### Exceptions that arrive before their master
+
+A provider gives no ordering promise. In a paged Google sync an exception can be on page 1 and
+its master on page 3, each page being its own transaction. An ICS file may list a
+`RECURRENCE-ID` component before the event it belongs to. A foreign key to the master's row id
+alone cannot express "the master is not here yet".
+
+**Chosen: store the master's remote id on the exception and link when both exist.**
+
+- Every exception stores `recurring_remote_id`. That value is known the moment the exception
+  arrives, whatever the order.
+- `recurring_event_id` (the row id, with the foreign key and cascade) is filled in by two
+  statements, both inside the transaction of the page being applied:
+
+```sql
+-- After upserting an exception: link it if its master is already here.
+UPDATE events
+SET recurring_event_id = (
+    SELECT m.id
+    FROM events m
+    WHERE m.calendar_id = events.calendar_id
+      AND m.remote_id = events.recurring_remote_id
+)
+WHERE id = :exception_id;
+
+-- After upserting a master: adopt the exceptions that arrived before it.
+UPDATE events
+SET recurring_event_id = :master_id
+WHERE calendar_id = :calendar_id
+  AND recurring_remote_id = :master_remote_id
+  AND recurring_event_id IS NULL;
+
+-- After the last page of a full pull: remove exceptions whose series never arrived.
+DELETE FROM events
+WHERE calendar_id = :calendar_id
+  AND recurring_remote_id IS NOT NULL
+  AND recurring_event_id IS NULL;
+```
+
+- The result is an invariant that holds at every commit: **an exception is linked if and only
+  if its master exists locally.**
+- An unlinked exception is invisible to every read query. So the UI can be missing an edited
+  occurrence for the duration of a first sync, but it never shows an occurrence twice (once
+  from the rule, once from the exception), and never shows an exception as a stray single
+  event.
+- After an incremental pull, unlinked exceptions are left alone and logged. They can only come
+  from inconsistent server data, and the next full pull removes them.
+
+**Rejected: a staging table.** All pages would be written to a staging table first and applied
+in one transaction at the end, masters first.
+
+|                              | Remote id + link (chosen)                                                   | Staging table                                      |
+| ---------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------- |
+| Extra schema                 | One column, one partial index                                               | A table that mirrors `events` or holds JSON        |
+| Writes per synced event      | One                                                                         | Two (stage, then apply)                            |
+| First sync of a big calendar | Events appear page by page                                                  | Nothing appears until the last page is in          |
+| Largest transaction          | One page                                                                    | The whole calendar, with the write connection held |
+| Incremental pulls            | Same code path                                                              | Still needs ordering logic, or stages those too    |
+| Other uses                   | Providers need the master's remote id anyway to address a single occurrence | None                                               |
+
+The staging table's one advantage is that a first sync becomes visible all at once. That is not
+worth doubling the writes and holding one long transaction, and the invisibility rule above
+already prevents wrong intermediate states.
 
 ### 7.3 Outbox
+
+_First needed by Google write._
 
 A local edit to a remote calendar is one SQLite transaction that
 
@@ -567,10 +779,13 @@ Either both happen or neither.
 Rules:
 
 - **Order.** Rows are processed by `id`. Rows for the same event never overtake each other.
+- **Only the difference is sent.** When a row is pushed, the engine compares `base` and
+  `payload` field by field and hands the provider the set of changed fields (§5). If nothing
+  differs, for example after an edit that was undone, the row is deleted without a request.
 - **Coalescing.** A second edit to an event that still has a pending row updates that row's
-  payload and keeps the original `base`. An update to an event with a pending `create` merges
-  into the create. A delete of an event with a pending `create` removes both: the server never
-  hears about it.
+  payload and keeps the original `base`, so the difference is always against what the server
+  has. An update to an event with a pending `create` merges into the create. A delete of an
+  event with a pending `create` removes both: the server never hears about it.
 - **Deletes.** The row stays in `events` with `pending_delete = 1` and is hidden from queries.
   It is removed once the server confirms.
 - **Safe retries for creates.** The event id is generated here (a UUID in hexadecimal, which
@@ -597,6 +812,8 @@ saved") and the user can dismiss or redo them. They no longer block later edits 
 
 ### 7.4 Conflicts: server wins
 
+_First needed by Google write._
+
 A conflict is one of:
 
 - the server answers an update or delete with HTTP 412, because the ETag no longer matches, or
@@ -604,8 +821,8 @@ A conflict is one of:
 
 Handling:
 
-1. On 412 the engine fetches the event once. If the remote copy already equals what we wanted
-   to write, our earlier attempt succeeded and only its response was lost: store the ETag,
+1. On 412 the engine fetches the event once. If the remote copy already has our value in every
+   changed field, our earlier attempt succeeded and only its response was lost: store the ETag,
    delete the row, no notice. This avoids false conflict reports after a dropped connection.
 2. Otherwise the remote version replaces the local row, the outbox row becomes `conflicted`
    with its `payload` intact, and `sync:conflict` is emitted.
@@ -629,7 +846,8 @@ sequenceDiagram
     SV->>EN: LocalWrite
     Note over EN: wait 2 seconds for more edits
     EN->>DB: read next due outbox row
-    EN->>G: update event with If-Match
+    Note over EN: compare base and payload
+    EN->>G: patch changed fields with If-Match
     alt success
         G-->>EN: event with new ETag
         EN->>DB: store ETag, delete outbox row
@@ -637,7 +855,7 @@ sequenceDiagram
         G-->>EN: 412
         EN->>G: get event
         G-->>EN: current remote event
-        alt remote already equals our change
+        alt remote already has our changed fields
             EN->>DB: store ETag, delete outbox row
         else remote differs
             EN->>DB: replace row with remote version, mark outbox row conflicted
@@ -654,26 +872,59 @@ sequenceDiagram
 
 ### 7.5 Google specifics
 
+_Reading is first needed by Google read, writing by Google write._
+
 Checked against Google's Calendar API documentation on 2026-10-13.
+
+Reading:
 
 - **First sync:** `events.list` without a token, following `nextPageToken` until the last page,
   which carries `nextSyncToken`. The provider returns `full = true`.
 - **Incremental sync:** the same request with `syncToken`. The request parameters must be the
   same as in the first sync, and most filters cannot be combined with a sync token.
 - **Recurring events** are requested unexpanded (`singleEvents=false`), so the response
-  contains masters and exceptions, which is what the schema stores.
+  contains masters and exceptions, which is what the schema stores. Their order is not
+  guaranteed (§7.2).
 - **Deletions** arrive as events with `status = cancelled`. A cancelled entry that has a
   `recurringEventId` is a cancelled occurrence and is stored as an exception. A cancelled entry
   without one is a real deletion.
 - **HTTP 410** means the sync token expired. The provider returns `CursorInvalid`, the engine
   clears the cursor and runs a full pull.
-- **Writes** send `If-Match` with the stored ETag; a mismatch is HTTP 412.
-- **"Only this event"** edits address the single occurrence on Google's side. How that
-  occurrence is looked up is internal to `GoogleProvider`.
+- **Zones.** Google uses IANA names. An event without `start.timeZone` takes the zone of its
+  calendar.
+- **Editability.** `organizer.self` and `guestsCanModify` are stored as `is_organizer` and
+  `guests_can_modify` (§4). Both default to false when absent, as documented.
 - **Reminders** map to `reminders.useDefault` and `reminders.overrides` (at most 5, each 0 to
   40320 minutes). Calendar defaults are stored in `calendars.default_reminders`.
 
+Writing:
+
+- **Edits use `events.patch`, never `events.update`.** The request body contains only the
+  fields in `EventUpdate.changed`. An update replaces the whole event, and this app stores only
+  part of one: guests, conferencing details, attachments and extended properties would be
+  erased by every edit. A patch leaves everything it does not mention untouched.
+- **Arrays are replaced as a whole** by a patch. `recurrence` and `reminders.overrides` are
+  arrays this app owns completely, so they are sent in full when they changed. `attendees` is
+  an array this app does not store and is therefore never sent.
+- **Cost.** A patch counts as three quota units. Google's reference suggests a get followed by
+  an update to save quota. That is not done here: it is two requests per edit, and the update
+  would still have to carry back every field the app does not model. Edits by one person are
+  far too infrequent for the difference to matter.
+- **`sendUpdates` is set on every insert, patch and delete.** It is passed explicitly because
+  the reference does not state a default for it. The value in v1 is `none`. The app has no
+  guest list and cannot ask "notify the guests?", so it does not send email in the user's name.
+  Consequence: guests who use Google Calendar see the change in their calendar, guests on other
+  systems are not told. This is revisited together with attendee support (§13).
+- **Preconditions.** Patches and deletes send `If-Match` with the stored ETag; a mismatch is
+  HTTP 412.
+- **"Only this event"** edits address the single occurrence on Google's side, using the
+  master's remote id and the original start. How that occurrence is looked up is internal to
+  `GoogleProvider`.
+- **Never sent:** `organizer`, `guestsCanModify`, and anything else the app only reads.
+
 ### 7.6 ICS specifics
+
+_First needed by ICS subscriptions._
 
 - `webcal://` URLs are rewritten to `https://`.
 - The request sends `If-None-Match` and `If-Modified-Since` from the cursor. HTTP 304 means
@@ -681,10 +932,98 @@ Checked against Google's Calendar API documentation on 2026-10-13.
 - Otherwise the body is hashed. If the hash equals the one in the cursor, nothing changed
   either (many servers do not support conditional requests).
 - If it did change, the feed is parsed and returned as one `full = true` change set.
-- `remote_id` is the event's `UID`, combined with `RECURRENCE-ID` for exceptions.
+- `remote_id` is the event's `UID`, combined with `RECURRENCE-ID` for exceptions. The master's
+  remote id of an exception is the plain `UID`.
+- Components may appear in any order in the file (§7.2).
 - Alarms inside a feed (`VALARM`) are ignored in v1.
 
+### 7.7 ICS time zones
+
+_First needed by ICS subscriptions._
+
+Google always gives an IANA zone. ICS feeds do not. A `TZID` can be an IANA name, a Windows
+zone name (Outlook and Exchange), a display string, or a made-up label that only means
+something together with a `VTIMEZONE` block in the same file. A time can also have no zone at
+all.
+
+#### Resolving a `TZID`
+
+The first rule that matches wins.
+
+| Step | The `TZID` is...                                                                                      | Result                                                                                   |
+| ---- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1    | an IANA name, for example `Europe/Brussels` (quotes and spaces trimmed)                               | that zone                                                                                |
+| 2    | a longer id that ends in an IANA name, for example `/freeassociation.sourceforge.net/Europe/Brussels` | that zone (the longest suffix after a `/` that is a valid name)                          |
+| 3    | a Windows zone name, for example `Romance Standard Time`                                              | the IANA zone from the Windows mapping table                                             |
+| 4    | defined by a `VTIMEZONE` in the feed                                                                  | see "Feed-defined zones" below                                                           |
+| 5    | none of the above                                                                                     | the feed's `X-WR-TIMEZONE` if it resolves, otherwise floating; the source gets a warning |
+
+A name wins over a `VTIMEZONE` with the same id (steps 1 to 3 come before step 4). The
+definitions that exporters embed are often cut down to a single year or out of date, while the
+name states what the author meant.
+
+#### Windows zone names
+
+Outlook and Exchange write `TZID=W. Europe Standard Time` rather than `Europe/Berlin`. These are
+mapped with the `windowsZones` table from the Unicode CLDR project, using the default territory
+(`001`) row for each Windows zone.
+
+The table is about 140 rows. It is generated from the CLDR file by a script and checked into
+the repository with the CLDR version noted, rather than taken from a crate: it is static data,
+and owning it avoids a dependency for something this small. Lookup is case-insensitive.
+
+Display strings such as `(UTC+01:00) Brussels, Copenhagen, Madrid, Paris` are not Windows zone
+ids and are not in that table. Feeds that use them include a `VTIMEZONE`, so they fall through
+to step 4.
+
+#### Feed-defined zones
+
+A `VTIMEZONE` describes a zone as a list of `STANDARD` and `DAYLIGHT` rules, each with an
+offset and a rule for when it starts. Such a zone cannot be stored as an IANA name directly, so
+it is handled in this order:
+
+1. **Hint.** If the block has an `X-LIC-LOCATION` property with a valid IANA name, use it.
+2. **Match by behaviour.** Compute the offset the `VTIMEZONE` gives on the first day of every
+   month, from the event's start until three years later. Find the IANA zones that give the
+   same offsets on all those days. If the feed's `X-WR-TIMEZONE` is among them, use it;
+   otherwise use the first in alphabetical order. Any of them behaves identically over the
+   compared period, so the choice does not change what is displayed.
+3. **Fixed offset.** If no IANA zone matches, the offset the `VTIMEZONE` gives for that
+   date-time is used to compute the correct UTC instant, and `start_tz` stores that offset
+   (`+05:30`). A recurring event then repeats at a fixed offset, which is wrong across a
+   daylight-saving change in such a zone. The source gets a warning. Real zones always match in
+   step 2, so this is the path for broken data.
+
+This needs a small evaluator for `VTIMEZONE` rules (which offset applies at a given local
+time). It lives in the `recurrence` module next to the expansion code.
+
+#### Floating times
+
+A time with no `TZID` and no `Z` is "floating" in iCalendar: 09:00 means 09:00 wherever the
+viewer is.
+
+- **If the feed declares `X-WR-TIMEZONE`,** a time without a zone is read in that zone and
+  stored as a normal zoned event. This is a deliberate deviation from the standard. It follows
+  the common convention: feeds that set this property and leave out `TZID` mean "all times are
+  in this zone", and genuinely floating events are rare in subscription feeds.
+- **Otherwise it is stored as floating:** `start_tz` is `NULL`, `all_day` is 0, and the
+  timestamps hold the wall-clock time as if it were UTC. On read, Rust interprets it in the
+  viewer's zone, so it shows at the same clock time for everyone. Recurrence is expanded on the
+  wall clock, with no daylight-saving adjustment.
+
+#### Mixed forms inside one event
+
+The parts of one event do not have to use the same form: a start with a `TZID`, exclusion dates
+in UTC, a `RECURRENCE-ID` that is floating. Every value is resolved on its own with the rules
+above, and occurrences, exclusions and exceptions are matched by instant, never by comparing
+the text.
+
+The test cases for all of this are listed in §12.
+
 ## 8. Credentials
+
+_Needed from: v1, first needed by ICS subscriptions (the feed URL is the first secret). The
+Google sign-in part is first needed by Google read._
 
 ### What is stored where
 
@@ -742,6 +1081,8 @@ plan includes a test in a session without a keyring to pin that mapping down.
 
 ### Google sign-in
 
+_First needed by Google read._
+
 - OAuth 2.0 authorization code flow with PKCE, for an "installed application".
 - The app listens on `127.0.0.1` on a free port, opens the system browser at Google's consent
   page with that address as redirect URI, receives the code, and exchanges it for tokens. The
@@ -761,6 +1102,8 @@ plan includes a test in a session without a keyring to pin that mapping down.
 
 ## 9. Reminders
 
+_Needed from: v1, first needed by reminders. Confirmed in review: reminders stay in v1._
+
 - A scheduler task in the core looks at the occurrences of the next 24 hours, computes the
   earliest due reminder, and sleeps until then. It recomputes whenever the database changes.
 - When a reminder is due it writes a `fired_reminders` row and emits `CoreEvent::ReminderDue`.
@@ -769,125 +1112,251 @@ plan includes a test in a session without a keyring to pin that mapping down.
   pruned at startup.
 - A reminder that became due while the app was closed is still shown at the next start if the
   event has not started yet. Otherwise it is skipped.
+- All-day and floating events have no zone of their own. Their reminders are scheduled in the
+  display zone the frontend last reported (§10).
 - The scheduler does not know whether a window exists. Running it from a tray process later
   needs no change in the core.
 
 ## 10. Frontend contract
 
+_Needed from: v1, first needed by local calendars. Each row says which feature first needs it._
+
 Commands (all async, all return `Result`):
 
-| Command                                  | Purpose                                                       |
-| ---------------------------------------- | ------------------------------------------------------------- |
-| `get_status`                             | Keyring availability, sources needing sign-in, open conflicts |
-| `list_sources`, `remove_source`          | Manage accounts and subscriptions                             |
-| `add_ics_source(url, name)`              | Subscribe to a feed                                           |
-| `begin_google_sign_in`                   | Start the OAuth flow; resolves when the browser step finishes |
-| `list_calendars`, `update_calendar`      | Visibility and colour override                                |
-| `create_local_calendar`                  | New calendar in the local source                              |
-| `list_occurrences(from, to, tz)`         | Everything the views render                                   |
-| `get_event(event_id)`                    | Full detail for the editor                                    |
-| `create_event(draft)`                    | Returns the new occurrence                                    |
-| `update_event(target, scope, draft)`     | `scope` is `this` or `all`                                    |
-| `delete_event(target, scope)`            |                                                               |
-| `sync_now(source?)`                      | Manual refresh                                                |
-| `list_sync_issues`, `dismiss_sync_issue` | `conflicted` and `failed` outbox rows                         |
+| Command                                  | Purpose                                                       | First needed by   |
+| ---------------------------------------- | ------------------------------------------------------------- | ----------------- |
+| `list_calendars`, `update_calendar`      | Visibility and colour override                                | local calendars   |
+| `create_local_calendar`                  | New calendar in the local source                              | local calendars   |
+| `list_occurrences(from, to, tz)`         | Everything the views render                                   | local calendars   |
+| `get_event(event_id)`                    | Full detail for the editor                                    | local calendars   |
+| `create_event(draft)`                    | Returns the new occurrence                                    | local calendars   |
+| `update_event(target, scope, draft)`     | `scope` is `this` or `all`                                    | local calendars   |
+| `delete_event(target, scope)`            |                                                               | local calendars   |
+| `get_status`                             | Keyring availability, sources needing sign-in, open conflicts | ICS subscriptions |
+| `list_sources`, `remove_source`          | Manage accounts and subscriptions                             | ICS subscriptions |
+| `add_ics_source(url, name)`              | Subscribe to a feed                                           | ICS subscriptions |
+| `sync_now(source?)`                      | Manual refresh                                                | ICS subscriptions |
+| `begin_google_sign_in`                   | Start the OAuth flow; resolves when the browser step finishes | Google read       |
+| `list_sync_issues`, `dismiss_sync_issue` | `conflicted` and `failed` outbox rows                         | Google write      |
 
 Events from Rust to the webview:
 
-| Event              | Payload                      |
-| ------------------ | ---------------------------- |
-| `calendar:changed` | Affected calendar ids        |
-| `sync:status`      | Source id, state, last error |
-| `sync:conflict`    | Outbox row id, event title   |
+| Event              | Payload                      | First needed by   |
+| ------------------ | ---------------------------- | ----------------- |
+| `calendar:changed` | Affected calendar ids        | local calendars   |
+| `sync:status`      | Source id, state, last error | ICS subscriptions |
+| `sync:conflict`    | Outbox row id, event title   | Google write      |
 
 Conventions:
 
 - The frontend passes its IANA zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) to
-  `list_occurrences`. Rust returns wall-clock times in that zone. The frontend lays out and
-  formats, and does no date arithmetic that depends on zones or recurrence.
+  `list_occurrences`. Rust returns wall-clock times in that zone and remembers the zone as the
+  display zone. The frontend does no date arithmetic that depends on zones or recurrence.
 - Timed values cross the boundary as ISO 8601 strings with offset, all-day values as
   `YYYY-MM-DD`.
+- Every occurrence carries `editable`. The frontend uses it to show or hide editing, and the
+  core enforces it regardless (§4).
 - After `calendar:changed` the frontend re-runs `list_occurrences` for the visible range.
 - Notifications and opening the browser are done from Rust. The frontend needs no extra plugin
   permission for them.
 
-## 11. Proposed crates
+### Logic that does live in the frontend
 
-`CLAUDE.md` asks for a justification per dependency. Versions were checked on crates.io on
-2026-10-13. "Already built" means the crate is compiled for the Linux target today because Tauri
-depends on it; this was verified with `cargo tree`. The Windows tree could not be inspected
-offline.
+One piece of non-trivial logic belongs in TypeScript: **the overlap layout of the week and day
+views.** Given the timed occurrences of one day, it decides how many columns an overlapping
+group needs and which column each event gets. That is geometry for one particular view, not
+calendar logic, so it does not belong in the core.
 
-### Core crate
+It is written as a pure function in `src/lib/` that takes plain data (start and end as minutes
+of the day) and returns plain data (column index and column count per event). It touches no
+DOM and no Svelte state, which makes it testable without a browser (§12).
 
-| Crate                                   | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        |
-| --------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `rusqlite` 0.40, feature `bundled`      | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) |
-| `rusqlite_migration` 2.6                | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   |
-| `tokio` 1                               | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                |
-| `reqwest` 0.13                          | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  |
-| `chrono` 0.4, `chrono-tz` 0.10          | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            |
-| `rrule` 0.14                            | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   |
-| `icalendar` 0.17, feature `parser`      | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         |
-| `keyring-core` 1.0                      | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          |
-| `dbus-secret-service-keyring-store` 1.0 | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      |
-| `windows-native-keyring-store` 1.1      | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 |
-| `oauth2` 5.0                            | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 |
-| `async-trait`                           | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   |
-| `thiserror` 2                           | Error enums                          | Already built                                                                                                                                                |                                                                                                 |
-| `uuid` 1                                | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 |
-| `serde`, `serde_json`, `log`            | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 |
-| `wiremock` 0.6 (dev only)               | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 |
+## 11. Proposed dependencies
+
+_Needed from: v1. Each row says which feature first needs it._
+
+`CLAUDE.md` asks for a justification per dependency. Versions were checked on crates.io and npm
+on 2026-10-13. "Already built" means the crate is compiled for the Linux target today because
+Tauri depends on it; this was verified with `cargo tree`. The Windows tree could not be
+inspected offline.
+
+### Core crate (`simplecalendar-core`)
+
+| Crate                                   | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        | First needed by   |
+| --------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------- |
+| `rusqlite` 0.40, feature `bundled`      | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) | local calendars   |
+| `rusqlite_migration` 2.6                | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   | local calendars   |
+| `tokio` 1                               | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                | local calendars   |
+| `chrono` 0.4, `chrono-tz` 0.10          | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            | local calendars   |
+| `rrule` 0.14                            | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   | local calendars   |
+| `thiserror` 2                           | Error enums                          | Already built                                                                                                                                                |                                                                                                 | local calendars   |
+| `uuid` 1                                | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | local calendars   |
+| `serde`, `serde_json`, `log`            | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | local calendars   |
+| `reqwest` 0.13                          | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | ICS subscriptions |
+| `icalendar` 0.17, feature `parser`      | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | ICS subscriptions |
+| `sha2` 0.11                             | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway                                                                                                                | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | ICS subscriptions |
+| `async-trait`                           | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | ICS subscriptions |
+| `keyring-core` 1.0                      | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | ICS subscriptions |
+| `dbus-secret-service-keyring-store` 1.0 | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | ICS subscriptions |
+| `windows-native-keyring-store` 1.1      | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | ICS subscriptions |
+| `wiremock` 0.6 (dev only)               | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | ICS subscriptions |
+| `oauth2` 5.0                            | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | Google read       |
 
 The two keychain store crates are platform-specific dependencies, so each platform compiles
 only its own.
 
 ### App crate
 
-| Crate                         | Purpose                             | Why                   |
-| ----------------------------- | ----------------------------------- | --------------------- |
-| `tauri-plugin-opener` 2       | Open the browser for Google sign-in | Official Tauri plugin |
-| `tauri-plugin-notification` 2 | Reminder notifications              | Official Tauri plugin |
+| Crate                         | Purpose                             | Why                   | First needed by |
+| ----------------------------- | ----------------------------------- | --------------------- | --------------- |
+| `tauri-plugin-opener` 2       | Open the browser for Google sign-in | Official Tauri plugin | Google read     |
+| `tauri-plugin-notification` 2 | Reminder notifications              | Official Tauri plugin | reminders       |
+
+### Frontend (npm)
+
+| Package               | Purpose                           | Why                                                                                                                                             | First needed by |
+| --------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| `vitest` 5 (dev only) | Unit tests for the overlap layout | Runs on the existing Vite config, so there is no second build setup. Its peer range includes Vite 8, which this project uses. Not in the bundle | local calendars |
+
+No DOM emulation package (`jsdom`, `happy-dom`) is added: the function under test is pure.
 
 ### Deliberately not added
 
 - `tauri-plugin-oauth`: the loopback listener is about 40 lines on `tokio::net::TcpListener`.
 - `tauri-plugin-store`, `tauri-plugin-stronghold`: not allowed to hold tokens, not needed for
   anything else.
+- `windows-timezones`: exists, but the mapping is a small static table that is checked in
+  instead (§7.7).
 - A type-generation crate for the frontend types: reconsider once the command list is stable.
 
 ## 12. Testing strategy
 
-- **Recurrence and time zones: tests first**, as `CLAUDE.md` requires. Cases to cover before
-  writing the implementation: daylight-saving changes in both directions, a local time that
-  does not exist or exists twice, all-day series, `UNTIL` and `COUNT`, `EXDATE`, moved and
-  cancelled exceptions, an occurrence moved into or out of the queried range, and a viewer in a
-  different zone than the event.
-- **Database:** every test opens an in-memory SQLite database and runs all migrations.
-- **Providers:** against `wiremock`, with recorded response shapes. Includes pagination, HTTP
-  410, 412, 429 and a lost response on create.
-- **Sync engine:** with a scripted fake provider. Includes coalescing, crash recovery of
-  `in_flight` rows, both conflict paths and the "our write already succeeded" path.
-- **Secrets:** the in-memory store everywhere; the real keychain only in an opt-in test.
-- The frontend has no test runner, which is one more reason to keep logic out of it.
+_Needed from: v1. Each group says which feature first needs it._
+
+### Recurrence and time zones (local calendars)
+
+**Tests first**, as `CLAUDE.md` requires. Cases to cover before writing the implementation:
+daylight-saving changes in both directions, a local time that does not exist or exists twice,
+all-day series, `UNTIL` and `COUNT`, `EXDATE`, moved and cancelled exceptions, an occurrence
+moved into or out of the queried range, and a viewer in a different zone than the event.
+
+### ICS time zones (ICS subscriptions)
+
+Also written before the implementation. Each case is a small feed file in the test fixtures.
+
+| #   | Input                                                                                    | Expected                                                                         |
+| --- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1   | `TZID=Europe/Brussels`                                                                   | Zoned, that zone                                                                 |
+| 2   | Time ending in `Z`                                                                       | Zoned, UTC                                                                       |
+| 3   | `VALUE=DATE`, one day and several days                                                   | All-day, end exclusive                                                           |
+| 4   | `TZID="Europe/Brussels"` (quoted)                                                        | Same as 1                                                                        |
+| 5   | `TZID=/freeassociation.sourceforge.net/Europe/Brussels`                                  | Same as 1                                                                        |
+| 6   | `TZID=Romance Standard Time`, weekly series across both daylight-saving changes          | `Europe/Paris`; every occurrence at the same local time                          |
+| 7   | Every Windows name in the mapping table                                                  | Resolves to a zone that `chrono-tz` knows                                        |
+| 8   | Windows name in different letter case                                                    | Same as 6                                                                        |
+| 9   | `TZID=(UTC+01:00) Brussels, Copenhagen, Madrid, Paris` with a `VTIMEZONE` using EU rules | Matched to an IANA zone with the same offsets; series correct across the changes |
+| 10  | `TZID=Customized Time Zone` with a `VTIMEZONE` at a constant `+05:30`                    | Matched to an IANA zone with that offset                                         |
+| 11  | `VTIMEZONE` with `X-LIC-LOCATION:America/New_York`                                       | That zone, without behavioural matching                                          |
+| 12  | `VTIMEZONE` that no IANA zone matches (offset `+01:17`)                                  | Fixed offset, correct UTC instant, warning on the source                         |
+| 13  | Behavioural match with several candidates and `X-WR-TIMEZONE` among them                 | The `X-WR-TIMEZONE` zone                                                         |
+| 14  | IANA `TZID` plus a `VTIMEZONE` of the same id with wrong rules                           | The name wins                                                                    |
+| 15  | Unknown `TZID`, no `VTIMEZONE`, feed has `X-WR-TIMEZONE`                                 | The `X-WR-TIMEZONE` zone, warning                                                |
+| 16  | Unknown `TZID`, no `VTIMEZONE`, no `X-WR-TIMEZONE`                                       | Floating, warning                                                                |
+| 17  | No `TZID`, no `Z`, no `X-WR-TIMEZONE`                                                    | Floating: 09:00 for a viewer in Brussels and for a viewer in New York            |
+| 18  | No `TZID`, no `Z`, feed has `X-WR-TIMEZONE`                                              | Zoned, in that zone                                                              |
+| 19  | Floating daily series across a daylight-saving change                                    | Same wall-clock time on every day                                                |
+| 20  | Start with `TZID`, `EXDATE` in UTC, `RECURRENCE-ID` in a third form                      | Exclusion and exception hit the right occurrence                                 |
+| 21  | Start and end in different zones                                                         | Correct duration; each end keeps its own zone                                    |
+| 22  | Exception component placed before its master in the file                                 | Linked; no duplicate occurrence                                                  |
+
+### Database (local calendars)
+
+- Query tests open an in-memory SQLite database and run all migrations.
+- Tests that involve both connections use a database file in a temporary directory, because two
+  connections to an in-memory database do not see the same data. One such test holds a write
+  transaction open and checks that a read on the other connection returns immediately with the
+  last committed state.
+
+### Providers (ICS subscriptions, Google read, Google write)
+
+Against `wiremock`, with recorded response shapes. Includes pagination, HTTP 410, 412, 429 and
+a lost response on create. For Google write: the patch body contains exactly the changed
+fields, `attendees` is never present, and `sendUpdates=none` is on every write request.
+
+### Sync engine (ICS subscriptions, then Google write)
+
+With a scripted fake provider:
+
+- **Out-of-order pages:** an exception on page 1 and its master on page 3; the reverse order; a
+  master that never arrives in a full pull; the same in an incremental pull. After every page
+  the "linked if and only if the master exists" invariant is checked, and no query returns an
+  occurrence twice.
+- A master that is updated keeps its row id and its exceptions.
+- Coalescing, an edit that is undone before it is pushed, crash recovery of `in_flight` rows,
+  both conflict paths and the "our write already succeeded" path.
+- **Editability:** every write command is rejected with `NotEditable` for an event that is not
+  editable, for each combination of calendar access, `is_organizer` and `guests_can_modify`.
+
+### Secrets (ICS subscriptions)
+
+The in-memory store everywhere; the real keychain only in an opt-in test.
+
+### Frontend: overlap layout (local calendars)
+
+With Vitest, on the pure layout function (§10). Cases:
+
+| Case                                              | Expected                                                               |
+| ------------------------------------------------- | ---------------------------------------------------------------------- |
+| No events                                         | Empty result                                                           |
+| Events that do not overlap                        | Each has one column, full width                                        |
+| Two events that overlap                           | Two columns                                                            |
+| A chain: A overlaps B, B overlaps C, A does not C | Two columns; A and C share one                                         |
+| Three events at the same time                     | Three columns                                                          |
+| One ends exactly when the next starts             | Not an overlap                                                         |
+| A zero-length event                               | Gets a column and a minimum height, overlaps nothing it merely touches |
+| Two separate groups on one day                    | Column counts are independent per group                                |
+| An event that runs past midnight                  | Clipped to the day before layout                                       |
+| The same input in a different order               | The same result                                                        |
+
+When Vitest is added, `CLAUDE.md` changes with it: the line "The frontend has no test runner"
+goes, and the test command joins the checks to run before finishing and in CI. Everything other
+than this layout function stays untested on the frontend, which is one more reason to keep
+logic out of it.
 
 ## 13. Open points
 
-To be settled in the implementation plan, not guessed here:
+_Needed from: v1. The feature in brackets after each point is the one that forces the decision._
 
-1. **TLS backend for `reqwest`.** Platform TLS or rustls. The Linux keychain store also needs a
-   crypto feature (`crypto-rust` or `crypto-openssl`), so both choices should be made together
-   to avoid shipping two crypto stacks.
-2. **`async-trait`.** Check whether the current toolchain (rustc 1.99) allows native `async fn`
-   through `dyn`. If so, drop the crate.
-3. **Calendar list sync.** Google's sync guide does not say whether `calendarList` supports
-   sync tokens. v1 lists calendars in full every cycle, which is a small request.
-4. **Colliding event ids.** Google does not guarantee that a duplicate client-supplied id is
-   detected at insert time. With random UUIDs the chance is negligible; accepted.
-5. **Size of the first Google sync.** It fetches the complete history. A time window is a
-   possible later optimisation, with the restriction that the parameters must stay identical
-   across the sync chain.
-6. **OAuth scopes.** Use the narrowest scopes that allow listing calendars and editing events.
-   Exact names to be confirmed.
-7. **Refresh-token lifetime** for a consent screen in "Testing" status (§8).
-8. **Reminders on read-only calendars.** Local reminders for ICS events are not in v1.
+To be settled in the implementation plan, not guessed here.
+
+1. **TLS backend for `reqwest`** (ICS subscriptions). Platform TLS or rustls. The Linux
+   keychain store also needs a crypto feature (`crypto-rust` or `crypto-openssl`), so both
+   choices should be made together to avoid shipping two crypto stacks.
+2. **`async-trait`** (ICS subscriptions). Check whether the current toolchain (rustc 1.99)
+   allows native `async fn` through `dyn`. If so, drop the crate.
+3. **What `icalendar`'s parser exposes** (ICS subscriptions). §7.7 needs the raw `TZID` string
+   and the `STANDARD` and `DAYLIGHT` parts of a `VTIMEZONE`. If the typed API hides them, read
+   them through its lower-level property access, or reconsider the parser.
+4. **`X-WR-TIMEZONE` for times without a zone** (ICS subscriptions). §7.7 follows the common
+   convention instead of the standard. Confirm against a few real feeds.
+5. **Calendar list sync** (Google read). Google's sync guide does not say whether
+   `calendarList` supports sync tokens. v1 lists calendars in full every cycle, which is a
+   small request.
+6. **Size of the first Google sync** (Google read). It fetches the complete history. A time
+   window is a possible later optimisation, with the restriction that the parameters must stay
+   identical across the sync chain.
+7. **OAuth scopes** (Google read). Use the narrowest scopes that allow listing calendars and
+   editing events. Exact names to be confirmed.
+8. **Refresh-token lifetime** for a consent screen in "Testing" status (Google read, §8).
+9. **More reasons an event is not editable** (Google read). Google also has a `locked` flag and
+   special event types (`birthday`, `fromGmail`, `workingLocation` and others) that restrict
+   changes. Decide whether they fold into the same rule as `is_organizer` and
+   `guests_can_modify`.
+10. **`sendUpdates=none`** (Google write, revisit after v1). Guests outside Google Calendar are
+    not told about a change. Once the app can show guests, ask the user per edit and pass
+    `all`.
+11. **Colliding event ids** (Google write). Google does not guarantee that a duplicate
+    client-supplied id is detected at insert time. With random UUIDs the chance is negligible;
+    accepted.
+12. **Reminders on read-only events** (reminders). Local reminders for ICS events, and for
+    Google events that are not editable, are not in v1.

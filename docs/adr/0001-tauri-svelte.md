@@ -22,8 +22,9 @@ choice:
 - One developer, no deadline.
 
 The options below are the ones that were actually weighed. The reasoning was written down
-afterwards, from the project principles in `CLAUDE.md`. No benchmark was run; the assessments
-are qualitative.
+afterwards, from the project principles in `CLAUDE.md`. No comparison between the options was
+benchmarked; the assessments are qualitative. The memory use of the chosen stack was measured
+afterwards and is recorded under "To revisit".
 
 ## Decision
 
@@ -60,7 +61,8 @@ to use inside a webview.
 
 - Two different webview engines: WebKitGTK on Ubuntu and WebView2 (Chromium) on Windows. CSS and
   JavaScript features differ between them.
-- The webview's own processes still use memory. "No bundled engine" is not the same as "small".
+- The webview's own processes still use memory. "No bundled engine" is not the same as "small":
+  the empty scaffold already idles at about 181 MB (see the baseline under "To revisit").
 - Data has to be serialised across the command boundary.
 - Linux packaging depends on the system's WebKitGTK version.
 
@@ -181,10 +183,54 @@ measurement.
   enough at that point.
 - If keeping Rust and TypeScript types in step by hand becomes error-prone, consider generating
   the TypeScript types.
+- **If idle memory moves away from the measured baseline below.** Low memory is the first
+  principle of the project, so the number is recorded here to compare against.
+
+### Memory baseline
+
+Measured on 2026-10-13 with the empty scaffold: no calendar code, the SvelteKit starter page in
+an 800 by 600 window.
+
+| Process                                          | PSS, MB   |
+| ------------------------------------------------ | --------- |
+| `simple-calendar` (Rust, GTK, WebKit UI process) | 64.1      |
+| `WebKitWebProcess` (renders the page)            | 97.3      |
+| `WebKitNetworkProcess`                           | 16.1      |
+| Helpers (`bwrap`, `glycin-svg`)                  | 4.0       |
+| **Total**                                        | **181.5** |
+
+- Averages of three launches. The totals were 182.9, 180.6 and 181.0 MB.
+- **PSS** (proportional set size) counts memory shared with other processes in proportion to
+  how many share it, so the values can be added up. For comparison, the summed RSS was 420.9 MB
+  (shared pages counted in full for every process, so too high) and the summed private memory
+  was 133.6 MB (shared pages not counted at all, so too low).
+- Setup: Ubuntu 26.04.1, GNOME on Wayland, WebKitGTK 2.52.6, Tauri 2.12.3, release build from
+  `tauri build`.
+- Method: start the binary, wait 20 seconds without touching it, then sum `Pss` from
+  `/proc/<pid>/smaps_rollup` over the process and all its descendants.
+
+What it says:
+
+- About 113 MB of the 181 MB is in WebKit's own processes before the app does anything. That
+  floor comes with the choice of a webview on Linux and is not something application code can
+  remove.
+- The meaningful number for this project is therefore the **increase over the baseline**: what
+  the Rust core, SQLite and the real UI add on top.
+
+When to act:
+
+- Measure again the same way before each release and add the result here.
+- An increase that the loaded data does not explain is a reason to investigate before
+  shipping.
+- If the floor itself turns out to be too high for what "low memory first" is meant to achieve,
+  that is the argument for reopening this decision in favour of a native toolkit.
+- Not measured yet: Windows with WebView2. Do this at the first manual Windows test, since the
+  two engines will not have the same footprint.
 
 ## Action Items
 
 1. [x] Scaffold Tauri 2 with SvelteKit (static adapter, SSR off, runes mode).
 2. [x] CI that builds on Ubuntu and Windows and uploads the Windows installer.
-3. [ ] Keep all calendar logic in a Rust crate without a Tauri dependency
+3. [ ] Keep all calendar logic in the `simplecalendar-core` crate, which has no Tauri dependency
        (see [architecture.md](../architecture.md), section 3).
+4. [ ] Measure the memory baseline on Windows and add it under "To revisit".
