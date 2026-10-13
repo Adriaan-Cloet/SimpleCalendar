@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: fresh scaffold. No calendar features, Tauri commands, SQLite, keychain code, tests or CI exist yet.
+Current state: fresh scaffold. No calendar features, Tauri commands, SQLite, keychain code or tests exist yet.
 
 ## Scope
 
@@ -47,6 +47,7 @@ npm run format       # prettier --write
 - `cargo` commands run from `src-tauri/`. A single Rust test: `cargo test <name>`.
 - The frontend has no test runner.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
+- CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.
 
 ## Architecture
 

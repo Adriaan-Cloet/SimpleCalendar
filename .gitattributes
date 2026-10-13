@@ -1,0 +1,2 @@
+# Check out text files with LF on every OS, so Prettier and rustfmt agree on Windows
+* text=auto eol=lf

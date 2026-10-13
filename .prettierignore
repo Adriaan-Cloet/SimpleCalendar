@@ -11,3 +11,6 @@ bun.lockb
 # Tauri
 /src-tauri/target/
 /src-tauri/gen/
+
+# Agent config
+/.claude/
