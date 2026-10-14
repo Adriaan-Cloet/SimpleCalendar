@@ -10,7 +10,7 @@ authors = ["Adriaan"]
 license = "MIT"
 repository = "https://github.com/Adriaan-Cloet/SimpleCalendar"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 
 [package]
 name = "simple-calendar"

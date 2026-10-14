@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: planned, nothing on this roadmap is implemented yet.
+Status: in progress. Done: #2, #3.
 Last updated: 2026-10-14.
 
 This document splits v1 into versions. Each version is a GitHub milestone, and each feature in it
