@@ -1,0 +1,72 @@
+/* Global base styles. Values come from tokens.css; see docs/design.md. */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	font-family: var(--font-ui);
+	font-size: var(--text-body);
+	line-height: var(--leading-body);
+	font-weight: var(--weight-regular);
+	color: var(--text);
+	background: var(--surface);
+	overflow: hidden;
+	cursor: default;
+	/* App chrome is not selectable text. WebKitGTK still needs the prefix. */
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+button,
+input {
+	font: inherit;
+	color: inherit;
+}
+
+button {
+	cursor: default;
+}
+
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+.tabular {
+	font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Scrollbars: only the ::-webkit-scrollbar pseudo-elements, which both webviews support.
+ * Do not add scrollbar-width or scrollbar-color: Chromium then ignores these rules.
+ */
+::-webkit-scrollbar {
+	width: 12px;
+	height: 12px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	background-clip: padding-box;
+	border: 3px solid transparent;
+	border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--scrollbar-thumb-hover);
+	background-clip: padding-box;
+}

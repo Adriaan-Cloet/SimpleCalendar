@@ -1,0 +1,219 @@
+/*
+ * Design tokens. docs/design.md explains every value and when to use it.
+ * Components use these variables only, never raw colours, sizes or durations.
+ *
+ * Light values live on :root. The dark values appear twice, once for "follow the system"
+ * and once for an explicit dark choice; keep both dark blocks identical.
+ */
+
+:root {
+	color-scheme: light;
+
+	/* Neutrals */
+	--text: #1d1d1f;
+	--text-secondary: #6e6e73;
+	--text-tertiary: #a1a1a6;
+	--surface: #ffffff;
+	--surface-weekend: #fafafb;
+	--surface-sidebar: #f5f5f7;
+	--surface-elevated: #ffffff;
+	--fill-hover: rgba(0, 0, 0, 0.04);
+	--fill-pressed: rgba(0, 0, 0, 0.08);
+	--fill-control: rgba(118, 118, 128, 0.12);
+	--control-thumb: #ffffff;
+	--separator: rgba(0, 0, 0, 0.1);
+	--grid-line: rgba(0, 0, 0, 0.07);
+	--scrollbar-thumb: rgba(0, 0, 0, 0.22);
+	--scrollbar-thumb-hover: rgba(0, 0, 0, 0.38);
+
+	/* Accent: interaction only. Red: today, now and destructive actions only. */
+	--accent: #0068d6;
+	--accent-text: #0066cc;
+	--on-accent: #ffffff;
+	--now: #d92d20;
+	--now-text: #d92d20;
+	--on-now: #ffffff;
+	--danger: var(--now-text);
+
+	/* Calendar palette */
+	--cal-red: #ff3b30;
+	--cal-orange: #ff9500;
+	--cal-yellow: #ffcc00;
+	--cal-green: #34c759;
+	--cal-teal: #30b0c7;
+	--cal-blue: #007aff;
+	--cal-indigo: #5856d6;
+	--cal-purple: #af52de;
+	--cal-pink: #ff2d55;
+	--cal-brown: #a2845e;
+
+	/* How much calendar colour goes into an event (see design.md, "Drawing an event") */
+	--event-fill-mix: 14%;
+	--event-hover-mix: 20%;
+	--event-selected-mix: 28%;
+	--event-text-mix: 45%;
+
+	/* Shadows: soft shadow plus a 1px ring, so edges stay crisp on any background */
+	--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.04);
+	--shadow-2:
+		0 10px 30px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.06);
+	--shadow-3:
+		0 24px 64px rgba(0, 0, 0, 0.18), 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.06);
+
+	/* Typography */
+	--font-ui:
+		'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Ubuntu Sans', Ubuntu,
+		Cantarell, 'Noto Sans', sans-serif;
+	--font-display:
+		'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'Ubuntu Sans', Ubuntu,
+		Cantarell, 'Noto Sans', sans-serif;
+	--text-caption: 11px;
+	--leading-caption: 14px;
+	--text-footnote: 12px;
+	--leading-footnote: 16px;
+	--text-body: 13px;
+	--leading-body: 18px;
+	--text-headline: 15px;
+	--leading-headline: 20px;
+	--text-title: 22px;
+	--leading-title: 28px;
+	--weight-regular: 400;
+	--weight-medium: 500;
+	--weight-semibold: 600;
+
+	/* Spacing: 4px base */
+	--space-2xs: 2px;
+	--space-xs: 4px;
+	--space-sm: 8px;
+	--space-md: 12px;
+	--space-lg: 16px;
+	--space-xl: 24px;
+	--space-2xl: 32px;
+	--space-3xl: 48px;
+
+	/* Layout metrics */
+	--hour-height: 60px;
+	--gutter-width: 56px;
+	--sidebar-width: 232px;
+	--toolbar-height: 52px;
+	--control-height: 28px;
+
+	/* Radii, by level in the hierarchy */
+	--radius-sm: 4px;
+	--radius-md: 6px;
+	--radius-lg: 12px;
+	--radius-full: 999px;
+
+	/* Motion */
+	--duration-fast: 120ms;
+	--duration-base: 200ms;
+	--duration-slow: 320ms;
+	--ease-standard: cubic-bezier(0.2, 0, 0, 1);
+	--ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		color-scheme: dark;
+
+		--text: #f5f5f7;
+		--text-secondary: #98989d;
+		--text-tertiary: #6e6e73;
+		--surface: #1c1c1e;
+		--surface-weekend: #202022;
+		--surface-sidebar: #232325;
+		--surface-elevated: #2c2c2e;
+		--fill-hover: rgba(255, 255, 255, 0.06);
+		--fill-pressed: rgba(255, 255, 255, 0.1);
+		--fill-control: rgba(118, 118, 128, 0.24);
+		--control-thumb: #636366;
+		--separator: rgba(255, 255, 255, 0.12);
+		--grid-line: rgba(255, 255, 255, 0.08);
+		--scrollbar-thumb: rgba(255, 255, 255, 0.22);
+		--scrollbar-thumb-hover: rgba(255, 255, 255, 0.38);
+
+		--accent: #0a6cdb;
+		--accent-text: #3b9bff;
+		--now: #d92d20;
+		--now-text: #ff6961;
+
+		--cal-red: #ff453a;
+		--cal-orange: #ff9f0a;
+		--cal-yellow: #ffd60a;
+		--cal-green: #30d158;
+		--cal-teal: #40cbe0;
+		--cal-blue: #0a84ff;
+		--cal-indigo: #5e5ce6;
+		--cal-purple: #bf5af2;
+		--cal-pink: #ff375f;
+		--cal-brown: #ac8e68;
+
+		--event-fill-mix: 24%;
+		--event-hover-mix: 32%;
+		--event-selected-mix: 40%;
+
+		--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+		--shadow-2:
+			0 10px 30px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.6),
+			inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+		--shadow-3:
+			0 24px 64px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(0, 0, 0, 0.6),
+			inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+	}
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+
+	--text: #f5f5f7;
+	--text-secondary: #98989d;
+	--text-tertiary: #6e6e73;
+	--surface: #1c1c1e;
+	--surface-weekend: #202022;
+	--surface-sidebar: #232325;
+	--surface-elevated: #2c2c2e;
+	--fill-hover: rgba(255, 255, 255, 0.06);
+	--fill-pressed: rgba(255, 255, 255, 0.1);
+	--fill-control: rgba(118, 118, 128, 0.24);
+	--control-thumb: #636366;
+	--separator: rgba(255, 255, 255, 0.12);
+	--grid-line: rgba(255, 255, 255, 0.08);
+	--scrollbar-thumb: rgba(255, 255, 255, 0.22);
+	--scrollbar-thumb-hover: rgba(255, 255, 255, 0.38);
+
+	--accent: #0a6cdb;
+	--accent-text: #3b9bff;
+	--now: #d92d20;
+	--now-text: #ff6961;
+
+	--cal-red: #ff453a;
+	--cal-orange: #ff9f0a;
+	--cal-yellow: #ffd60a;
+	--cal-green: #30d158;
+	--cal-teal: #40cbe0;
+	--cal-blue: #0a84ff;
+	--cal-indigo: #5e5ce6;
+	--cal-purple: #bf5af2;
+	--cal-pink: #ff375f;
+	--cal-brown: #ac8e68;
+
+	--event-fill-mix: 24%;
+	--event-hover-mix: 32%;
+	--event-selected-mix: 40%;
+
+	--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+	--shadow-2:
+		0 10px 30px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.6),
+		inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+	--shadow-3:
+		0 24px 64px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(0, 0, 0, 0.6),
+		inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--duration-fast: 0ms;
+		--duration-base: 0ms;
+		--duration-slow: 0ms;
+	}
+}
