@@ -1,6 +1,7 @@
 # Architecture
 
-Status: proposed design, nothing in this document is implemented yet.
+Status: proposed design. Implemented so far: the crate layout (§3) and the SQLite connections and
+migration 1 (§6).
 Last updated: 2026-10-14 (version markers mapped to the roadmap, CalDAV moved into v0.4).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
@@ -479,8 +480,10 @@ in the database file, so the read connection inherits it.
 
 ### Tables
 
-The DDL shows the state at the end of v1. Tables can be introduced by later migrations when
-their feature lands; they do not all have to be in migration 1.
+The DDL shows the state at the end of v1. Tables and columns can be introduced by later
+migrations when their feature lands; they do not all have to be in migration 1. Migration 1
+(v0.1) leaves out the v0.2 and v0.3 columns from the table below, and also
+`events.use_default_reminders`, which belongs to reminders.
 
 ```sql
 CREATE TABLE sources (

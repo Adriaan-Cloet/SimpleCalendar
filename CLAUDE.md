@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). No calendar logic, Tauri commands, SQLite, keychain code or tests exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
+Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). SQLite storage exists (`src-tauri/crates/core/src/db/`: two connections, migrations, the v0.1 schema), and the app opens it at startup. No other calendar logic, Tauri commands or keychain code exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
 
 ## Scope
 
@@ -58,6 +58,7 @@ npm run format       # prettier --write
 - **Shared frontend code** lives in `src/lib/` and is imported as `#lib/...` (declared in `package.json`), not `$lib`.
 - **Frontend to Rust:** the frontend calls `invoke` from `@tauri-apps/api/core`; the Rust side is a `#[tauri::command]` function registered on the builder in `src-tauri/src/lib.rs`. `main.rs` only calls `simple_calendar_lib::run()`.
 - **Rust workspace.** `src-tauri/Cargo.toml` is both the app crate and the workspace root, so `Cargo.lock` and `target/` stay in `src-tauri/`. All calendar logic goes in `src-tauri/crates/core` (package `simplecalendar-core`, imported as `simplecalendar_core`). It must never depend on `tauri`; the app crate only wraps it in commands.
+- **Storage.** `simplecalendar_core::db::Db` holds one write and one read-only connection. Every call goes through `Db::write` / `Db::read`, which run the closure in `spawn_blocking`. Schema changes are a new numbered file in `db/migrations/`, added to `MIGRATION_SLICE`; never edit a shipped migration. Query tests start from `db::migrations::test_connection()` (in-memory, all migrations applied).
 - **Permissions:** `src-tauri/capabilities/default.json` controls which Tauri APIs and plugins the frontend may use. A new plugin needs its permission added there or calls are rejected at runtime.
 
 ## Conventions
