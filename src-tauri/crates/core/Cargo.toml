@@ -12,3 +12,14 @@ publish = false
 # Never add `tauri` here. The core stays free of the UI shell, so its tests build without
 # WebKit and the same crate can sit behind a mobile shell later (docs/architecture.md §3).
 [dependencies]
+# SQLite compiled into the binary: the same version on Ubuntu and Windows (§11).
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Schema migrations, versioned in `PRAGMA user_version`.
+rusqlite_migration = "2.6"
+thiserror = "2"
+# `spawn_blocking` for the blocking SQLite calls. Already built through Tauri.
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
