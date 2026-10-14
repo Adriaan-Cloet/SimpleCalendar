@@ -1,12 +1,26 @@
-[package]
-name = "simple-calendar"
-version = "0.1.0"
-description = "A simple calendar desktop app"
+# src-tauri/ is a Cargo workspace: this app crate at the root, calendar logic in crates/core.
+# The app crate is a member automatically. CI runs fmt, clippy and tests with --workspace/--all.
+[workspace]
+members = ["crates/core"]
+resolver = "3"
+
+# Shared by every member through `<key>.workspace = true`
+[workspace.package]
 authors = ["Adriaan"]
 license = "MIT"
 repository = "https://github.com/Adriaan-Cloet/SimpleCalendar"
 edition = "2024"
 rust-version = "1.90"
+
+[package]
+name = "simple-calendar"
+version = "0.1.0"
+description = "A simple calendar desktop app"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,3 +37,4 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.12.3", features = [] }
 tauri-plugin-log = "2"
+simplecalendar-core = { path = "crates/core" }

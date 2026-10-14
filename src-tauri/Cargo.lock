@@ -2834,10 +2834,15 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "simplecalendar-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
 ]
+
+[[package]]
+name = "simplecalendar-core"
+version = "0.1.0"
 
 [[package]]
 name = "siphasher"

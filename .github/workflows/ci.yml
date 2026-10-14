@@ -67,15 +67,15 @@ jobs:
 
       - name: Check Rust formatting
         working-directory: src-tauri
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --workspace
 
       - name: Tauri build
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}

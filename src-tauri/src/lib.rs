@@ -9,6 +9,7 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            log::info!("simplecalendar-core {}", simplecalendar_core::version());
             Ok(())
         })
         .run(tauri::generate_context!())

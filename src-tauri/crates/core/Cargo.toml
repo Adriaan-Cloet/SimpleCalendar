@@ -1,0 +1,14 @@
+[package]
+name = "simplecalendar-core"
+version = "0.1.0"
+description = "Calendar logic for SimpleCalendar: model, storage, recurrence, sync"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Never add `tauri` here. The core stays free of the UI shell, so its tests build without
+# WebKit and the same crate can sit behind a mobile shell later (docs/architecture.md §3).
+[dependencies]
