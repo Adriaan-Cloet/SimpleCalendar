@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: fresh scaffold. No calendar features, Tauri commands, SQLite, keychain code or tests exist yet.
+Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). No calendar logic, Tauri commands, SQLite, keychain code or tests exist yet.
 
 ## Scope
 
@@ -61,6 +61,8 @@ npm run format       # prettier --write
 
 ## Conventions
 
+- Colours, type, spacing, radii, shadows and durations come from the tokens in `src/lib/styles/tokens.css`, never raw values. `docs/design.md` documents them and the rules for looking the same in WebKitGTK and WebView2.
+- Import `.ts` files from `src/lib/` with a `.js` extension: `#lib/calendar-color.js`. Without it the `#lib/*` mapping does not resolve.
 - Prettier: tabs, single quotes, no trailing commas, width 100. It also formats the JSON under `src-tauri/`.
 - The root `.gitignore` is the source of truth for ignores; ESLint reads it directly. `src-tauri/Cargo.lock` is committed.
 - The bundle identifier `com.adriaancloet.simplecalendar` determines the app-data directory, so changing it orphans existing user data.
