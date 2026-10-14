@@ -1,7 +1,7 @@
 # Architecture
 
 Status: proposed design, nothing in this document is implemented yet.
-Last updated: 2026-10-13 (revised after review).
+Last updated: 2026-10-14 (version markers mapped to the roadmap, CalDAV moved into v0.4).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -9,29 +9,31 @@ reference for the implementation plan. The stack choice itself is recorded in
 
 ## How to read the version markers
 
-Every section starts with a line that says from which version it is needed. Only two versions
-are defined so far: **v1** and **after v1**. A roadmap that splits v1 into milestones does not
-exist yet. To make that split mechanical later, each marker also names the v1 feature that
-first needs the section:
+Every section starts with a line that says from which version it is needed, and which feature
+first needs it. The versions and their order come from the [roadmap](roadmap.md):
 
-| Feature           | Meaning                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| local calendars   | Calendars that live only in SQLite, with create, edit, delete |
-| ICS subscriptions | Read-only feeds                                               |
-| Google read       | Sign-in and syncing Google calendars into SQLite              |
-| Google write      | Creating, editing and deleting Google events                  |
-| reminders         | Desktop notifications                                         |
+| Feature           | Version | Meaning                                                       |
+| ----------------- | ------- | ------------------------------------------------------------- |
+| ICS subscriptions | v0.1    | Read-only feeds                                               |
+| local calendars   | v0.2    | Calendars that live only in SQLite, with create, edit, delete |
+| Google read       | v0.2    | Sign-in and syncing Google calendars into SQLite              |
+| Google write      | v0.2    | Creating, editing and deleting Google events                  |
+| offline sync      | v0.3    | Editing without a connection, retries, conflicts              |
+| reminders         | v0.3    | Desktop notifications                                         |
+| CalDAV            | v0.4    | CalDAV accounts, read and write                               |
+| after v1          | no plan | Features the design keeps open, listed in §1                  |
 
-The markers state dependencies, not an order. The order is for the roadmap to decide.
+The week view of v0.1 already needs storage, recurrence and the frontend contract, so those
+parts are needed from v0.1 even though local calendars come later.
 
 ## 1. Goals and non-goals
 
-_Needed from: v1. Applies to every feature._
+_Needed from: v0.1. Applies to every feature._
 
 ### In scope for v1
 
-- ICS subscriptions (read-only) and Google Calendar (read and write), with any number of
-  accounts or subscriptions per provider.
+- ICS subscriptions (read-only), Google Calendar (read and write) and, from v0.4, CalDAV (read
+  and write), with any number of accounts or subscriptions per provider.
 - A local calendar that needs no account, so the app is useful from the first launch.
 - Create, edit and delete events. For recurring events: "only this event" and "all events".
 - Offline edits through an outbox, incremental sync, server-wins conflict handling.
@@ -42,17 +44,16 @@ _Needed from: v1. Applies to every feature._
 
 | Not in v1                            | Why, and what the design keeps open                                                                              |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| CalDAV                               | Comes after v1. The provider trait and the cursor model are designed for it (§5).                                |
 | "This and following events"          | Needs series splitting, the most error-prone calendar operation.                                                 |
 | Attendees, invitations, RSVP         | Adds a table and partial-update rules. Guest lists are not stored; only whether you may edit an event is (§4).   |
 | Tray icon, background sync           | Sync and reminders only run while the app is open. The scheduler has no window dependency, so this can be added. |
 | Asking the user to resolve conflicts | Server wins in v1. The outbox keeps the rejected change, so a UI can come later.                                 |
 | Mobile                               | The core crate has no Tauri or desktop dependency, which is the preparation for it.                              |
+| AI access (MCP server)               | After v1. Needs no new core logic, only a second front door onto `CalendarService` (§14).                        |
 
 ## 2. Overview
 
-_Needed from: v1, first needed by local calendars. The sync engine, providers and secrets
-boxes are first needed by ICS subscriptions._
+_Needed from: v0.1 (ICS subscriptions). The CalDAV provider comes in v0.4._
 
 Three rules from `CLAUDE.md` shape everything below:
 
@@ -82,7 +83,7 @@ flowchart TB
         subgraph PRV["provider"]
             ICS["IcsProvider, read-only"]
             GOO["GoogleProvider, read and write"]
-            DAV["CalDavProvider, later"]
+            DAV["CalDavProvider, v0.4"]
         end
     end
 
@@ -124,7 +125,7 @@ How to read it:
 
 ## 3. Crate layout
 
-_Needed from: v1, first needed by local calendars._
+_Needed from: v0.1 (ICS subscriptions)._
 
 `src-tauri/` becomes a small Cargo workspace. `cargo` commands keep running from `src-tauri/`
 and `Cargo.lock` stays where it is.
@@ -161,8 +162,7 @@ mobile shell later.
 
 ## 4. Data model
 
-_Needed from: v1, first needed by local calendars. Fields that only matter for remote
-calendars are marked below._
+_Needed from: v0.1 (ICS subscriptions). Fields that are needed later are marked below._
 
 Three persisted entities and one computed value.
 
@@ -220,7 +220,7 @@ Three persisted entities and one computed value.
   shape.
 - **Identity.** `remote_id` is the provider's id. For events created in this app it is
   generated here, before the event is sent (§7.3).
-- **Editability** (first needed by Google read). An event on a writable calendar can still be
+- **Editability** (needed from v0.2, Google read). An event on a writable calendar can still be
   one you are not allowed to change, typically a meeting someone else organised. Two flags are
   stored from the provider: `is_organizer` (Google: `organizer.self`) and `guests_can_modify`
   (Google: `guestsCanModify`).
@@ -248,8 +248,8 @@ computing a month of them is cheap.
 
 ## 5. Provider trait
 
-_Needed from: v1. `CalendarProvider` is first needed by ICS subscriptions, `WritableProvider`
-by Google write. A CalDAV implementation is after v1._
+_Needed from: v0.1. `CalendarProvider` is first needed by ICS subscriptions (v0.1),
+`WritableProvider` by Google write (v0.2). The CalDAV implementation comes in v0.4._
 
 ### Shape
 
@@ -397,20 +397,20 @@ by comparing the outbox row's `base` and `payload`, so that logic is not repeate
 
 ### Providers
 
-| Provider | Writable | Needed from               | Cursor contents                                                                               |
-| -------- | -------- | ------------------------- | --------------------------------------------------------------------------------------------- |
-| ICS      | no       | v1, ICS subscriptions     | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                             |
-| Google   | yes      | v1, Google read and write | `nextSyncToken`                                                                               |
-| CalDAV   | yes      | after v1                  | A WebDAV sync-token, or the collection ctag plus the per-event ETags already in `events.etag` |
+| Provider | Writable | Needed from                 | Cursor contents                                                                               |
+| -------- | -------- | --------------------------- | --------------------------------------------------------------------------------------------- |
+| ICS      | no       | v0.1, ICS subscriptions     | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                             |
+| Google   | yes      | v0.2, Google read and write | `nextSyncToken`                                                                               |
+| CalDAV   | yes      | v0.4, CalDAV                | A WebDAV sync-token, or the collection ctag plus the per-event ETags already in `events.etag` |
 
 **Local calendars are not a provider.** A source of kind `local` has no provider at all. The
 sync engine skips it, and writes to its calendars do not create outbox rows.
 
 ### What CalDAV needs from this design
 
-_After v1._
+_Needed from: v0.4 (CalDAV)._
 
-Nothing in v1, but the trait was shaped so it fits later without changes:
+Nothing before v0.4, but the trait was shaped so it fits then without changes:
 
 - `pull` with an opaque cursor covers both CalDAV strategies (sync-token reports, or comparing
   ETags).
@@ -421,8 +421,8 @@ Nothing in v1, but the trait was shaped so it fits later without changes:
 
 ## 6. SQLite schema
 
-_Needed from: v1, first needed by local calendars. The table after the DDL says which feature
-first needs each table._
+_Needed from: v0.1 (ICS subscriptions). The table after the DDL says from which version each
+table is needed._
 
 One database file in the app-data directory. The schema is created by numbered migrations; the
 current migration number is stored in SQLite's built-in `PRAGMA user_version`.
@@ -597,13 +597,13 @@ CREATE TABLE settings (
 ) STRICT, WITHOUT ROWID;
 ```
 
-| Table or column                                                     | First needed by   |
-| ------------------------------------------------------------------- | ----------------- |
-| `sources`, `calendars`, `events`, `settings`                        | local calendars   |
-| `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked` | ICS subscriptions |
-| `events.etag`, `events.is_organizer`, `events.guests_can_modify`    | Google read       |
-| `outbox`, `events.pending_delete`                                   | Google write      |
-| `event_reminders`, `fired_reminders`, `calendars.default_reminders` | reminders         |
+| Table or column                                                     | Needed from             |
+| ------------------------------------------------------------------- | ----------------------- |
+| `sources`, `calendars`, `events`, `settings`                        | v0.1, ICS subscriptions |
+| `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked` | v0.1, ICS subscriptions |
+| `events.etag`, `events.is_organizer`, `events.guests_can_modify`    | v0.2, Google read       |
+| `outbox`, `events.pending_delete`                                   | v0.2, Google write      |
+| `event_reminders`, `fired_reminders`, `calendars.default_reminders` | v0.3, reminders         |
 
 Notes:
 
@@ -655,11 +655,12 @@ is not linked to a master yet is invisible to both queries (§7.2).
 
 ## 7. Sync engine
 
-_Needed from: v1, first needed by ICS subscriptions. Subsections that need more are marked._
+_Needed from: v0.1 (ICS subscriptions). Subsections that are needed later are marked._
 
 ### 7.1 Structure
 
-_First needed by ICS subscriptions._
+_Needed from: v0.1 (ICS subscriptions). The focus and local-write triggers come in v0.3 (offline
+sync)._
 
 One long-lived task owns a queue of commands (`SyncNow(source)`, `LocalWrite(source)`,
 `Shutdown`). At most one sync cycle runs per source at a time. A request that arrives during a
@@ -678,7 +679,7 @@ Triggers:
 
 ### 7.2 One cycle for one source
 
-_First needed by ICS subscriptions. Step 2 is first needed by Google write._
+_Needed from: v0.1 (ICS subscriptions). Step 2 is needed from v0.2 (Google write)._
 
 1. **Authenticate.** Get an access token, refreshing it if needed.
 2. **Push.** Send due outbox rows in order (§7.3).
@@ -766,7 +767,9 @@ already prevents wrong intermediate states.
 
 ### 7.3 Outbox
 
-_First needed by Google write._
+_Needed from: v0.2 (Google write): the one-transaction write, order, sending only the
+difference, deletes and safe retries for creates. Backoff, coalescing and crash recovery come in
+v0.3 (offline sync)._
 
 A local edit to a remote calendar is one SQLite transaction that
 
@@ -812,7 +815,8 @@ saved") and the user can dismiss or redo them. They no longer block later edits 
 
 ### 7.4 Conflicts: server wins
 
-_First needed by Google write._
+_Needed from: v0.3 (offline sync). Until then the ETag check alone already holds: v0.2 never
+overwrites a newer server version._
 
 A conflict is one of:
 
@@ -872,7 +876,7 @@ sequenceDiagram
 
 ### 7.5 Google specifics
 
-_Reading is first needed by Google read, writing by Google write._
+_Needed from: v0.2 (Google read and Google write)._
 
 Checked against Google's Calendar API documentation on 2026-10-13.
 
@@ -924,7 +928,7 @@ Writing:
 
 ### 7.6 ICS specifics
 
-_First needed by ICS subscriptions._
+_Needed from: v0.1 (ICS subscriptions)._
 
 - `webcal://` URLs are rewritten to `https://`.
 - The request sends `If-None-Match` and `If-Modified-Since` from the cursor. HTTP 304 means
@@ -939,7 +943,7 @@ _First needed by ICS subscriptions._
 
 ### 7.7 ICS time zones
 
-_First needed by ICS subscriptions._
+_Needed from: v0.1 (ICS subscriptions)._
 
 Google always gives an IANA zone. ICS feeds do not. A `TZID` can be an IANA name, a Windows
 zone name (Outlook and Exchange), a display string, or a made-up label that only means
@@ -1022,8 +1026,8 @@ The test cases for all of this are listed in §12.
 
 ## 8. Credentials
 
-_Needed from: v1, first needed by ICS subscriptions (the feed URL is the first secret). The
-Google sign-in part is first needed by Google read._
+_Needed from: v0.1 (ICS subscriptions; the feed URL is the first secret). The Google sign-in
+part is needed from v0.2 (Google read), the CalDAV password from v0.4._
 
 ### What is stored where
 
@@ -1033,6 +1037,7 @@ Google sign-in part is first needed by Google read._
 | Google access token                | Memory only. Short-lived, re-created at start |
 | Full ICS URL                       | OS keychain                                   |
 | OAuth client secret override       | OS keychain                                   |
+| CalDAV password                    | OS keychain                                   |
 | Account label, ICS host, client id | SQLite (not secret)                           |
 
 ICS URLs are treated as secrets because private feed addresses, including Google's own "secret
@@ -1081,7 +1086,7 @@ plan includes a test in a session without a keyring to pin that mapping down.
 
 ### Google sign-in
 
-_First needed by Google read._
+_Needed from: v0.2 (Google read)._
 
 - OAuth 2.0 authorization code flow with PKCE, for an "installed application".
 - The app listens on `127.0.0.1` on a free port, opens the system browser at Google's consent
@@ -1102,7 +1107,7 @@ _First needed by Google read._
 
 ## 9. Reminders
 
-_Needed from: v1, first needed by reminders. Confirmed in review: reminders stay in v1._
+_Needed from: v0.3 (reminders). Confirmed in review: reminders are part of v1._
 
 - A scheduler task in the core looks at the occurrences of the next 24 hours, computes the
   earliest due reminder, and sleeps until then. It recomputes whenever the database changes.
@@ -1119,33 +1124,33 @@ _Needed from: v1, first needed by reminders. Confirmed in review: reminders stay
 
 ## 10. Frontend contract
 
-_Needed from: v1, first needed by local calendars. Each row says which feature first needs it._
+_Needed from: v0.1 (ICS subscriptions). Each row says from which version it is needed._
 
 Commands (all async, all return `Result`):
 
-| Command                                  | Purpose                                                       | First needed by   |
-| ---------------------------------------- | ------------------------------------------------------------- | ----------------- |
-| `list_calendars`, `update_calendar`      | Visibility and colour override                                | local calendars   |
-| `create_local_calendar`                  | New calendar in the local source                              | local calendars   |
-| `list_occurrences(from, to, tz)`         | Everything the views render                                   | local calendars   |
-| `get_event(event_id)`                    | Full detail for the editor                                    | local calendars   |
-| `create_event(draft)`                    | Returns the new occurrence                                    | local calendars   |
-| `update_event(target, scope, draft)`     | `scope` is `this` or `all`                                    | local calendars   |
-| `delete_event(target, scope)`            |                                                               | local calendars   |
-| `get_status`                             | Keyring availability, sources needing sign-in, open conflicts | ICS subscriptions |
-| `list_sources`, `remove_source`          | Manage accounts and subscriptions                             | ICS subscriptions |
-| `add_ics_source(url, name)`              | Subscribe to a feed                                           | ICS subscriptions |
-| `sync_now(source?)`                      | Manual refresh                                                | ICS subscriptions |
-| `begin_google_sign_in`                   | Start the OAuth flow; resolves when the browser step finishes | Google read       |
-| `list_sync_issues`, `dismiss_sync_issue` | `conflicted` and `failed` outbox rows                         | Google write      |
+| Command                                  | Purpose                                                       | Needed from             |
+| ---------------------------------------- | ------------------------------------------------------------- | ----------------------- |
+| `list_calendars`, `update_calendar`      | Visibility and colour override                                | v0.1, ICS subscriptions |
+| `create_local_calendar`                  | New calendar in the local source                              | v0.2, local calendars   |
+| `list_occurrences(from, to, tz)`         | Everything the views render                                   | v0.1, ICS subscriptions |
+| `get_event(event_id)`                    | Full detail for the editor                                    | v0.2, local calendars   |
+| `create_event(draft)`                    | Returns the new occurrence                                    | v0.2, local calendars   |
+| `update_event(target, scope, draft)`     | `scope` is `this` or `all`                                    | v0.2, local calendars   |
+| `delete_event(target, scope)`            |                                                               | v0.2, local calendars   |
+| `get_status`                             | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
+| `list_sources`, `remove_source`          | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
+| `add_ics_source(url, name)`              | Subscribe to a feed                                           | v0.1, ICS subscriptions |
+| `sync_now(source?)`                      | Manual refresh                                                | v0.1, ICS subscriptions |
+| `begin_google_sign_in`                   | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
+| `list_sync_issues`, `dismiss_sync_issue` | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
 
 Events from Rust to the webview:
 
-| Event              | Payload                      | First needed by   |
-| ------------------ | ---------------------------- | ----------------- |
-| `calendar:changed` | Affected calendar ids        | local calendars   |
-| `sync:status`      | Source id, state, last error | ICS subscriptions |
-| `sync:conflict`    | Outbox row id, event title   | Google write      |
+| Event              | Payload                      | Needed from             |
+| ------------------ | ---------------------------- | ----------------------- |
+| `calendar:changed` | Affected calendar ids        | v0.1, ICS subscriptions |
+| `sync:status`      | Source id, state, last error | v0.1, ICS subscriptions |
+| `sync:conflict`    | Outbox row id, event title   | v0.3, offline sync      |
 
 Conventions:
 
@@ -1173,7 +1178,7 @@ DOM and no Svelte state, which makes it testable without a browser (§12).
 
 ## 11. Proposed dependencies
 
-_Needed from: v1. Each row says which feature first needs it._
+_Needed from: v0.1. Each row says from which version it is needed._
 
 `CLAUDE.md` asks for a justification per dependency. Versions were checked on crates.io and npm
 on 2026-10-13. "Already built" means the crate is compiled for the Linux target today because
@@ -1182,41 +1187,41 @@ inspected offline.
 
 ### Core crate (`simplecalendar-core`)
 
-| Crate                                   | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        | First needed by   |
-| --------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------- |
-| `rusqlite` 0.40, feature `bundled`      | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) | local calendars   |
-| `rusqlite_migration` 2.6                | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   | local calendars   |
-| `tokio` 1                               | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                | local calendars   |
-| `chrono` 0.4, `chrono-tz` 0.10          | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            | local calendars   |
-| `rrule` 0.14                            | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   | local calendars   |
-| `thiserror` 2                           | Error enums                          | Already built                                                                                                                                                |                                                                                                 | local calendars   |
-| `uuid` 1                                | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | local calendars   |
-| `serde`, `serde_json`, `log`            | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | local calendars   |
-| `reqwest` 0.13                          | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | ICS subscriptions |
-| `icalendar` 0.17, feature `parser`      | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | ICS subscriptions |
-| `sha2` 0.11                             | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway                                                                                                                | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | ICS subscriptions |
-| `async-trait`                           | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | ICS subscriptions |
-| `keyring-core` 1.0                      | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | ICS subscriptions |
-| `dbus-secret-service-keyring-store` 1.0 | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | ICS subscriptions |
-| `windows-native-keyring-store` 1.1      | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | ICS subscriptions |
-| `wiremock` 0.6 (dev only)               | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | ICS subscriptions |
-| `oauth2` 5.0                            | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | Google read       |
+| Crate                                   | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        | Needed from             |
+| --------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------- |
+| `rusqlite` 0.40, feature `bundled`      | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) | v0.1, ICS subscriptions |
+| `rusqlite_migration` 2.6                | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   | v0.1, ICS subscriptions |
+| `tokio` 1                               | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                | v0.1, ICS subscriptions |
+| `chrono` 0.4, `chrono-tz` 0.10          | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            | v0.1, ICS subscriptions |
+| `rrule` 0.14                            | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   | v0.1, ICS subscriptions |
+| `thiserror` 2                           | Error enums                          | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
+| `uuid` 1                                | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
+| `serde`, `serde_json`, `log`            | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | v0.1, ICS subscriptions |
+| `reqwest` 0.13                          | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
+| `icalendar` 0.17, feature `parser`      | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
+| `sha2` 0.11                             | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway                                                                                                                | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
+| `async-trait`                           | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | v0.1, ICS subscriptions |
+| `keyring-core` 1.0                      | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | v0.1, ICS subscriptions |
+| `dbus-secret-service-keyring-store` 1.0 | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | v0.1, ICS subscriptions |
+| `windows-native-keyring-store` 1.1      | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | v0.1, ICS subscriptions |
+| `wiremock` 0.6 (dev only)               | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | v0.1, ICS subscriptions |
+| `oauth2` 5.0                            | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | v0.2, Google read       |
 
 The two keychain store crates are platform-specific dependencies, so each platform compiles
 only its own.
 
 ### App crate
 
-| Crate                         | Purpose                             | Why                   | First needed by |
-| ----------------------------- | ----------------------------------- | --------------------- | --------------- |
-| `tauri-plugin-opener` 2       | Open the browser for Google sign-in | Official Tauri plugin | Google read     |
-| `tauri-plugin-notification` 2 | Reminder notifications              | Official Tauri plugin | reminders       |
+| Crate                         | Purpose                             | Why                   | Needed from       |
+| ----------------------------- | ----------------------------------- | --------------------- | ----------------- |
+| `tauri-plugin-opener` 2       | Open the browser for Google sign-in | Official Tauri plugin | v0.2, Google read |
+| `tauri-plugin-notification` 2 | Reminder notifications              | Official Tauri plugin | v0.3, reminders   |
 
 ### Frontend (npm)
 
-| Package               | Purpose                           | Why                                                                                                                                             | First needed by |
-| --------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| `vitest` 5 (dev only) | Unit tests for the overlap layout | Runs on the existing Vite config, so there is no second build setup. Its peer range includes Vite 8, which this project uses. Not in the bundle | local calendars |
+| Package               | Purpose                           | Why                                                                                                                                             | Needed from             |
+| --------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `vitest` 5 (dev only) | Unit tests for the overlap layout | Runs on the existing Vite config, so there is no second build setup. Its peer range includes Vite 8, which this project uses. Not in the bundle | v0.1, ICS subscriptions |
 
 No DOM emulation package (`jsdom`, `happy-dom`) is added: the function under test is pure.
 
@@ -1231,16 +1236,16 @@ No DOM emulation package (`jsdom`, `happy-dom`) is added: the function under tes
 
 ## 12. Testing strategy
 
-_Needed from: v1. Each group says which feature first needs it._
+_Needed from: v0.1. Each group says from which version it is needed._
 
-### Recurrence and time zones (local calendars)
+### Recurrence and time zones (v0.1)
 
 **Tests first**, as `CLAUDE.md` requires. Cases to cover before writing the implementation:
 daylight-saving changes in both directions, a local time that does not exist or exists twice,
 all-day series, `UNTIL` and `COUNT`, `EXDATE`, moved and cancelled exceptions, an occurrence
 moved into or out of the queried range, and a viewer in a different zone than the event.
 
-### ICS time zones (ICS subscriptions)
+### ICS time zones (v0.1)
 
 Also written before the implementation. Each case is a small feed file in the test fixtures.
 
@@ -1269,7 +1274,7 @@ Also written before the implementation. Each case is a small feed file in the te
 | 21  | Start and end in different zones                                                         | Correct duration; each end keeps its own zone                                    |
 | 22  | Exception component placed before its master in the file                                 | Linked; no duplicate occurrence                                                  |
 
-### Database (local calendars)
+### Database (v0.1)
 
 - Query tests open an in-memory SQLite database and run all migrations.
 - Tests that involve both connections use a database file in a temporary directory, because two
@@ -1277,13 +1282,13 @@ Also written before the implementation. Each case is a small feed file in the te
   transaction open and checks that a read on the other connection returns immediately with the
   last committed state.
 
-### Providers (ICS subscriptions, Google read, Google write)
+### Providers (v0.1 for ICS, v0.2 for Google, v0.4 for CalDAV)
 
 Against `wiremock`, with recorded response shapes. Includes pagination, HTTP 410, 412, 429 and
 a lost response on create. For Google write: the patch body contains exactly the changed
 fields, `attendees` is never present, and `sendUpdates=none` is on every write request.
 
-### Sync engine (ICS subscriptions, then Google write)
+### Sync engine (v0.1, then v0.2 and v0.3)
 
 With a scripted fake provider:
 
@@ -1297,11 +1302,11 @@ With a scripted fake provider:
 - **Editability:** every write command is rejected with `NotEditable` for an event that is not
   editable, for each combination of calendar access, `is_organizer` and `guests_can_modify`.
 
-### Secrets (ICS subscriptions)
+### Secrets (v0.1)
 
 The in-memory store everywhere; the real keychain only in an opt-in test.
 
-### Frontend: overlap layout (local calendars)
+### Frontend: overlap layout (v0.1)
 
 With Vitest, on the pure layout function (§10). Cases:
 
@@ -1325,7 +1330,8 @@ logic out of it.
 
 ## 13. Open points
 
-_Needed from: v1. The feature in brackets after each point is the one that forces the decision._
+_Needed from: v0.1. The feature in brackets after each point is the one that forces the
+decision; the table at the top of this document gives its version._
 
 To be settled in the implementation plan, not guessed here.
 
@@ -1360,3 +1366,99 @@ To be settled in the implementation plan, not guessed here.
     accepted.
 12. **Reminders on read-only events** (reminders). Local reminders for ICS events, and for
     Google events that are not editable, are not in v1.
+
+## 14. AI access
+
+_Needed from: after v1. Nothing in v1 depends on it, but the constraints at the end of this
+section apply from v0.1 on._
+
+Goal: an AI assistant such as Claude can read and edit the calendar, with as few tokens per
+question as possible. "What do I have tomorrow?" should cost one short tool call and a few
+lines of output, not a JSON dump of a week.
+
+### Interface: an MCP server
+
+The [Model Context Protocol](https://modelcontextprotocol.io) is how Claude Desktop, Claude
+Code and other clients connect to local tools. The client starts a local process and talks
+JSON-RPC to it over stdin and stdout. SimpleCalendar ships that process as a small
+`simplecalendar-mcp` binary that links `simplecalendar-core`. It is not a Tauri app and loads
+no webview.
+
+The binary contains no calendar logic. Like the Tauri commands (§2), each tool is a thin
+wrapper around `CalendarService`. A plain CLI (`simplecalendar agenda tomorrow`) would be the
+same wrappers with a different input and output, and can be added later if useful.
+
+### Tools
+
+Few tools with short descriptions. Every tool description is sent to the model on every
+request, so each extra tool costs tokens even when it is never used.
+
+| Tool                                           | Returns                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| `agenda(from, to?, calendars?)`                | Occurrences in a range, one line each                            |
+| `free_time(from, to, minutes)`                 | Free slots of at least `minutes`, computed in Rust               |
+| `search(text, from?, to?)`                     | Matching occurrences, same line format as `agenda`               |
+| `get_event(ref)`                               | Full detail of one event: description, location, recurrence      |
+| `create_event`, `update_event`, `delete_event` | Same arguments and `this` / `all` scope as the UI commands (§10) |
+| `list_calendars`                               | Name, short ref and whether it is writable                       |
+
+### Rules for token-friendly output
+
+- **Text, not JSON.** One line per occurrence, for example
+  `Tue 14 Oct 09:00–09:30 Standup · Work · e7`. No field names, no null fields, no ids the model
+  does not need.
+- **Short refs.** The server hands out short refs (`e7`, `c2`) and keeps a table that maps them
+  to the real event or occurrence id for the lifetime of the process. UUIDs never reach the
+  model.
+- **One header line with context.** `agenda` starts with today's date and the display zone,
+  once. Times below it are wall-clock times in that zone, so the model does no zone arithmetic.
+- **Summaries first, detail on request.** `agenda` and `search` leave out descriptions and
+  locations. `get_event` returns them.
+- **Hard limits.** Ranges are capped (for example 31 days) and lists end with `+N more` instead
+  of growing without bound.
+- **Calculations in Rust.** Free time, recurrence expansion and conflicts are answered by the
+  core. Asking the model to work them out from raw events costs tokens and is error-prone.
+
+### Process model
+
+The MCP binary is a separate process, and §6 allows only one writer. So:
+
+- **Reads** open the database file through a read-only connection with the same pragmas as the
+  app's read connection. WAL mode allows readers in other processes, so reading works whether
+  the app is open or not.
+- **Writes** are forwarded to the running app over a local socket (a Unix socket on Linux, a
+  named pipe on Windows). The app performs them through `CalendarService` as usual: SQLite,
+  outbox, `calendar:changed`, sync. If the app is not running, the write tools fail with a short
+  message asking the user to open SimpleCalendar.
+
+This keeps the single-writer rule of §6 and the outbox of §7.3 unchanged.
+
+### Privacy and safety
+
+- Off by default. The user turns it on in the app's settings, and can choose read-only access
+  or limit it to some calendars.
+- Calendar contents go to the AI provider the user connects. The settings screen says so.
+- Credentials are never exposed: the MCP binary does not open the keychain and has no provider
+  access.
+- MCP clients ask the user before running a tool. Delete still asks for an explicit `scope`, so
+  "delete all events of this series" is never the default.
+
+### Constraints on v1
+
+These hold from v0.1 on, so this section stays possible without a rewrite:
+
+1. Tauri commands stay thin. Everything they do is reachable through `CalendarService`.
+2. `CalendarService` returns plain Rust types, not Tauri-specific or frontend-shaped data.
+   The webview and the MCP server each format them in their own way.
+3. Free-slot search, if the UI gets it, lives in the core, not in the frontend.
+
+### Open points
+
+1. **MCP SDK or hand-rolled.** The official Rust SDK (`rmcp`) against about 200 lines of
+   JSON-RPC over stdio. Decide on dependency size when this is built.
+2. **Separate binary or a subcommand** of the main binary. A subcommand ships one file, but on
+   Linux it still loads the WebKitGTK libraries at start-up, which costs memory per client.
+3. **Writes while the app is closed.** Whether the MCP binary may become the single writer when
+   no app is running, using a lock file, instead of refusing writes.
+4. **Lifetime of short refs.** How long refs stay valid when the calendar
+   changes under a running MCP process.

@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). No calendar logic, Tauri commands, SQLite, keychain code or tests exist yet.
+Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). No calendar logic, Tauri commands, SQLite, keychain code or tests exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
 
 ## Scope
 
 - Target platforms: Ubuntu and Windows (desktop only for now, mobile later).
 - Calendar sources: ICS subscriptions (read-only), Google Calendar API (read/write).
-  CalDAV comes after v1: design the provider trait for it from day one.
+  CalDAV comes in v0.4: design the provider trait for it from day one.
 - Users must be able to create, edit and delete events, not only subscribe.
 
 ## Principles
