@@ -1,3 +1,6 @@
+use simplecalendar_core::db::Db;
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -10,6 +13,12 @@ pub fn run() {
                 )?;
             }
             log::info!("simplecalendar-core {}", simplecalendar_core::version());
+
+            // The app-data directory comes from the bundle identifier in tauri.conf.json.
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let db = Db::open(&data_dir.join("simplecalendar.db"))?;
+            app.manage(db);
             Ok(())
         })
         .run(tauri::generate_context!())
