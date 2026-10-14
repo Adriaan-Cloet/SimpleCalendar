@@ -30,7 +30,7 @@ Current state: scaffold plus a static week-view design prototype on fake data (`
 - Look up current Tauri 2 / Svelte 5 docs via context7 before using APIs.
 - Explain non-obvious Rust to me; I'm learning Rust.
 - Write tests for recurrence/timezone logic before implementing.
-- Before finishing: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, `npm run check`.
+- Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `npm run check`.
 - Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`...).
 
 ## Commands
@@ -44,7 +44,7 @@ npm run lint         # prettier --check + eslint
 npm run format       # prettier --write
 ```
 
-- `cargo` commands run from `src-tauri/`. A single Rust test: `cargo test <name>`.
+- `cargo` commands run from `src-tauri/`. Pass `--workspace` (`--all` for `cargo fmt`), or only the app crate is checked. A single Rust test: `cargo test -p simplecalendar-core <name>`.
 - The frontend has no test runner.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
 - CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.
@@ -57,6 +57,7 @@ npm run format       # prettier --write
 - **SvelteKit 3 keeps its config in `vite.config.ts`.** There is no `svelte.config.js`. Runes mode is forced for all project files.
 - **Shared frontend code** lives in `src/lib/` and is imported as `#lib/...` (declared in `package.json`), not `$lib`.
 - **Frontend to Rust:** the frontend calls `invoke` from `@tauri-apps/api/core`; the Rust side is a `#[tauri::command]` function registered on the builder in `src-tauri/src/lib.rs`. `main.rs` only calls `simple_calendar_lib::run()`.
+- **Rust workspace.** `src-tauri/Cargo.toml` is both the app crate and the workspace root, so `Cargo.lock` and `target/` stay in `src-tauri/`. All calendar logic goes in `src-tauri/crates/core` (package `simplecalendar-core`, imported as `simplecalendar_core`). It must never depend on `tauri`; the app crate only wraps it in commands.
 - **Permissions:** `src-tauri/capabilities/default.json` controls which Tauri APIs and plugins the frontend may use. A new plugin needs its permission added there or calls are rejected at runtime.
 
 ## Conventions
