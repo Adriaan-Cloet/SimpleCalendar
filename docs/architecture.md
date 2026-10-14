@@ -1,7 +1,7 @@
 # Architecture
 
 Status: proposed design, nothing in this document is implemented yet.
-Last updated: 2026-10-13 (revised after review).
+Last updated: 2026-10-14 (AI access added as an after-v1 feature).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -48,6 +48,7 @@ _Needed from: v1. Applies to every feature._
 | Tray icon, background sync           | Sync and reminders only run while the app is open. The scheduler has no window dependency, so this can be added. |
 | Asking the user to resolve conflicts | Server wins in v1. The outbox keeps the rejected change, so a UI can come later.                                 |
 | Mobile                               | The core crate has no Tauri or desktop dependency, which is the preparation for it.                              |
+| AI access (MCP server)               | After v1. Needs no new core logic, only a second front door onto `CalendarService` (§14).                        |
 
 ## 2. Overview
 
@@ -1360,3 +1361,99 @@ To be settled in the implementation plan, not guessed here.
     accepted.
 12. **Reminders on read-only events** (reminders). Local reminders for ICS events, and for
     Google events that are not editable, are not in v1.
+
+## 14. AI access
+
+_Needed from: after v1. Nothing in v1 depends on it, but the constraints at the end of this
+section apply from local calendars on._
+
+Goal: an AI assistant such as Claude can read and edit the calendar, with as few tokens per
+question as possible. "What do I have tomorrow?" should cost one short tool call and a few
+lines of output, not a JSON dump of a week.
+
+### Interface: an MCP server
+
+The [Model Context Protocol](https://modelcontextprotocol.io) is how Claude Desktop, Claude
+Code and other clients connect to local tools. The client starts a local process and talks
+JSON-RPC to it over stdin and stdout. SimpleCalendar ships that process as a small
+`simplecalendar-mcp` binary that links `simplecalendar-core`. It is not a Tauri app and loads
+no webview.
+
+The binary contains no calendar logic. Like the Tauri commands (§2), each tool is a thin
+wrapper around `CalendarService`. A plain CLI (`simplecalendar agenda tomorrow`) would be the
+same wrappers with a different input and output, and can be added later if useful.
+
+### Tools
+
+Few tools with short descriptions. Every tool description is sent to the model on every
+request, so each extra tool costs tokens even when it is never used.
+
+| Tool                                           | Returns                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| `agenda(from, to?, calendars?)`                | Occurrences in a range, one line each                            |
+| `free_time(from, to, minutes)`                 | Free slots of at least `minutes`, computed in Rust               |
+| `search(text, from?, to?)`                     | Matching occurrences, same line format as `agenda`               |
+| `get_event(ref)`                               | Full detail of one event: description, location, recurrence      |
+| `create_event`, `update_event`, `delete_event` | Same arguments and `this` / `all` scope as the UI commands (§10) |
+| `list_calendars`                               | Name, short ref and whether it is writable                       |
+
+### Rules for token-friendly output
+
+- **Text, not JSON.** One line per occurrence, for example
+  `Tue 14 Oct 09:00–09:30 Standup · Work · e7`. No field names, no null fields, no ids the model
+  does not need.
+- **Short refs.** The server hands out short refs (`e7`, `c2`) and keeps a table that maps them
+  to the real event or occurrence id for the lifetime of the process. UUIDs never reach the
+  model.
+- **One header line with context.** `agenda` starts with today's date and the display zone,
+  once. Times below it are wall-clock times in that zone, so the model does no zone arithmetic.
+- **Summaries first, detail on request.** `agenda` and `search` leave out descriptions and
+  locations. `get_event` returns them.
+- **Hard limits.** Ranges are capped (for example 31 days) and lists end with `+N more` instead
+  of growing without bound.
+- **Calculations in Rust.** Free time, recurrence expansion and conflicts are answered by the
+  core. Asking the model to work them out from raw events costs tokens and is error-prone.
+
+### Process model
+
+The MCP binary is a separate process, and §6 allows only one writer. So:
+
+- **Reads** open the database file through a read-only connection with the same pragmas as the
+  app's read connection. WAL mode allows readers in other processes, so reading works whether
+  the app is open or not.
+- **Writes** are forwarded to the running app over a local socket (a Unix socket on Linux, a
+  named pipe on Windows). The app performs them through `CalendarService` as usual: SQLite,
+  outbox, `calendar:changed`, sync. If the app is not running, the write tools fail with a short
+  message asking the user to open SimpleCalendar.
+
+This keeps the single-writer rule of §6 and the outbox of §7.3 unchanged.
+
+### Privacy and safety
+
+- Off by default. The user turns it on in the app's settings, and can choose read-only access
+  or limit it to some calendars.
+- Calendar contents go to the AI provider the user connects. The settings screen says so.
+- Credentials are never exposed: the MCP binary does not open the keychain and has no provider
+  access.
+- MCP clients ask the user before running a tool. Delete still asks for an explicit `scope`, so
+  "delete all events of this series" is never the default.
+
+### Constraints on v1
+
+These hold from local calendars on, so this section stays possible without a rewrite:
+
+1. Tauri commands stay thin. Everything they do is reachable through `CalendarService`.
+2. `CalendarService` returns plain Rust types, not Tauri-specific or frontend-shaped data.
+   The webview and the MCP server each format them in their own way.
+3. Free-slot search, if the UI gets it, lives in the core, not in the frontend.
+
+### Open points
+
+1. **MCP SDK or hand-rolled.** The official Rust SDK (`rmcp`) against about 200 lines of
+   JSON-RPC over stdio. Decide on dependency size when this is built.
+2. **Separate binary or a subcommand** of the main binary. A subcommand ships one file, but on
+   Linux it still loads the WebKitGTK libraries at start-up, which costs memory per client.
+3. **Writes while the app is closed.** Whether the MCP binary may become the single writer when
+   no app is running, using a lock file, instead of refusing writes.
+4. **Lifetime of short refs.** How long refs stay valid when the calendar
+   changes under a running MCP process.
