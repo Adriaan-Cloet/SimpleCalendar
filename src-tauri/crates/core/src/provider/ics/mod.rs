@@ -26,7 +26,10 @@ const MAX_FEED_BYTES: usize = 32 * 1024 * 1024;
 
 /// The cursor: JSON with the HTTP validators and a SHA-256 of the body (§5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[expect(dead_code, reason = "used by `pull`, which is not written yet")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by `pull`, which is not written yet")
+)]
 struct Cursor {
     etag: Option<String>,
     last_modified: Option<String>,

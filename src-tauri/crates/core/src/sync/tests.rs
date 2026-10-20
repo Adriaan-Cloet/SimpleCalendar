@@ -919,6 +919,18 @@ async fn the_secret_is_passed_to_the_provider() {
 }
 
 #[tokio::test]
+async fn the_source_name_is_passed_to_the_provider() {
+    let mut h = Harness::new().await;
+    h.db.write(|c| c.execute("UPDATE sources SET display_name = 'Holidays'", []))
+        .await
+        .unwrap();
+
+    h.sync().await;
+
+    assert_eq!(h.next_pull().await.display_name, "Holidays");
+}
+
+#[tokio::test]
 async fn without_a_keychain_the_source_reports_an_error_and_is_not_pulled() {
     let mut h = Harness::new().await;
     h.store.set_unavailable(Some(UnavailableReason::NoService));

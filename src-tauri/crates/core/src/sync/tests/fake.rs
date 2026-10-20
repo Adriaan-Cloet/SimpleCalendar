@@ -26,6 +26,7 @@ pub struct Pull {
     pub calendar: String,
     pub cursor: Option<String>,
     pub page: Option<String>,
+    pub display_name: String,
     pub secret: Option<Secret>,
     pub at: Instant,
 }
@@ -136,6 +137,7 @@ impl CalendarProvider for Fake {
             calendar: calendar.remote_id.clone(),
             cursor: cursor.map(|c| c.0.clone()),
             page: page.map(|p| p.0.clone()),
+            display_name: cx.display_name.clone(),
             secret: cx.secret.clone(),
             at: Instant::now(),
         });

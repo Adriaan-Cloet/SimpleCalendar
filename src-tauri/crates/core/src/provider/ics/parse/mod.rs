@@ -11,13 +11,19 @@ use crate::provider::RemoteEvent;
 
 /// Why a feed could not be read at all. A single broken event is skipped instead.
 #[derive(Debug, thiserror::Error)]
-#[expect(dead_code, reason = "used by `pull`, which is not written yet")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by `pull`, which is not written yet")
+)]
 #[error("not an iCalendar feed: {0}")]
 pub(super) struct ParseError(String);
 
 /// Every event in the feed. Events without a `UID` or a usable `DTSTART` are logged and left
 /// out, so one broken event never hides the rest.
-#[expect(dead_code, reason = "used by `pull`, which is not written yet")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by `pull`, which is not written yet")
+)]
 pub(super) fn parse_feed(text: &str) -> Result<Vec<RemoteEvent>, ParseError> {
     let _ = text;
     todo!()
