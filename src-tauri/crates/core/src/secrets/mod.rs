@@ -11,7 +11,7 @@ mod memory;
 mod tests;
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,8 +48,44 @@ pub enum Secret {
 /// Never prints the secret itself, so a stray `{:?}` in a log line cannot leak it.
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            Secret::IcsUrl { .. } => f.write_str("IcsUrl { url: <redacted> }"),
+        }
     }
+}
+
+/// Version of the stored JSON. A value with another version is refused rather than guessed at.
+const FORMAT_VERSION: u32 = 1;
+
+/// The JSON document in the keychain: `{"v": 1, "kind": ..., ...}`.
+//
+// Rust note: `#[serde(flatten)]` puts the fields of `secret` next to `v` in the same object
+// instead of under a `secret` key.
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    v: u32,
+    #[serde(flatten)]
+    secret: Secret,
+}
+
+fn encode(secret: &Secret) -> String {
+    let stored = Stored {
+        v: FORMAT_VERSION,
+        secret: secret.clone(),
+    };
+    // Rust note: serialising a plain struct with string fields to JSON cannot fail, so this
+    // `expect` is never reached.
+    serde_json::to_string(&stored).expect("secret serialises to JSON")
+}
+
+fn decode(raw: &str) -> Result<Secret, SecretError> {
+    // The error text from serde_json names the position, never the content.
+    let stored: Stored =
+        serde_json::from_str(raw).map_err(|e| SecretError::BadFormat(e.to_string()))?;
+    if stored.v != FORMAT_VERSION {
+        return Err(SecretError::BadFormat(format!("version {}", stored.v)));
+    }
+    Ok(stored.secret)
 }
 
 /// Why the keychain cannot be used.
@@ -73,13 +109,26 @@ pub struct SecretsUnavailable {
 impl SecretsUnavailable {
     /// The text from the architecture, telling the user what to do.
     pub fn message(&self) -> &'static str {
-        todo!()
+        match self.reason {
+            UnavailableReason::NoService => {
+                "SimpleCalendar could not find a system keyring. Account credentials are stored \
+                 in the system keyring (GNOME Keyring or KWallet), never in files. Install and \
+                 start `gnome-keyring`, log in again and restart SimpleCalendar. Local calendars \
+                 keep working."
+            }
+            UnavailableReason::Locked => "The system keyring is locked. Unlock it and try again.",
+        }
     }
 }
 
 impl Serialize for SecretsUnavailable {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!()
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("SecretsUnavailable", 3)?;
+        s.serialize_field("kind", "secrets_unavailable")?;
+        s.serialize_field("reason", &self.reason)?;
+        s.serialize_field("message", self.message())?;
+        s.end()
     }
 }
 
@@ -111,40 +160,90 @@ pub struct Secrets {
 
 impl Secrets {
     pub fn new(store: Arc<dyn SecretStore>) -> Secrets {
-        todo!()
+        Secrets {
+            store,
+            unavailable: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Probes the keychain and remembers the result. Called once at startup.
     pub async fn probe(&self) -> Result<(), SecretsUnavailable> {
-        todo!()
+        match self.run(|store| store.probe()).await {
+            Err(SecretError::Unavailable(unavailable)) => Err(unavailable),
+            // Neither of the two cases the user can act on. Adding a source will report the
+            // actual error, so the keychain is not declared unusable for it.
+            Err(other) => {
+                log::warn!("keychain probe failed: {other}");
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
     }
 
     /// Whether the keychain is usable. After a failed probe this probes again, so a "Try again"
     /// button only has to ask for the status.
     pub async fn status(&self) -> Option<SecretsUnavailable> {
-        todo!()
+        let last = *lock(&self.unavailable);
+        match last {
+            Some(_) => self.probe().await.err(),
+            None => None,
+        }
     }
 
     /// Fails with `SecretsUnavailable` if the keychain cannot be used. Adding a remote source
     /// calls this first.
     pub async fn require(&self) -> Result<(), SecretsUnavailable> {
-        todo!()
+        match self.status().await {
+            Some(unavailable) => Err(unavailable),
+            None => Ok(()),
+        }
     }
 
     /// The secret of `source_id`, or `None` if it has none.
     pub async fn get(&self, source_id: &str) -> Result<Option<Secret>, SecretError> {
-        todo!()
+        let account = account(source_id);
+        let raw = self.run(move |store| store.get(&account)).await?;
+        raw.as_deref().map(decode).transpose()
     }
 
     /// Stores the secret of `source_id`, replacing any earlier one.
     pub async fn set(&self, source_id: &str, secret: &Secret) -> Result<(), SecretError> {
-        todo!()
+        let account = account(source_id);
+        let value = encode(secret);
+        self.run(move |store| store.set(&account, &value)).await
     }
 
     /// Removes the secret of `source_id`, if there is one.
     pub async fn delete(&self, source_id: &str) -> Result<(), SecretError> {
-        todo!()
+        let account = account(source_id);
+        self.run(move |store| store.delete(&account)).await
     }
+
+    /// Runs `f` on the store in a blocking thread and remembers whether the keychain answered.
+    //
+    // Rust note: the closure gets `&dyn SecretStore`, a reference to "some type that implements
+    // the trait". Which type it is, the keychain or the in-memory store, is decided at runtime.
+    async fn run<T, F>(&self, f: F) -> Result<T, SecretError>
+    where
+        F: FnOnce(&dyn SecretStore) -> Result<T, SecretError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        let result = tokio::task::spawn_blocking(move || f(store.as_ref())).await?;
+        match &result {
+            Ok(_) => *lock(&self.unavailable) = None,
+            Err(SecretError::Unavailable(unavailable)) => {
+                *lock(&self.unavailable) = Some(*unavailable)
+            }
+            Err(_) => {}
+        }
+        result
+    }
+}
+
+/// Locks the status, also after a panic elsewhere: it is a plain value that is always valid.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The keychain account of a source (§8).
