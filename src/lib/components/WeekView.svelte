@@ -7,6 +7,7 @@
 		isSameDay,
 		minutesSinceMidnight
 	} from '#lib/prototype/week-dates.js';
+	import { layoutDay } from '#lib/overlap-layout.js';
 	import EventBlock from './EventBlock.svelte';
 
 	interface Props {
@@ -38,6 +39,18 @@
 	const nowMinutes = $derived(minutesSinceMidnight(now));
 	const hours = Array.from({ length: 23 }, (_, i) => i + 1);
 	const allDayRows = $derived(Math.max(1, ...allDayEvents.map((e) => e.row + 1)));
+
+	// Each day's timed events with their place, in drawing order. Hidden calendars stay in the
+	// layout, so hiding one fades its events without moving the others (design.md §8).
+	const eventsById = $derived(new Map(timedEvents.map((e) => [e.id, e])));
+	const layouts = $derived(
+		days.map((_, i) =>
+			layoutDay(timedEvents.filter((e) => e.day === i)).map((placement) => ({
+				placement,
+				event: eventsById.get(placement.id)!
+			}))
+		)
+	);
 
 	const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
 	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });
@@ -135,9 +148,10 @@
 
 		{#each days as day, i (i)}
 			<div class={{ day: true, weekend: isWeekend(day) }} style:grid-column={i + 2}>
-				{#each timedEvents.filter((e) => e.day === i) as event (event.id)}
+				{#each layouts[i] as { event, placement } (event.id)}
 					<EventBlock
 						{event}
+						{placement}
 						calendar={calendars[event.calendarId]}
 						timeLabel={timeFormat.format(atMinutes(day, event.start))}
 						hidden={!visible[event.calendarId]}
@@ -324,11 +338,14 @@
 	}
 
 	.day {
+		/* What the channel between overlapping events is drawn in (EventBlock) */
+		--day-surface: var(--surface);
 		position: relative;
 		border-left: 1px solid var(--grid-line);
 	}
 
 	.day.weekend {
+		--day-surface: var(--surface-weekend);
 		background: var(--surface-weekend);
 	}
 

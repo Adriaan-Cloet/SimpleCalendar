@@ -52,6 +52,8 @@
 	--event-fill-mix: 14%;
 	--event-hover-mix: 20%;
 	--event-selected-mix: 28%;
+	/* An event that lies over another one: one step stronger, so same-colour events stay apart */
+	--event-raised-mix: 23%;
 	--event-text-mix: 45%;
 
 	/* Shadows: soft shadow plus a 1px ring, so edges stay crisp on any background */
@@ -153,6 +155,7 @@
 		--event-fill-mix: 24%;
 		--event-hover-mix: 32%;
 		--event-selected-mix: 40%;
+		--event-raised-mix: 33%;
 
 		--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 		--shadow-2:
@@ -203,6 +206,7 @@
 	--event-fill-mix: 24%;
 	--event-hover-mix: 32%;
 	--event-selected-mix: 40%;
+	--event-raised-mix: 33%;
 
 	--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 	--shadow-2:

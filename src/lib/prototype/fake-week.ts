@@ -24,10 +24,6 @@ export interface TimedEvent {
 	day: number;
 	start: number;
 	end: number;
-	// Hand-placed here. The real values come from the tested overlap layout function
-	// (architecture.md §10).
-	column: number;
-	columns: number;
 	location?: string;
 	notes?: string;
 }
@@ -38,7 +34,7 @@ export interface AllDayEvent {
 	title: string;
 	firstDay: number;
 	lastDay: number;
-	/** Row inside the all-day area, hand-placed like `column` above. */
+	/** Row inside the all-day area, hand-placed. */
 	row: number;
 }
 
@@ -78,8 +74,6 @@ function timed(
 		day,
 		start: t(start),
 		end: t(end),
-		column: 0,
-		columns: 1,
 		...extra
 	};
 }
@@ -91,22 +85,18 @@ export const timedEvents: TimedEvent[] = [
 	timed('m3', 'personal', 'Lunch with Sam', 0, '12:30', '13:15', { location: 'De Markt' }),
 	timed('m4', 'training', 'Run 10 km', 0, '18:30', '19:30', { notes: 'Easy pace, zone 2.' }),
 
-	// Tuesday: two events overlap
+	// Tuesday: the second event starts later and cascades over the first
 	timed('t1', 'work', 'Standup', 1, '09:00', '09:15'),
-	timed('t2', 'work', 'Design review', 1, '11:00', '12:00', { column: 0, columns: 2 }),
-	timed('t3', 'work', '1:1 with Lena', 1, '11:30', '12:30', { column: 1, columns: 2 }),
+	timed('t2', 'work', 'Design review', 1, '11:00', '12:00'),
+	timed('t3', 'work', '1:1 with Lena', 1, '11:30', '12:30'),
 	timed('t4', 'work', 'Focus time', 1, '14:00', '16:00'),
 	timed('t5', 'training', 'Swim 2 km', 1, '19:00', '20:30', { location: 'Sportoase' }),
 
-	// Wednesday: three events overlap, one long block
+	// Wednesday: two events start together, a third cascades over both; one long block
 	timed('w1', 'work', 'Standup', 2, '09:00', '09:15'),
-	timed('w2', 'work', 'Customer call', 2, '10:00', '11:00', { column: 0, columns: 3 }),
-	timed('w3', 'personal', 'Dentist', 2, '10:00', '10:45', {
-		column: 1,
-		columns: 3,
-		location: 'Bondgenotenlaan 12'
-	}),
-	timed('w4', 'work', 'Interview', 2, '10:30', '11:30', { column: 2, columns: 3 }),
+	timed('w2', 'work', 'Customer call', 2, '10:00', '11:00'),
+	timed('w3', 'personal', 'Dentist', 2, '10:00', '10:45', { location: 'Bondgenotenlaan 12' }),
+	timed('w4', 'work', 'Interview', 2, '10:30', '11:30'),
 	timed('w5', 'work', 'Workshop: offline sync', 2, '13:00', '17:00', {
 		location: 'Room 3.02',
 		notes: 'Bring laptop. We go through the outbox design and the conflict rules.'
