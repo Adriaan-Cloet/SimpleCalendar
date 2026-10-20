@@ -5,6 +5,7 @@
 //! an open write transaction and sees the last committed state.
 
 mod migrations;
+pub mod occurrences;
 #[cfg(test)]
 mod tests;
 

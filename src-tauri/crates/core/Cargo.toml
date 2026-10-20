@@ -12,6 +12,14 @@ publish = false
 # Never add `tauri` here. The core stays free of the UI shell, so its tests build without
 # WebKit and the same crate can sit behind a mobile shell later (docs/architecture.md §3).
 [dependencies]
+# Dates and times. Already built through Tauri; `rrule` is built on it (§11).
+chrono = "0.4"
+# The IANA zone database, embedded: Windows does not ship one. Same major as `rrule` uses.
+chrono-tz = "0.10"
+log = "0.4"
+# Recurrence expansion (RFC 5545). Only used inside `recurrence::expand`. Its `regex`
+# dependency is already built through Tauri.
+rrule = "0.14"
 # SQLite compiled into the binary: the same version on Ubuntu and Windows (§11).
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migrations, versioned in `PRAGMA user_version`.

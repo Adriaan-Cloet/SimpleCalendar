@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). SQLite storage exists (`src-tauri/crates/core/src/db/`: two connections, migrations, the v0.1 schema), and the app opens it at startup. No other calendar logic, Tauri commands or keychain code exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
+Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). SQLite storage exists (`src-tauri/crates/core/src/db/`: two connections, migrations, the v0.1 schema), and the app opens it at startup. Reading a date range works in the core (`db/occurrences/`: recurrence expansion in `recurrence/`, model in `model/`), but no Tauri command calls it yet. No sync, providers, Tauri commands or keychain code exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
 
 ## Scope
 

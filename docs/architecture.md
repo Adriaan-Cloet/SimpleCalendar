@@ -1,8 +1,8 @@
 # Architecture
 
-Status: proposed design. Implemented so far: the crate layout (§3) and the SQLite connections and
-migration 1 (§6).
-Last updated: 2026-10-14 (version markers mapped to the roadmap, CalDAV moved into v0.4).
+Status: proposed design. Implemented so far: the crate layout (§3), the SQLite connections and
+migration 1 (§6), and reading a date range with recurrence expansion (§4 Occurrence, §6).
+Last updated: 2026-10-20 (recurrence expansion and the date-range read implemented, §6).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -646,6 +646,7 @@ JOIN calendars c ON c.id = e.calendar_id
 WHERE c.visible = 1
   AND e.recurrence IS NOT NULL
   AND e.pending_delete = 0
+  AND e.status <> 'cancelled'
   AND e.start_utc < :to
   AND (e.recurrence_end_utc IS NULL OR e.recurrence_end_utc > :from);
 ```
@@ -654,7 +655,24 @@ For each series the `recurrence` module expands the rule inside the range, in th
 zone. All exceptions of that series, cancelled ones included, are loaded through
 `events_exceptions`; each one removes the occurrence it replaces. Exceptions that are not
 cancelled appear through the first query, at their own (possibly moved) time. An exception that
-is not linked to a master yet is invisible to both queries (§7.2).
+is not linked to a master yet is invisible to both queries (§7.2). A cancelled master means the
+whole series was deleted, so the second query skips it as well.
+
+How `recurrence::expand` treats the recurrence lines:
+
+- `rrule` generates only the `RRULE` dates. A zoned series is expanded in its own zone. Floating
+  and all-day series are expanded on the wall clock stored as UTC. A fixed-offset series is
+  shifted to its wall clock and back, because `rrule` has no fixed offsets.
+- `RDATE`, `EXDATE` and `UNTIL` are parsed in the core. Each value is turned into a stored value
+  on its own, so exclusions match by instant (§7.7 "Mixed forms"). `rrule` would read a value
+  without `Z` or `TZID` in the machine's zone, which is wrong on every machine but one. A
+  date-form `UNTIL` includes that whole day.
+- Local times follow RFC 5545 §3.3.5. A time inside a spring-forward gap is read with the offset
+  from before the gap (02:30 becomes 03:30). A time that exists twice is the earlier one.
+- If a series cannot be expanded, the problem is logged and only its first occurrence is shown.
+  The rest of the range is unaffected.
+- The function is `simplecalendar_core::db::occurrences::list_occurrences`. The
+  `pending_delete` conditions are left out until that column arrives in v0.2.
 
 ## 7. Sync engine
 
