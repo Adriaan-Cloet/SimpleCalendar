@@ -19,12 +19,22 @@ async-trait = "0.1"
 chrono = "0.4"
 # The IANA zone database, embedded: Windows does not ship one. Same major as `rrule` uses.
 chrono-tz = "0.10"
+# ICS parsing (§7.6). Only its low-level parser is used, because §7.7 needs the raw `TZID`
+# parameters and `VTIMEZONE` parts, which the typed API does not expose (§13 point 3).
+icalendar = { version = "0.17", default-features = false, features = ["parser"] }
 log = "0.4"
 # The OS keychain API (§8). The platform store crates below plug into it.
 keyring-core = "1"
+# HTTP client for feeds and, later, the Google API (§11). Without default features: rustls with
+# the OS certificate store through `rustls-platform-verifier`, no HTTP/2, no system proxy
+# lookup, no charset detection (iCalendar is UTF-8).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 # Recurrence expansion (RFC 5545). Only used inside `recurrence::expand`. Its `regex`
 # dependency is already built through Tauri.
 rrule = "0.14"
+# The crypto provider for rustls: `ring`, not the default `aws-lc-rs`, which needs a C and
+# assembler toolchain on Windows (§13 point 1).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # The keychain value is a small versioned JSON document (§8). Both already built through Tauri.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +42,9 @@ serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migrations, versioned in `PRAGMA user_version`.
 rusqlite_migration = "2.6"
+# Hash of a feed body, to detect an unchanged feed (§7.6). 0.10, the version the Linux keychain
+# store already builds.
+sha2 = "0.10"
 thiserror = "2"
 # `spawn_blocking` for the blocking SQLite calls, channels for the sync engine. Already built
 # through Tauri. `time` (the sync timer) is the only feature Tauri does not enable already.
@@ -49,5 +62,7 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# A local HTTP server for the ICS provider tests. Never part of the shipped binary.
+wiremock = "0.6"
 # `test-util` pauses the clock, so the 60-minute sync timer is tested without waiting.
 tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }

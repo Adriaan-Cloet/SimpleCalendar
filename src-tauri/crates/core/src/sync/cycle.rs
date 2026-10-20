@@ -114,6 +114,7 @@ async fn sync_source(
     // 1. Authenticate. For the read-only sources of v0.1 that means reading the secret.
     let cx = SourceContext {
         source_id: source_id.to_owned(),
+        display_name: String::new(),
         secret: ctx.secrets.get(source_id).await?,
     };
 
