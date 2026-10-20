@@ -4,6 +4,9 @@
 //! Two queries on the read connection, then expansion in Rust. Nothing here writes: occurrences
 //! are computed per query and never stored (§4).
 
+#[cfg(test)]
+mod tests;
+
 use chrono_tz::Tz;
 use rusqlite::Connection;
 

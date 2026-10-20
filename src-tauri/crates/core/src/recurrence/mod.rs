@@ -5,6 +5,9 @@
 //! parsed here, because `rrule` would read a value without `Z` or `TZID` in the machine's
 //! own zone, and the values of one event may each use a different form (§7.7 "Mixed forms").
 
+#[cfg(test)]
+mod tests;
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 
