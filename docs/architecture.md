@@ -1,8 +1,9 @@
 # Architecture
 
 Status: proposed design. Implemented so far: the crate layout (§3), the SQLite connections and
-migration 1 (§6), and reading a date range with recurrence expansion (§4 Occurrence, §6).
-Last updated: 2026-10-20 (recurrence expansion and the date-range read implemented, §6).
+migration 1 (§6), reading a date range with recurrence expansion (§4 Occurrence, §6), and the
+keychain secret store (§8).
+Last updated: 2026-10-20 (keychain store implemented, TLS and crypto stack chosen, §8, §13).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -1101,9 +1102,31 @@ when the keyring is locked and the prompt is dismissed.
 The frontend gets this as a structured error (`secrets_unavailable` with a reason), not as a
 string to parse, and can re-run the probe from a "Try again" button.
 
-`keyring-core` reports a locked or denied store as `NoStorageAccess`. Which error the D-Bus
-store returns when no Secret Service is running at all is not documented, so the implementation
-plan includes a test in a session without a keyring to pin that mapping down.
+`keyring-core` reports a locked or denied store as `NoStorageAccess`, which becomes `locked`.
+The D-Bus store returns `PlatformFailure` when it cannot connect, which becomes `no_service`.
+Both Linux cases were checked in a real session:
+
+| Session                      | Error from connecting                                                |
+| ---------------------------- | -------------------------------------------------------------------- |
+| D-Bus, but no Secret Service | `PlatformFailure(Dbus(org.freedesktop.DBus.Error.ServiceUnknown))`   |
+| No D-Bus session at all      | `PlatformFailure(Dbus(org.freedesktop.DBus.Error.Spawn.ExecFailed))` |
+
+`scripts/test-keychain.sh` re-runs this check, plus a round trip against a fresh GNOME Keyring,
+in throwaway D-Bus sessions that never touch the user's own keyring.
+
+Implementation notes:
+
+- The probe reads the `probe` account, which never holds a value. On Linux a locked keyring is
+  only noticed at the first write, when the unlock prompt appears; if it is dismissed, that
+  write fails with `locked`.
+- The connection to the Secret Service is made on first use. After a failure it is dropped and
+  made again on the next call. Starting a keyring and pressing "Try again" therefore works
+  without a restart.
+- `get_status` re-probes while the last result was a failure. It reports
+  `secrets_unavailable` or `null`.
+- `Secrets::require` is the check that adding a remote source runs first.
+- The stored value is `{"v": 1, "kind": "ics_url", "url": ...}`. A value with an unknown version
+  is refused, not guessed at. `Debug` output of a secret is redacted.
 
 ### Google sign-in
 
@@ -1208,25 +1231,25 @@ inspected offline.
 
 ### Core crate (`simplecalendar-core`)
 
-| Crate                                   | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        | Needed from             |
-| --------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------- |
-| `rusqlite` 0.40, feature `bundled`      | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) | v0.1, ICS subscriptions |
-| `rusqlite_migration` 2.6                | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   | v0.1, ICS subscriptions |
-| `tokio` 1                               | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                | v0.1, ICS subscriptions |
-| `chrono` 0.4, `chrono-tz` 0.10          | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            | v0.1, ICS subscriptions |
-| `rrule` 0.14                            | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   | v0.1, ICS subscriptions |
-| `thiserror` 2                           | Error enums                          | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
-| `uuid` 1                                | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
-| `serde`, `serde_json`, `log`            | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | v0.1, ICS subscriptions |
-| `reqwest` 0.13                          | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
-| `icalendar` 0.17, feature `parser`      | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
-| `sha2` 0.11                             | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway                                                                                                                | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
-| `async-trait`                           | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | v0.1, ICS subscriptions |
-| `keyring-core` 1.0                      | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | v0.1, ICS subscriptions |
-| `dbus-secret-service-keyring-store` 1.0 | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | v0.1, ICS subscriptions |
-| `windows-native-keyring-store` 1.1      | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | v0.1, ICS subscriptions |
-| `wiremock` 0.6 (dev only)               | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | v0.1, ICS subscriptions |
-| `oauth2` 5.0                            | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | v0.2, Google read       |
+| Crate                                                          | Purpose                              | Why this one                                                                                                                                                 | Rejected                                                                                        | Needed from             |
+| -------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------- |
+| `rusqlite` 0.40, feature `bundled`                             | SQLite                               | Small synchronous binding. `bundled` compiles SQLite into the binary: same version on both platforms, nothing to install on Windows                          | `sqlx` (connection pool, macros, build-time database), `tauri-plugin-sql` (SQL in the frontend) | v0.1, ICS subscriptions |
+| `rusqlite_migration` 2.6                                       | Schema migrations                    | Tiny, uses `user_version`, depends only on `rusqlite` and `log`. Could be replaced by about 25 lines of our own                                              | `refinery` (more than needed)                                                                   | v0.1, ICS subscriptions |
+| `tokio` 1                                                      | Async runtime, channels, timers      | Already built: Tauri runs on it                                                                                                                              | A second runtime                                                                                | v0.1, ICS subscriptions |
+| `chrono` 0.4, `chrono-tz` 0.10                                 | Dates, times, IANA zones             | `rrule` and `icalendar` are built on them. `chrono-tz` embeds the zone database, which Windows does not provide. This adds to the binary size                | `jiff` (nicer API, but every recurrence call would need conversions)                            | v0.1, ICS subscriptions |
+| `rrule` 0.14                                                   | Recurrence expansion (RFC 5545)      | The established implementation. **Risk:** last release April 2025. Mitigation: it is used in one module behind one function, and our tests are written first | Writing an expander ourselves                                                                   | v0.1, ICS subscriptions |
+| `thiserror` 2                                                  | Error enums                          | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
+| `uuid` 1                                                       | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
+| `serde`, `serde_json`, `log`                                   | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | v0.1, ICS subscriptions |
+| `reqwest` 0.13                                                 | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
+| `icalendar` 0.17, feature `parser`                             | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
+| `sha2` 0.10                                                    | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway. 0.10 is the version the keychain store already builds                                                         | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
+| `async-trait`                                                  | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | v0.1, ICS subscriptions |
+| `keyring-core` 1.0                                             | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | v0.1, ICS subscriptions |
+| `dbus-secret-service-keyring-store` 1.0, feature `crypto-rust` | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | v0.1, ICS subscriptions |
+| `windows-native-keyring-store` 1.1                             | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | v0.1, ICS subscriptions |
+| `wiremock` 0.6 (dev only)                                      | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | v0.1, ICS subscriptions |
+| `oauth2` 5.0                                                   | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | v0.2, Google read       |
 
 The two keychain store crates are platform-specific dependencies, so each platform compiles
 only its own.
@@ -1356,9 +1379,13 @@ decision; the table at the top of this document gives its version._
 
 To be settled in the implementation plan, not guessed here.
 
-1. **TLS backend for `reqwest`** (ICS subscriptions). Platform TLS or rustls. The Linux
-   keychain store also needs a crypto feature (`crypto-rust` or `crypto-openssl`), so both
-   choices should be made together to avoid shipping two crypto stacks.
+1. **TLS backend for `reqwest`** (ICS subscriptions). **Decided (#5): pure Rust.** The Linux
+   keychain store uses `crypto-rust`. `reqwest` will use rustls with the `ring` provider
+   (`rustls-no-provider` plus `rustls` with `ring`, not the default `aws-lc-rs`) and the OS
+   certificate store through `rustls-platform-verifier`. TLS then behaves the same on Ubuntu and
+   Windows, and the packages depend on no system OpenSSL version. `dbus-secret-service` uses
+   `sha2` 0.10, so the feed hash and PKCE should use 0.10 too, not 0.11, to avoid building two
+   copies.
 2. **`async-trait`** (ICS subscriptions). Check whether the current toolchain (rustc 1.99)
    allows native `async fn` through `dyn`. If so, drop the crate.
 3. **What `icalendar`'s parser exposes** (ICS subscriptions). §7.7 needs the raw `TZID` string

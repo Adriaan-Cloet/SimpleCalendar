@@ -6,6 +6,7 @@
 pub mod db;
 pub mod model;
 pub mod recurrence;
+pub mod secrets;
 
 /// Version of this crate, as set in its `Cargo.toml`.
 pub fn version() -> &'static str {
