@@ -1,9 +1,12 @@
 <script lang="ts" module>
-	import type { Calendar } from '#lib/prototype/fake-week.js';
+	import type { CalendarInfo } from '#lib/calendar.js';
 
 	export interface EventDetails {
 		title: string;
-		calendar: Calendar;
+		calendar: CalendarInfo;
+		/** The event's own colour, else its calendar's */
+		color: string | null;
+		editable: boolean;
 		/** One line per entry, e.g. the date and the time range */
 		when: string[];
 		location?: string;
@@ -61,7 +64,7 @@
 	}
 
 	const readOnlyReason = $derived(
-		details.calendar.source === 'ics'
+		details.calendar.source_kind === 'ics'
 			? 'Subscribed calendars can’t be edited.'
 			: 'You can view this calendar but not change it.'
 	);
@@ -74,7 +77,7 @@
 	class={{ popover: true, ready: position.ready, left: position.side === 'left' }}
 	style:left="{position.left}px"
 	style:top="{position.top}px"
-	style:--cal={calendarColor(details.calendar.color)}
+	style:--cal={calendarColor(details.color, details.calendar.id)}
 	role="dialog"
 	aria-labelledby="popover-title"
 >
@@ -99,7 +102,7 @@
 	{/if}
 
 	<footer>
-		{#if details.calendar.editable}
+		{#if details.editable}
 			<button type="button" class="button danger">Delete</button>
 			<button type="button" class="button primary">Edit</button>
 		{:else}

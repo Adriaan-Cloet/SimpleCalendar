@@ -1,17 +1,28 @@
 <script lang="ts">
+	import type { CalendarInfo } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
-	import { sourceLabels, type Calendar, type SourceKind } from '#lib/prototype/fake-week.js';
-	import { addDays, isSameDay, startOfWeek } from '#lib/prototype/week-dates.js';
+	import type { SourceKind } from '#lib/sources.js';
+	import { addDays, isSameDay, startOfWeek } from '#lib/week-dates.js';
 
 	interface Props {
 		today: Date;
-		calendars: Calendar[];
-		visible: Record<string, boolean>;
+		/** The Monday of the week on screen; its row in the mini month is marked */
+		weekStart: Date;
+		calendars: CalendarInfo[];
+		visible: Record<number, boolean>;
 		/** Opens the subscriptions dialog */
 		onsubscriptions: () => void;
 	}
 
-	let { today, calendars, visible = $bindable(), onsubscriptions }: Props = $props();
+	let { today, weekStart, calendars, visible = $bindable(), onsubscriptions }: Props = $props();
+
+	// In this order. CalDAV accounts join in v0.4.
+	const sourceLabels: Record<SourceKind, string> = {
+		local: 'On this computer',
+		google: 'Google',
+		caldav: 'CalDAV',
+		ics: 'Subscriptions'
+	};
 
 	const monthTitle = $derived(
 		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today)
@@ -38,7 +49,7 @@
 			.map((source) => ({
 				source,
 				label: sourceLabels[source],
-				calendars: calendars.filter((c) => c.source === source)
+				calendars: calendars.filter((c) => c.source_kind === source)
 			}))
 			.filter((group) => group.calendars.length > 0)
 	);
@@ -71,10 +82,7 @@
 				{/each}
 			</div>
 			{#each weeks as week (week[0].getTime())}
-				<div
-					class={{ 'mini-row': true, 'current-week': isSameDay(week[0], startOfWeek(today)) }}
-					role="row"
-				>
+				<div class={{ 'mini-row': true, 'current-week': isSameDay(week[0], weekStart) }} role="row">
 					{#each week as day (day.getTime())}
 						<span
 							role="gridcell"
@@ -98,7 +106,7 @@
 				<ul>
 					{#each group.calendars as calendar (calendar.id)}
 						<li>
-							<label class="calendar" style:--cal={calendarColor(calendar.color)}>
+							<label class="calendar" style:--cal={calendarColor(calendar.color, calendar.id)}>
 								<input type="checkbox" bind:checked={visible[calendar.id]} />
 								<span class="calendar-name">{calendar.name}</span>
 								{#if !calendar.editable}

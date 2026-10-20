@@ -1,9 +1,12 @@
 <script lang="ts">
 	interface Props {
 		title: string;
+		onprevious: () => void;
+		ontoday: () => void;
+		onnext: () => void;
 	}
 
-	let { title }: Props = $props();
+	let { title, onprevious, ontoday, onnext }: Props = $props();
 
 	// Prototype: the view switcher shows its states but does not switch yet
 	const views = ['Day', 'Week', 'Month'];
@@ -26,13 +29,13 @@
 
 	<div class="actions">
 		<div class="nav">
-			<button type="button" class="icon-button" aria-label="Previous week">
+			<button type="button" class="icon-button" aria-label="Previous week" onclick={onprevious}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M10 3.5 5.5 8l4.5 4.5" />
 				</svg>
 			</button>
-			<button type="button" class="button">Today</button>
-			<button type="button" class="icon-button" aria-label="Next week">
+			<button type="button" class="button" onclick={ontoday}>Today</button>
+			<button type="button" class="icon-button" aria-label="Next week" onclick={onnext}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M6 3.5 10.5 8 6 12.5" />
 				</svg>

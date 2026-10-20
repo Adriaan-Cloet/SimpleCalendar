@@ -1,5 +1,5 @@
-// Date helpers for the prototype only. They work on local wall-clock dates and do nothing with
-// zones or recurrence; that stays in Rust.
+// Date helpers for the views. They work on local calendar dates, to find the days to show and
+// name them; they do nothing with zones or recurrence, which stays in Rust (architecture §10).
 
 export function startOfWeek(date: Date): Date {
 	const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -28,4 +28,10 @@ export function minutesSinceMidnight(date: Date): number {
 
 export function atMinutes(day: Date, minutes: number): Date {
 	return new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes);
+}
+
+/** The local date as `YYYY-MM-DD`, the form `list_occurrences` takes */
+export function isoDate(date: Date): string {
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
