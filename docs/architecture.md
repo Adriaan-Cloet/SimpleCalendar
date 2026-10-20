@@ -1,9 +1,11 @@
 # Architecture
 
 Status: proposed design. Implemented so far: the crate layout (§3), the SQLite connections and
-migration 1 (§6), reading a date range with recurrence expansion (§4 Occurrence, §6), and the
-keychain secret store (§8).
-Last updated: 2026-10-20 (keychain store implemented, TLS and crypto stack chosen, §8, §13).
+migration 1 (§6), reading a date range with recurrence expansion (§4 Occurrence, §6), the
+keychain secret store (§8), and the provider traits with the sync engine for read-only sources
+(§5, §7.1, §7.2).
+Last updated: 2026-10-20 (provider traits and sync engine implemented, `async-trait` kept, §5,
+§7, §13).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -258,7 +260,19 @@ _Needed from: v0.1. `CalendarProvider` is first needed by ICS subscriptions (v0.
 Reading and writing are two traits. A read-only provider implements only the first, so there is
 no write method on it that could be called by mistake.
 
-The code below is a design sketch. It has not been compiled.
+The code below is the design sketch. The implementation is in `provider/mod.rs` and differs in
+these points:
+
+- Remote ids are plain `String`s; `SyncCursor`, `PageToken` and `Etag` are newtypes.
+- `RemoteEvent` has the columns of `events`, plus a `SeriesRole` (`Single`, `Master` with its
+  recurrence lines, or `Exception` with the master's remote id and the original start). The
+  enum rules out the combinations that the table's `CHECK`s forbid.
+- `SourceContext` carries the source id and its secret from the keychain. The HTTP client joins
+  it with the ICS provider (v0.1), a token source with Google read (v0.2).
+- `WritableProvider` declares only `get_event` and `delete_event`. `create_event` and
+  `update_event` are added with Google write (v0.2), together with `EventDraft`, `EventUpdate`
+  and `FieldSet`, so that those types are designed against a real provider.
+- `Providers` maps each `SourceKind` to its provider. A kind without one is never synced.
 
 ```rust
 /// What the UI may offer for calendars of this provider. Plain data, serialisable.
@@ -372,7 +386,8 @@ Rust notes, since these parts are not obvious:
   implementation. A trait object needs one fixed signature, so it cannot expose those directly.
   The `async-trait` macro rewrites each method to return a boxed future
   (`Pin<Box<dyn Future + Send>>`). The cost is one small heap allocation per call, which is
-  nothing next to an HTTP request.
+  nothing next to an HTTP request. Checked on rustc 1.99: a trait with a native `async fn` is
+  still not dyn-compatible (error E0038), so the crate stays (§13 point 2).
 - **`WritableProvider: CalendarProvider`** is a supertrait: everything writable is also
   readable. `as_writable` returns `Option<&dyn WritableProvider>`, so the caller has to handle
   the read-only case; the compiler will not let it be forgotten.
@@ -699,6 +714,21 @@ Triggers:
 | Local write        | That source, 2 seconds after the last write                |
 | Manual refresh     | Immediately                                                |
 
+Implementation notes (`sync/`):
+
+- `SyncEngine::new` returns the engine and a `SyncHandle`. The shell spawns `engine.run()` on
+  its runtime, so the core does not depend on which runtime that is. The handle has
+  `sync_all` (app start), `sync_now(source?)` (manual) and `shutdown`.
+- The engine task keeps its bookkeeping without locks: which sources are running, which were
+  requested again, and when each is due. Cycles run as separate tasks and report back with a
+  message. Several requests during one cycle produce exactly one more cycle.
+- The timer counts from the end of a cycle. The interval is `sources.sync_interval_s` if set,
+  else the default of the kind. Waiting uses `timeout_at` on the queue, not a second task.
+- A source with status `auth_required` is skipped by app start and the timer. A manual sync
+  still tries it, so an ICS feed that rejected a request once can recover without a sign-in.
+- Without a keychain the cycle fails before any request, with the message from §8 as
+  `last_error`.
+
 ### 7.2 One cycle for one source
 
 _Needed from: v0.1 (ICS subscriptions). Step 2 is needed from v0.2 (Google write)._
@@ -717,6 +747,12 @@ Push comes before pull so that the pull already sees the result of our own write
 
 #### Applying a page
 
+- `calendar:changed` is sent after every committed page that changed something, and after the
+  calendar list step if a calendar was added, changed or removed. A first sync therefore shows
+  up page by page. A pull that changed nothing sends nothing.
+- `events.recurrence_end_utc` is not filled in yet and stays `NULL`, which the read query
+  treats as "no end": correct, only less selective. Computing it from `UNTIL` and `COUNT` is
+  recurrence logic and belongs in `recurrence`.
 - For a full pull (`full = true`) the engine remembers every remote id it saw. After the last
   page it deletes local events that were not seen, except those that still have a pending
   `create` in the outbox.
@@ -1386,8 +1422,9 @@ To be settled in the implementation plan, not guessed here.
    Windows, and the packages depend on no system OpenSSL version. `dbus-secret-service` uses
    `sha2` 0.10, so the feed hash and PKCE should use 0.10 too, not 0.11, to avoid building two
    copies.
-2. **`async-trait`** (ICS subscriptions). Check whether the current toolchain (rustc 1.99)
-   allows native `async fn` through `dyn`. If so, drop the crate.
+2. **`async-trait`** (ICS subscriptions). **Decided (#6): keep the crate.** On rustc 1.99 a
+   trait with a native `async fn` is still not dyn-compatible (E0038), and the engine needs
+   `dyn CalendarProvider`. Revisit when the compiler supports it.
 3. **What `icalendar`'s parser exposes** (ICS subscriptions). §7.7 needs the raw `TZID` string
    and the `STANDARD` and `DAYLIGHT` parts of a `VTIMEZONE`. If the typed API hides them, read
    them through its lower-level property access, or reconsider the parser.
