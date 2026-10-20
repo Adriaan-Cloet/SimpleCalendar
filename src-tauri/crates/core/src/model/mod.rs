@@ -1,10 +1,84 @@
 //! The calendar data model (`docs/architecture.md` §4).
 //!
-//! Only what reading a date range needs so far: how an event's stored times are meant, and the
-//! computed `Occurrence`. `Source`, `Calendar` and `Event` follow with the features that write
-//! them.
+//! So far: how an event's stored times are meant, the computed `Occurrence`, and the values of
+//! the text columns the sync engine writes. `Source`, `Calendar` and `Event` structs follow with
+//! the features that need them whole.
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
+use serde::Serialize;
+
+/// The kind of a source, stored in `sources.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    /// The built-in source of local calendars. It has no provider and is never synced.
+    Local,
+    Ics,
+    Google,
+    Caldav,
+}
+
+impl SourceKind {
+    /// The value in `sources.kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::Local => "local",
+            SourceKind::Ics => "ics",
+            SourceKind::Google => "google",
+            SourceKind::Caldav => "caldav",
+        }
+    }
+
+    /// Reads a `sources.kind` value. The column's `CHECK` allows no others.
+    pub fn parse(value: &str) -> Option<SourceKind> {
+        [
+            SourceKind::Local,
+            SourceKind::Ics,
+            SourceKind::Google,
+            SourceKind::Caldav,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+    }
+}
+
+/// What the account may do on a calendar, stored in `calendars.access`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    Read,
+    Write,
+}
+
+impl Access {
+    /// The value in `calendars.access`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Read => "read",
+            Access::Write => "write",
+        }
+    }
+}
+
+/// The status of an event, stored in `events.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventStatus {
+    Confirmed,
+    Tentative,
+    /// A deleted occurrence of a series, or a deleted series when it is the master (§4).
+    Cancelled,
+}
+
+impl EventStatus {
+    /// The value in `events.status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventStatus::Confirmed => "confirmed",
+            EventStatus::Tentative => "tentative",
+            EventStatus::Cancelled => "cancelled",
+        }
+    }
+}
 
 /// How an event's stored `start_utc` / `end_utc` are meant, read from `(start_tz, all_day)`.
 ///

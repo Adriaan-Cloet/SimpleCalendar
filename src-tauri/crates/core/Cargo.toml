@@ -12,6 +12,9 @@ publish = false
 # Never add `tauri` here. The core stays free of the UI shell, so its tests build without
 # WebKit and the same crate can sit behind a mobile shell later (docs/architecture.md §3).
 [dependencies]
+# Async methods on the provider traits, which the sync engine calls through `dyn` (§5). Native
+# `async fn` in traits is still not dyn-compatible on rustc 1.99 (§13 point 2).
+async-trait = "0.1"
 # Dates and times. Already built through Tauri; `rrule` is built on it (§11).
 chrono = "0.4"
 # The IANA zone database, embedded: Windows does not ship one. Same major as `rrule` uses.
@@ -30,8 +33,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migrations, versioned in `PRAGMA user_version`.
 rusqlite_migration = "2.6"
 thiserror = "2"
-# `spawn_blocking` for the blocking SQLite calls. Already built through Tauri.
-tokio = { version = "1", features = ["rt"] }
+# `spawn_blocking` for the blocking SQLite calls, channels for the sync engine. Already built
+# through Tauri. `time` (the sync timer) is the only feature Tauri does not enable already.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 # Secret Service over D-Bus (GNOME Keyring, KWallet). `libdbus` is already built through Tauri.
 # The crate requires a crypto backend for the encrypted session; `crypto-rust` keeps the app on
@@ -45,4 +49,5 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+# `test-util` pauses the clock, so the 60-minute sync timer is tested without waiting.
+tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
