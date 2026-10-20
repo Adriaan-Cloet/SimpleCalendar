@@ -5,6 +5,9 @@
 //! second one. Different sources sync in parallel. The engine is the only component that talks
 //! to providers and the only one that applies remote changes to the database.
 
+#[cfg(test)]
+mod tests;
+
 use std::time::Duration;
 
 use serde::Serialize;
