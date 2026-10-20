@@ -1318,8 +1318,20 @@ group needs and which column each event gets. That is geometry for one particula
 calendar logic, so it does not belong in the core.
 
 It is written as a pure function in `src/lib/` that takes plain data (start and end as minutes
-of the day) and returns plain data (column index and column count per event). It touches no
-DOM and no Svelte state, which makes it testable without a browser (§12).
+of the day) and returns plain data per event: its drawn top and bottom, column, column count,
+how many columns it spans, its stacking indent, and two flags for drawing (`touching`,
+`raised`). It touches no DOM and no Svelte state, which makes it testable without a browser
+(§12).
+
+The rule (`layoutDay` in `src/lib/overlap-layout.ts`, decided in #10, design.md §11): events
+that overlap and start within `titleClearance` (20 minutes, one title line at 1px per minute)
+of each other go side by side, because the later one would hide the earlier one's title. An
+event that starts later is stacked on top of the earlier one, indented, up to `maxIndent` (3)
+deep. A free column is always preferred to stacking. Events then widen to the right over
+columns that are free for their whole length. Overlaps are judged on the drawn size, at least
+`minDuration` (15 minutes), so a short event never draws over the next one. `touching` marks an
+event that overlaps another, `raised` one that starts later than an event it overlaps; the view
+draws a channel around the first and a stronger tint on the second.
 
 ## 11. Proposed dependencies
 
@@ -1459,18 +1471,24 @@ The in-memory store everywhere; the real keychain only in an opt-in test.
 
 With Vitest, on the pure layout function (§10). Cases:
 
-| Case                                              | Expected                                                               |
-| ------------------------------------------------- | ---------------------------------------------------------------------- |
-| No events                                         | Empty result                                                           |
-| Events that do not overlap                        | Each has one column, full width                                        |
-| Two events that overlap                           | Two columns                                                            |
-| A chain: A overlaps B, B overlaps C, A does not C | Two columns; A and C share one                                         |
-| Three events at the same time                     | Three columns                                                          |
-| One ends exactly when the next starts             | Not an overlap                                                         |
-| A zero-length event                               | Gets a column and a minimum height, overlaps nothing it merely touches |
-| Two separate groups on one day                    | Column counts are independent per group                                |
-| An event that runs past midnight                  | Clipped to the day before layout                                       |
-| The same input in a different order               | The same result                                                        |
+| Case                                                    | Expected                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------- |
+| No events                                               | Empty result                                                           |
+| Events that do not overlap                              | Each has one column, full width                                        |
+| Two events that overlap and start within the clearance  | Two columns                                                            |
+| Two events that overlap, the second starts later        | One column; the second is stacked with indent 1                        |
+| A chain: A overlaps B, B overlaps C, A does not C       | Two columns; A and C share one                                         |
+| Three events at the same time                           | Three columns                                                          |
+| One ends exactly when the next starts                   | Not an overlap                                                         |
+| A zero-length event                                     | Gets a column and a minimum height, overlaps nothing it merely touches |
+| Two separate groups on one day                          | Column counts are independent per group                                |
+| An event that runs past midnight                        | Clipped to the day before layout                                       |
+| The same input in a different order                     | The same result                                                        |
+| A stack already `maxIndent` deep                        | The next event gets a new column                                       |
+| A free column and a possible stack                      | The free column                                                        |
+| An event next to columns that are free for its duration | Spans them                                                             |
+| Events that overlap / only meet end to start            | `touching` / not                                                       |
+| An event that starts later than one it overlaps         | `raised`, also in a column of its own; events that start together not  |
 
 When Vitest is added, `CLAUDE.md` changes with it: the line "The frontend has no test runner"
 goes, and the test command joins the checks to run before finishing and in CI. Everything other
