@@ -1,7 +1,7 @@
 # Design system
 
 Status: first version, with a static week-view prototype on fake data.
-Last updated: 2026-10-14.
+Last updated: 2026-10-20.
 
 This document describes how SimpleCalendar looks and moves. The tokens live in
 `src/lib/styles/tokens.css`, the global base styles in `src/lib/styles/base.css`. The prototype in
@@ -39,6 +39,7 @@ This document describes how SimpleCalendar looks and moves. The tokens live in
 | `--control-thumb`        | `#FFFFFF`               | `#636366`               | Selected segment                                                          |
 | `--separator`            | black 10%               | white 12%               | Borders between regions                                                   |
 | `--grid-line`            | black 7%                | white 8%                | Hour lines and day lines                                                  |
+| `--backdrop`             | black 20%               | black 50%               | Behind a modal dialog                                                     |
 | `--accent`               | `#0068D6`               | `#0A6CDB`               | Fills: primary button, checked control, focus ring                        |
 | `--accent-text`          | `#0066CC`               | `#3B9BFF`               | Blue text, such as links                                                  |
 | `--now`                  | `#D92D20`               | `#D92D20`               | Today badge, now line                                                     |
@@ -282,7 +283,23 @@ the Windows build from CI.
 | Read-only event     | Looks like any other event in the grid. The popover says why it cannot be edited, the sidebar shows a lock     |
 | Popover             | Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right, accent)          |
 
-## 12. Open points
+## 12. Subscriptions dialog
+
+Opened from "Subscriptions" in the sidebar footer, next to the appearance control. A modal
+`<dialog>`: the browser handles focus, Escape and the backdrop in both webviews.
+
+| Element         | Look                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------- |
+| Dialog          | 480px wide, `--surface-elevated`, `--radius-lg`, `--shadow-3`; grows from 96% while fading in           |
+| Source row      | Name (medium), then host and status in footnote grey; warnings below it. Rows separated by hairlines    |
+| Status          | "Syncing…", "Updated 5 minutes ago", "Not synced yet", or the last error in `--danger`                  |
+| Row actions     | Refresh icon (disabled while syncing) and a quiet "Remove", which asks again: "Cancel" and red "Remove" |
+| Keyring problem | The message from architecture §8 on a `--fill-hover` panel, with "Try again". Subscribing is disabled   |
+| Add form        | Feed address and an optional name, a note that the address goes to the keyring, primary "Subscribe"     |
+
+The host is shown, never the address: a private feed address is a secret.
+
+## 13. Open points
 
 1. **Locale.** The gutter always shows a 24-hour clock ("08:00"). Event times, dates and the
    popover follow the system locale through `Intl.DateTimeFormat`, so on an English system
@@ -292,6 +309,6 @@ the Windows build from CI.
    columns. That is a change to the layout function, so decide it before that function is
    written.
 3. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
-   it.
+   it. Until then "Subscriptions" in the sidebar footer cannot be reached in a narrow window.
 4. **Dark mode in the real app.** The engine behaviour is verified (§9). Still to confirm by hand:
    switching Ubuntu's style while the app runs, and Windows app mode in the CI build.
