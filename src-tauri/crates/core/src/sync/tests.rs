@@ -743,6 +743,25 @@ async fn a_cancelled_occurrence_is_stored_as_an_exception() {
 // ---- calendars -----------------------------------------------------------------------------
 
 #[tokio::test]
+async fn calendar_list_changes_send_calendar_changed() {
+    let mut h = Harness::new().await;
+    h.sync().await;
+    let one = h.calendar_id("cal-1").await.unwrap();
+    assert_eq!(h.changed, vec![vec![one]]);
+
+    h.changed.clear();
+    h.sync().await;
+    assert_eq!(h.changed, Vec::<Vec<i64>>::new(), "nothing changed");
+
+    h.fake.set_calendars(vec![calendar("cal-2", "Two")]);
+    h.sync().await;
+    let two = h.calendar_id("cal-2").await.unwrap();
+    let mut ids = h.changed.concat();
+    ids.sort();
+    assert_eq!(ids, vec![one, two]);
+}
+
+#[tokio::test]
 async fn calendars_are_added_updated_and_removed() {
     let mut h = Harness::new().await;
     h.fake
@@ -815,7 +834,8 @@ async fn calendar_changed_is_sent_after_each_page_that_changed_something() {
 
     h.sync().await;
     let cal = h.calendar_id("cal-1").await.unwrap();
-    assert_eq!(h.changed, vec![vec![cal], vec![cal]]);
+    // Once for the new calendar, then once per page.
+    assert_eq!(h.changed, vec![vec![cal], vec![cal], vec![cal]]);
 
     // Nothing changed: no event, so the frontend does not re-query for nothing.
     h.changed.clear();
@@ -826,6 +846,8 @@ async fn calendar_changed_is_sent_after_each_page_that_changed_something() {
 #[tokio::test]
 async fn calendar_changed_comes_after_the_commit() {
     let mut h = Harness::new().await;
+    // A first cycle adds the calendar, which is a change of its own.
+    h.sync().await;
     h.fake.script(
         "src-1",
         vec![Ok(page(vec![single("a")], &[], true, done("c1")))],

@@ -5,13 +5,21 @@
 //! second one. Different sources sync in parallel. The engine is the only component that talks
 //! to providers and the only one that applies remote changes to the database.
 
+mod cycle;
+mod store;
 #[cfg(test)]
 mod tests;
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
+
+use cycle::Ctx;
 
 use crate::CoreEvent;
 use crate::db::Db;
@@ -44,8 +52,12 @@ pub struct SyncStatus {
 /// How often the timer syncs a source of this kind, unless `sources.sync_interval_s` overrides
 /// it. `None` for kinds that are never synced.
 pub fn default_interval(kind: SourceKind) -> Option<Duration> {
-    let _ = kind;
-    todo!()
+    const MINUTE: u64 = 60;
+    match kind {
+        SourceKind::Ics => Some(Duration::from_secs(60 * MINUTE)),
+        SourceKind::Google | SourceKind::Caldav => Some(Duration::from_secs(15 * MINUTE)),
+        SourceKind::Local => None,
+    }
 }
 
 /// A handle to send requests to a running engine. Cloning is cheap.
@@ -88,10 +100,6 @@ impl SyncHandle {
 
 /// Requests to the engine task, including the ones it sends itself.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "read by the engine loop, which is not written yet"
-)]
 enum Msg {
     /// Sync one source, or all remote sources for `None`. `manual` is a user request.
     Sync {
@@ -108,12 +116,24 @@ enum Msg {
 }
 
 /// The engine. Create it with `new`, then drive `run` on the async runtime.
+//
+// Rust note: the engine is driven by one task, so its bookkeeping (`running`, `again`, `due`)
+// needs no lock. Cycles run as separate tasks and only talk back through a `Finished` message.
 pub struct SyncEngine {
-    _db: Db,
-    _secrets: Secrets,
-    _providers: Providers,
-    _events: mpsc::UnboundedSender<CoreEvent>,
-    _rx: mpsc::UnboundedReceiver<Msg>,
+    ctx: Arc<Ctx>,
+    rx: mpsc::UnboundedReceiver<Msg>,
+    /// For cycles to report `Finished`. Weak, so that the engine stops once every handle is
+    /// dropped instead of keeping its own queue open forever.
+    tx: mpsc::WeakUnboundedSender<Msg>,
+    /// Sources with a cycle in progress.
+    running: HashSet<String>,
+    /// Sources that were requested again during their cycle. The value is whether any of
+    /// those requests was manual.
+    again: HashMap<String, bool>,
+    /// When the timer syncs each idle source next.
+    due: HashMap<String, Instant>,
+    /// The running cycles. Dropping the set cancels them.
+    tasks: JoinSet<()>,
 }
 
 impl SyncEngine {
@@ -129,17 +149,104 @@ impl SyncEngine {
     ) -> (SyncEngine, SyncHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let engine = SyncEngine {
-            _db: db,
-            _secrets: secrets,
-            _providers: providers,
-            _events: events,
-            _rx: rx,
+            ctx: Arc::new(Ctx {
+                db,
+                secrets,
+                providers,
+                events,
+            }),
+            rx,
+            tx: tx.downgrade(),
+            running: HashSet::new(),
+            again: HashMap::new(),
+            due: HashMap::new(),
+            tasks: JoinSet::new(),
         };
         (engine, SyncHandle { tx })
     }
 
     /// Runs until `shutdown` is called or every handle is dropped.
-    pub async fn run(self) {
-        todo!()
+    pub async fn run(mut self) {
+        loop {
+            let msg = match self.due.values().min().copied() {
+                // Waits for a message, but no longer than until the next source is due.
+                Some(at) => match tokio::time::timeout_at(at, self.rx.recv()).await {
+                    Ok(msg) => msg,
+                    Err(_elapsed) => {
+                        self.start_due();
+                        continue;
+                    }
+                },
+                None => self.rx.recv().await,
+            };
+            match msg {
+                Some(Msg::Sync {
+                    source_id: Some(id),
+                    manual,
+                }) => self.start(id, manual),
+                Some(Msg::Sync {
+                    source_id: None,
+                    manual,
+                }) => self.start_all(manual).await,
+                Some(Msg::Finished { source_id, next }) => self.finished(source_id, next),
+                Some(Msg::Shutdown) | None => break,
+            }
+        }
+    }
+
+    /// Starts a cycle of every remote source.
+    async fn start_all(&mut self, manual: bool) {
+        match self.ctx.db.read(store::remote_source_ids).await {
+            Ok(ids) => {
+                for id in ids {
+                    self.start(id, manual);
+                }
+            }
+            Err(e) => log::error!("cannot list sources to sync: {e}"),
+        }
+    }
+
+    /// Starts a cycle of `source_id`, or asks for one more if a cycle is running.
+    fn start(&mut self, source_id: String, manual: bool) {
+        if self.running.contains(&source_id) {
+            *self.again.entry(source_id).or_default() |= manual;
+            return;
+        }
+        let Some(tx) = self.tx.upgrade() else {
+            // Every handle is gone and the engine is about to stop.
+            return;
+        };
+        self.due.remove(&source_id);
+        self.running.insert(source_id.clone());
+        let ctx = Arc::clone(&self.ctx);
+        self.tasks.spawn(async move {
+            let next = cycle::run(&ctx, &source_id, manual).await;
+            let _ = tx.send(Msg::Finished { source_id, next });
+        });
+    }
+
+    /// Starts the sources whose timer has run out.
+    fn start_due(&mut self) {
+        let now = Instant::now();
+        let ready: Vec<String> = self
+            .due
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ready {
+            self.start(id, false);
+        }
+    }
+
+    fn finished(&mut self, source_id: String, next: Option<Duration>) {
+        self.running.remove(&source_id);
+        // Collect the results of finished tasks, so the set does not grow.
+        while self.tasks.try_join_next().is_some() {}
+        if let Some(manual) = self.again.remove(&source_id) {
+            self.start(source_id, manual);
+        } else if let Some(next) = next {
+            self.due.insert(source_id, Instant::now() + next);
+        }
     }
 }
