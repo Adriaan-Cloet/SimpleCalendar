@@ -1,6 +1,6 @@
 //! One sync cycle for one source (`docs/architecture.md` §7.2).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -178,6 +178,9 @@ async fn pull_pages(
     // Every remote id of a full pull, for deleting what was not seen after the last page.
     let mut seen = HashSet::new();
     let mut full = false;
+    // The warnings of every page, stored with the last one. A `BTreeSet` keeps them sorted and
+    // drops the duplicates that consecutive pages report.
+    let mut warnings = BTreeSet::new();
 
     loop {
         let ChangeSet {
@@ -185,12 +188,14 @@ async fn pull_pages(
             deletions,
             full: page_full,
             next,
+            warnings: page_warnings,
         } = provider
             .pull(cx, &calendar.reference, cursor, page.as_ref())
             .await?;
         full |= page_full;
+        warnings.extend(page_warnings);
         let last = match &next {
-            Next::Done(cursor) => Some(cursor.clone()),
+            Next::Done(cursor) => Some((cursor.clone(), std::mem::take(&mut warnings))),
             Next::Page(_) => None,
         };
 
@@ -203,7 +208,7 @@ async fn pull_pages(
                 let tx = c.transaction()?;
                 let mut changed =
                     store::apply_page(&tx, calendar_id, &upserts, &deletions, &mut seen)?;
-                if let Some(cursor) = &last {
+                if let Some((cursor, warnings)) = last {
                     if full {
                         changed |= store::finish_full_pull(&tx, calendar_id, &seen)?;
                     } else {
@@ -216,7 +221,8 @@ async fn pull_pages(
                             );
                         }
                     }
-                    store::store_cursor(&tx, calendar_id, cursor, now())?;
+                    store::store_warnings(&tx, calendar_id, warnings, full)?;
+                    store::store_cursor(&tx, calendar_id, &cursor, now())?;
                 }
                 tx.commit()?;
                 Ok((seen, changed))

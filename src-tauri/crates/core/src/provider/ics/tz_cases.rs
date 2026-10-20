@@ -223,7 +223,9 @@ fn case_07_every_windows_name_resolves_to_a_known_zone() {
             .parse()
             .unwrap_or_else(|_| panic!("{windows}: chrono-tz does not know {iana}"));
         let e = event(&feed, &format!("w{i}"));
-        assert_eq!(e.start_tz.as_deref(), Some(*iana), "{windows}");
+        // A Windows name that is also an IANA name, such as `UTC`, resolves in step 1.
+        let expected = windows.parse::<Tz>().map_or(*iana, |tz| tz.name());
+        assert_eq!(e.start_tz.as_deref(), Some(expected), "{windows}");
         assert_eq!(
             e.start_utc,
             crate::recurrence::resolve_local(

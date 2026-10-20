@@ -131,6 +131,21 @@ fn capabilities_match_as_writable() {
 // ---- fetching ------------------------------------------------------------------------------
 
 #[tokio::test]
+async fn the_feed_warnings_come_with_the_change_set() {
+    let server = server().await;
+    let feed = FEED.replace(
+        "DTSTART:20260601T090000Z",
+        "DTSTART;TZID=Mars Standard Time:20260601T090000",
+    );
+    serve(&server, ResponseTemplate::new(200).set_body_string(feed)).await;
+
+    let changes = pull(&feed_at(&server), None).await.unwrap();
+
+    assert_eq!(changes.warnings.len(), 1, "{:?}", changes.warnings);
+    assert!(changes.warnings[0].contains("Mars Standard Time"));
+}
+
+#[tokio::test]
 async fn a_changed_feed_is_one_full_change_set() {
     let server = server().await;
     serve(
