@@ -17,9 +17,14 @@ chrono = "0.4"
 # The IANA zone database, embedded: Windows does not ship one. Same major as `rrule` uses.
 chrono-tz = "0.10"
 log = "0.4"
+# The OS keychain API (§8). The platform store crates below plug into it.
+keyring-core = "1"
 # Recurrence expansion (RFC 5545). Only used inside `recurrence::expand`. Its `regex`
 # dependency is already built through Tauri.
 rrule = "0.14"
+# The keychain value is a small versioned JSON document (§8). Both already built through Tauri.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # SQLite compiled into the binary: the same version on Ubuntu and Windows (§11).
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migrations, versioned in `PRAGMA user_version`.
@@ -27,6 +32,16 @@ rusqlite_migration = "2.6"
 thiserror = "2"
 # `spawn_blocking` for the blocking SQLite calls. Already built through Tauri.
 tokio = { version = "1", features = ["rt"] }
+
+# Secret Service over D-Bus (GNOME Keyring, KWallet). `libdbus` is already built through Tauri.
+# The crate requires a crypto backend for the encrypted session; `crypto-rust` keeps the app on
+# one pure-Rust crypto stack, the same choice as rustls for HTTPS later (§13 point 1).
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+# Windows Credential Manager. Its default `search` feature is not used.
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "1.1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
