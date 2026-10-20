@@ -81,7 +81,7 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
     }
 
     ctx.emit_status(source_id, SyncState::Syncing, None);
-    let result = sync_source(ctx, source_id, provider.as_ref()).await;
+    let result = sync_source(ctx, source_id, &source.display_name, provider.as_ref()).await;
     let (state, status) = match &result {
         Ok(()) => (SyncState::Ok, "ok"),
         Err(SyncError::Provider(ProviderError::Auth)) => (SyncState::AuthRequired, "auth_required"),
@@ -109,11 +109,13 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
 async fn sync_source(
     ctx: &Ctx,
     source_id: &str,
+    display_name: &str,
     provider: &dyn CalendarProvider,
 ) -> Result<(), SyncError> {
     // 1. Authenticate. For the read-only sources of v0.1 that means reading the secret.
     let cx = SourceContext {
         source_id: source_id.to_owned(),
+        display_name: display_name.to_owned(),
         secret: ctx.secrets.get(source_id).await?,
     };
 

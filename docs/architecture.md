@@ -2,10 +2,9 @@
 
 Status: proposed design. Implemented so far: the crate layout (§3), the SQLite connections and
 migration 1 (§6), reading a date range with recurrence expansion (§4 Occurrence, §6), the
-keychain secret store (§8), and the provider traits with the sync engine for read-only sources
-(§5, §7.1, §7.2).
-Last updated: 2026-10-20 (provider traits and sync engine implemented, `async-trait` kept, §5,
-§7, §13).
+keychain secret store (§8), the provider traits with the sync engine for read-only sources
+(§5, §7.1, §7.2), and the ICS provider (§7.6) with IANA zone names only (§7.7 follows).
+Last updated: 2026-10-20 (ICS provider implemented, parser API checked, §7.6, §11, §13).
 
 This document describes how SimpleCalendar stores, syncs and edits calendar data. It is the
 reference for the implementation plan. The stack choice itself is recorded in
@@ -999,6 +998,29 @@ _Needed from: v0.1 (ICS subscriptions)._
 - Components may appear in any order in the file (§7.2).
 - Alarms inside a feed (`VALARM`) are ignored in v1.
 
+Implementation notes (`provider/ics/`):
+
+- A feed is one calendar with remote id `feed`, read-only, named after the source. Listing it
+  fetches nothing.
+- The hash leaves out `DTSTAMP` lines. Google sets `DTSTAMP` to the time of the request on
+  every event, so its feeds were never byte-identical twice and every fetch was a full
+  re-apply. The app stores nothing from `DTSTAMP`.
+- A changed body is parsed on a blocking thread. One that is not iCalendar is a `Permanent`
+  error with a fixed message: the parser's own error quotes the feed, which would put calendar
+  contents into `last_error`. Bodies over 32 MiB are refused.
+- HTTP 401 and 403 are `Auth` (a private feed whose token was revoked), 408, 429 and 5xx are
+  `Transient` with `Retry-After` in seconds, other statuses and a missing URL are `Permanent`.
+  Network failures are `Transient`. No message contains the URL, which is a secret (§8).
+- An exception's remote id is `UID#<original start as stored>`.
+- An event without a `UID` or a readable `DTSTART` is logged and skipped. Without `DTEND` or
+  `DURATION`, a date lasts one day and a date-time has no length. Days and weeks in a
+  `DURATION` move the wall clock (RFC 5545 §3.3.6).
+- `TZID`s in `RRULE`, `RDATE` and `EXDATE` lines are written as the IANA name they resolve to,
+  so the `recurrence` module reads them like `DTSTART`.
+- Until §7.7 is implemented, a `TZID` resolves only if it is an IANA name (step 1, quotes
+  trimmed). Anything else is read as floating and logged. That resolver is the one place #8
+  extends.
+
 ### 7.7 ICS time zones
 
 _Needed from: v0.1 (ICS subscriptions)._
@@ -1277,8 +1299,9 @@ inspected offline.
 | `thiserror` 2                                                  | Error enums                          | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
 | `uuid` 1                                                       | Source ids, event ids                | Already built                                                                                                                                                |                                                                                                 | v0.1, ICS subscriptions |
 | `serde`, `serde_json`, `log`                                   | Serialisation, logging               | Already direct dependencies                                                                                                                                  |                                                                                                 | v0.1, ICS subscriptions |
-| `reqwest` 0.13                                                 | HTTP client                          | Async, on tokio, the de facto standard. New compile cost: it is in `Cargo.lock` but not built on Linux today                                                 | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
-| `icalendar` 0.17, feature `parser`                             | ICS parsing                          | Maintained (release September 2026), on chrono                                                                                                               | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
+| `reqwest` 0.13, only feature `rustls-no-provider`              | HTTP client                          | Async, on tokio, the de facto standard. Without default features: no HTTP/2, no system proxy lookup, no charset detection. Verifies with the OS store        | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
+| `rustls` 0.23, feature `ring`                                  | TLS crypto provider for `reqwest`    | `ring` instead of the default `aws-lc-rs`, which needs a C and assembler toolchain on Windows (§13 point 1)                                                  | `aws-lc-rs`, `native-tls`                                                                       | v0.1, ICS subscriptions |
+| `icalendar` 0.17, only feature `parser`                        | ICS parsing                          | Maintained (release September 2026), on chrono. Only its low-level parser is used (§13 point 3)                                                              | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
 | `sha2` 0.10                                                    | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway. 0.10 is the version the keychain store already builds                                                         | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
 | `async-trait`                                                  | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | v0.1, ICS subscriptions |
 | `keyring-core` 1.0                                             | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | v0.1, ICS subscriptions |
@@ -1312,6 +1335,9 @@ No DOM emulation package (`jsdom`, `happy-dom`) is added: the function under tes
   anything else.
 - `windows-timezones`: exists, but the mapping is a small static table that is checked in
   instead (§7.7).
+- `reqwest`'s `system-proxy` feature: it reads the proxy settings of the OS (the registry on
+  Windows) through extra crates. Add it if someone needs a proxy to reach their feeds.
+- A `hex` crate for the feed hash: `format!("{:x}")` on the digest does the same.
 - A type-generation crate for the frontend types: reconsider once the command list is stable.
 
 ## 12. Testing strategy
@@ -1425,9 +1451,11 @@ To be settled in the implementation plan, not guessed here.
 2. **`async-trait`** (ICS subscriptions). **Decided (#6): keep the crate.** On rustc 1.99 a
    trait with a native `async fn` is still not dyn-compatible (E0038), and the engine needs
    `dyn CalendarProvider`. Revisit when the compiler supports it.
-3. **What `icalendar`'s parser exposes** (ICS subscriptions). §7.7 needs the raw `TZID` string
-   and the `STANDARD` and `DAYLIGHT` parts of a `VTIMEZONE`. If the typed API hides them, read
-   them through its lower-level property access, or reconsider the parser.
+3. **What `icalendar`'s parser exposes** (ICS subscriptions). **Checked (#7): enough.** The
+   low-level `icalendar::parser` gives every component with its sub-components and every
+   property with its raw value and parameters, so the raw `TZID` and the `STANDARD` and
+   `DAYLIGHT` parts of a `VTIMEZONE` are all there. The app uses only that layer, not the typed
+   API. Text values come back unescaped; quoted parameter values come back without quotes.
 4. **`X-WR-TIMEZONE` for times without a zone** (ICS subscriptions). §7.7 follows the common
    convention instead of the standard. Confirm against a few real feeds.
 5. **Calendar list sync** (Google read). Google's sync guide does not say whether

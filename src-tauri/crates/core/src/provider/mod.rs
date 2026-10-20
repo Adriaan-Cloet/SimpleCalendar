@@ -15,6 +15,9 @@ use serde::Serialize;
 use crate::model::{Access, EventStatus, SourceKind};
 use crate::secrets::Secret;
 
+pub(crate) mod http;
+pub mod ics;
+
 /// What the UI may offer for calendars of this provider. Plain data, serialisable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Capabilities {
@@ -30,6 +33,8 @@ pub struct Capabilities {
 #[derive(Debug, Clone)]
 pub struct SourceContext {
     pub source_id: String,
+    /// The name the user gave the source. An ICS feed's one calendar carries it.
+    pub display_name: String,
     /// The source's secret from the keychain, such as the feed URL of an ICS source. `None` if
     /// it has none.
     pub secret: Option<Secret>,
