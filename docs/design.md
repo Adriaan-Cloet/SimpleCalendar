@@ -1,6 +1,6 @@
 # Design system
 
-Status: first version, with a static week-view prototype on fake data.
+Status: first version. The week view runs on real data since #11.
 Last updated: 2026-10-20.
 
 This document describes how SimpleCalendar looks and moves. The tokens live in
