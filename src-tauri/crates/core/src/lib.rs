@@ -4,6 +4,8 @@
 //! Tauri commands; see `docs/architecture.md` §3.
 
 pub mod db;
+pub mod model;
+pub mod recurrence;
 
 /// Version of this crate, as set in its `Cargo.toml`.
 pub fn version() -> &'static str {
