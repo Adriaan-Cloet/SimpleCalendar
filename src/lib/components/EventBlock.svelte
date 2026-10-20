@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { calendarColor } from '#lib/calendar-color.js';
+	import type { Placement } from '#lib/overlap-layout.js';
 	import type { Calendar, TimedEvent } from '#lib/prototype/fake-week.js';
 
 	interface Props {
 		event: TimedEvent;
+		/** Where the overlap layout puts it (design.md §11, "Overlapping events") */
+		placement: Placement;
 		calendar: Calendar;
 		timeLabel: string;
 		hidden: boolean;
@@ -11,21 +14,32 @@
 		onselect: (anchor: HTMLElement) => void;
 	}
 
-	let { event, calendar, timeLabel, hidden, selected, onselect }: Props = $props();
+	let { event, placement, calendar, timeLabel, hidden, selected, onselect }: Props = $props();
 
-	const duration = $derived(event.end - event.start);
+	// The drawn length: at least the layout's minimum, so a very short event stays readable
+	const duration = $derived(placement.bottom - placement.top);
 	// Under 45 minutes there is room for one line only: title and start time side by side
 	const compact = $derived(duration < 45);
 </script>
 
 <button
 	type="button"
-	class={{ event: true, compact, tiny: duration <= 15, selected, hidden }}
+	class={{
+		event: true,
+		compact,
+		tiny: duration <= 15,
+		touching: placement.touching,
+		raised: placement.raised,
+		selected,
+		hidden
+	}}
 	style:--cal={calendarColor(calendar.color)}
-	style:--start={event.start}
+	style:--start={placement.top}
 	style:--duration={duration}
-	style:--column={event.column}
-	style:--columns={event.columns}
+	style:--indent={placement.indent}
+	style:--column={placement.column}
+	style:--columns={placement.columns}
+	style:--span={placement.span}
 	data-event
 	aria-pressed={selected}
 	aria-hidden={hidden}
@@ -43,9 +57,12 @@
 	.event {
 		position: absolute;
 		top: calc(var(--hour-height) * var(--start) / 60);
-		/* 1px clear of the day's left border, 4px free on the right to reach the empty slot */
-		left: calc(1px + (100% - var(--space-xs) - 1px) * var(--column) / var(--columns));
-		width: calc((100% - var(--space-xs) - 1px) / var(--columns) - 1px);
+		/* Columns of the overlap group share the day: 1px clear of its left border, 4px free on
+		   the right to reach the empty slot. A stacked event shifts --space-md per level. */
+		--column-width: calc((100% - var(--space-xs) - 1px) / var(--columns));
+		--shift: calc(var(--space-md) * var(--indent));
+		left: calc(1px + var(--column-width) * var(--column) + var(--shift));
+		width: calc(var(--column-width) * var(--span) - var(--shift) - 1px);
 		/* 1px gap to an event that starts right after this one */
 		height: calc(var(--hour-height) * var(--duration) / 60 - 1px);
 		display: flex;
@@ -69,9 +86,29 @@
 		background: color-mix(in oklab, var(--cal) var(--event-hover-mix), var(--surface));
 	}
 
+	/* Overlapping events (design.md §11): a channel in the day's colour around each one, and the
+	   event that lies over another one tint stronger, so two events of one colour never merge */
+	.event.touching {
+		box-shadow: 0 0 0 2px var(--day-surface);
+	}
+
+	.event.raised {
+		background: color-mix(in oklab, var(--cal) var(--event-raised-mix), var(--surface));
+	}
+
+	.event.raised:hover {
+		background: color-mix(in oklab, var(--cal) var(--event-selected-mix), var(--surface));
+	}
+
 	.event.selected {
 		background: color-mix(in oklab, var(--cal) var(--event-selected-mix), var(--surface));
 		box-shadow: 0 0 0 1px var(--cal);
+	}
+
+	.event.selected.touching {
+		box-shadow:
+			0 0 0 1px var(--cal),
+			0 0 0 3px var(--day-surface);
 	}
 
 	.event.hidden {

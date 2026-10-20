@@ -83,12 +83,13 @@ other value, such as a colour Google sends, is used as is in both modes
 Every event is drawn from one variable, `--cal`, so a palette colour and an arbitrary provider
 colour go through the same rules:
 
-| Part           | CSS                                                                     | Light | Dark |
-| -------------- | ----------------------------------------------------------------------- | ----- | ---- |
-| Fill           | `color-mix(in oklab, var(--cal) var(--event-fill-mix), var(--surface))` | 14%   | 24%  |
-| Fill, hover    | same with `--event-hover-mix`                                           | 20%   | 32%  |
-| Fill, selected | same with `--event-selected-mix`, plus a 1px ring in `--cal`            | 28%   | 40%  |
-| Text           | `color-mix(in oklab, var(--cal) 45%, var(--text))`                      | 45%   | 45%  |
+| Part           | CSS                                                                       | Light | Dark |
+| -------------- | ------------------------------------------------------------------------- | ----- | ---- |
+| Fill           | `color-mix(in oklab, var(--cal) var(--event-fill-mix), var(--surface))`   | 14%   | 24%  |
+| Fill, hover    | same with `--event-hover-mix`                                             | 20%   | 32%  |
+| Fill, selected | same with `--event-selected-mix`, plus a 1px ring in `--cal`              | 28%   | 40%  |
+| Fill, raised   | same with `--event-raised-mix`, for an event that lies over another (§11) | 23%   | 33%  |
+| Text           | `color-mix(in oklab, var(--cal) 45%, var(--text))`                        | 45%   | 45%  |
 
 The text mixes towards `--text`, so it gets darker in light mode and lighter in dark mode
 without a second rule. Selected events get a stronger fill and a ring rather than a solid fill
@@ -278,10 +279,43 @@ the Windows build from CI.
 | Now line            | 2px red line with a dot, only across today's column. Its time label in the gutter replaces a nearby hour label |
 | Event, 45 min+      | Title (footnote, semibold), start time, location if there is room                                              |
 | Event, under 45 min | One line: title first, then the start time with whatever room is left                                          |
-| Overlapping events  | Side by side in equal columns, as computed by the layout function (architecture §10)                           |
+| Overlapping events  | Side by side if they start within 20 minutes; a later one stacks on top, indented. See below                   |
 | Selected event      | Stronger fill and a ring; a popover opens beside it                                                            |
 | Read-only event     | Looks like any other event in the grid. The popover says why it cannot be edited, the sidebar shows a lock     |
 | Popover             | Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right, accent)          |
+
+### Overlapping events
+
+Decided in #10, after comparing equal columns, Apple's cascade and this rule drawn at real
+size. Equal columns leave three overlapping events about 30px each at the minimum window width.
+Apple's cascade keeps the width, but a later event can cover an earlier one's title, and two
+events of one colour merge into one shape.
+
+```
+Start within 20 min: side by side      Start later: stacked on top
+09:00 ┌────────┐┌────────┐              09:00 ┌──────────────────┐
+      │ Call   ││ Sync   │                    │ Workshop         │
+09:30 │        ││        │              09:30 │    ┏━━━━━━━━━━━━━┓
+      │        ││        │                    │    ┃ Review      ┃
+10:00 └────────┘└────────┘              10:00 └────┃  (stronger  ┃
+                                                   ┃   tint)     ┃
+                                                   ┗━━━━━━━━━━━━━┛
+```
+
+| Rule              | Value                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------ |
+| Side by side      | When two overlapping events start less than 20 minutes apart (one title line at 1px/min)   |
+| Stacked           | Otherwise: shifted `--space-md` per level, drawn on top, at most 3 deep, then a new column |
+| Free column first | An event takes a free column before it stacks                                              |
+| Widening          | An event spans the columns to its right that are free for its whole length                 |
+| Minimum height    | 15 minutes; overlaps are judged on the drawn size                                          |
+| Channel           | An event that overlaps another gets a 2px ring in the day's background colour              |
+| Stronger tint     | An event that starts later than one it overlaps uses `--event-raised-mix`                  |
+
+The channel and the tint together keep events of one colour apart without lines, shadows or
+an edge stripe: the channel separates events side by side, the tint marks the one that lies
+on top. The tint sits between the hover and selected fills, which are measured for contrast
+(§3), so the text stays readable. Hovering a raised event shows the selected fill.
 
 ## 12. Subscriptions dialog
 
@@ -304,11 +338,7 @@ The host is shown, never the address: a private feed address is a secret.
 1. **Locale.** The gutter always shows a 24-hour clock ("08:00"). Event times, dates and the
    popover follow the system locale through `Intl.DateTimeFormat`, so on an English system
    they still show "9:00 AM". Decide whether the 24-hour choice becomes a setting for all times.
-2. **Narrow events.** Three overlapping events at the minimum window width leave about 30px per
-   event. Consider Apple's approach of overlapping later events with an offset instead of equal
-   columns. That is a change to the layout function, so decide it before that function is
-   written.
-3. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
+2. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
    it. Until then "Subscriptions" in the sidebar footer cannot be reached in a narrow window.
-4. **Dark mode in the real app.** The engine behaviour is verified (§9). Still to confirm by hand:
+3. **Dark mode in the real app.** The engine behaviour is verified (§9). Still to confirm by hand:
    switching Ubuntu's style while the app runs, and Windows app mode in the CI build.

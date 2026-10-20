@@ -30,7 +30,7 @@ Current state: scaffold plus a static week-view design prototype on fake data (`
 - Look up current Tauri 2 / Svelte 5 docs via context7 before using APIs.
 - Explain non-obvious Rust to me; I'm learning Rust.
 - Write tests for recurrence/timezone logic before implementing.
-- Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `npm run check`.
+- Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `npm run check`, `npm test`.
 - Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`...).
 
 ## Commands
@@ -41,6 +41,7 @@ npm run tauri build  # release bundle (AppImage target needs `patchelf` installe
 npm run dev          # frontend only, in a browser at http://localhost:5173
 npm run check        # svelte-check (Svelte + TypeScript types)
 npm run lint         # prettier --check + eslint
+npm test             # vitest: unit tests of pure functions in src/lib (*.test.ts)
 npm run format       # prettier --write
 ```
 
@@ -48,7 +49,7 @@ npm run format       # prettier --write
 - `scripts/test-keychain.sh` runs the opt-in tests against a real Secret Service, in throwaway D-Bus sessions (Linux; needs `dbus-run-session` and `gnome-keyring-daemon`).
 - `cargo test -p simplecalendar-core real_feed -- --ignored` fetches a real public feed over HTTPS (needs the network). The other ICS tests use a local `wiremock` server over plain HTTP, so they never exercise TLS.
 - `node scripts/windows-zones.mjs [cldr-tag]` regenerates the Windows zone table (`provider/ics/windows_zones.rs`) from Unicode CLDR.
-- The frontend has no test runner.
+- Frontend tests are Vitest, on the Vite config, in Node without a DOM. Only pure functions in `src/lib/` are tested (the overlap layout); keep logic out of components. A single test file: `npx vitest run src/lib/overlap-layout.test.ts`.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
 - CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.
 
