@@ -45,11 +45,11 @@ impl SecretStore for KeychainStore {
 }
 
 /// Maps an error from connecting to the keychain.
-fn connect_error(err: Error) -> SecretError {
+pub(super) fn connect_error(err: Error) -> SecretError {
     todo!()
 }
 
 /// Maps an error from reading or writing an entry.
-fn entry_error(err: Error) -> SecretError {
+pub(super) fn entry_error(err: Error) -> SecretError {
     todo!()
 }
