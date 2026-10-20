@@ -8,7 +8,10 @@ pub mod model;
 pub mod provider;
 pub mod recurrence;
 pub mod secrets;
+pub mod service;
 pub mod sync;
+
+pub use service::CalendarService;
 
 /// What the core reports to the shell. The app crate forwards these to the webview (§2, §10).
 ///

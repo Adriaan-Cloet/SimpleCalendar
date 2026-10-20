@@ -1290,6 +1290,26 @@ Conventions:
 - Notifications and opening the browser are done from Rust. The frontend needs no extra plugin
   permission for them.
 
+Implementation notes (#9):
+
+- `CalendarService` is `simplecalendar_core::service`. The app crate manages one instance and
+  every command only calls it. The frontend's typed wrappers are in `src/lib/sources.ts`.
+- A failed command rejects with `{"kind", "message"}`. `kind` is `secrets_unavailable` (which
+  also carries `reason`, §8), `invalid_input`, `not_found`, `keychain` or `database`. The
+  `message` is meant to be shown as it is.
+- `list_sources` returns every source except the built-in local one, oldest first, with `state`
+  (`ok`, `error`, `auth_required`), `last_error`, `last_synced_at` (the latest of its
+  calendars) and `warnings` (those of all its calendars, §7.7). `syncing` only ever arrives as
+  a `sync:status` event.
+- `add_ics_source` accepts `http`, `https`, `webcal` and `webcals` addresses with a host. It
+  stores the URL in the keychain first, then the source row with the host as `account_label`,
+  and starts the first sync. Whether the address actually serves a feed shows in that sync's
+  status, not as an error of the command. The keychain account is `source:<uuid v4>`.
+- `remove_source` deletes the keychain entry first. If the keychain cannot be reached, the
+  source stays and the error says why, so a feed URL is never left behind in the keychain
+  without a source in the app. The calendars and events go with the row (`ON DELETE CASCADE`),
+  and `calendar:changed` names the removed calendars.
+
 ### Logic that does live in the frontend
 
 One piece of non-trivial logic belongs in TypeScript: **the overlap layout of the week and day

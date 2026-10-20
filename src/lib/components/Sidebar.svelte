@@ -7,9 +7,11 @@
 		today: Date;
 		calendars: Calendar[];
 		visible: Record<string, boolean>;
+		/** Opens the subscriptions dialog */
+		onsubscriptions: () => void;
 	}
 
-	let { today, calendars, visible = $bindable() }: Props = $props();
+	let { today, calendars, visible = $bindable(), onsubscriptions }: Props = $props();
 
 	const monthTitle = $derived(
 		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today)
@@ -120,34 +122,43 @@
 		{/each}
 	</nav>
 
-	<div class="appearance segmented" role="radiogroup" aria-label="Appearance">
-		{#each appearances as option (option.value)}
-			<button
-				type="button"
-				role="radio"
-				aria-checked={appearance === option.value}
-				aria-label={option.label}
-				title={option.label}
-				class={{ segment: true, selected: appearance === option.value }}
-				onclick={() => (appearance = option.value)}
-			>
-				<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-					{#if option.value === 'system'}
-						<!-- Half-filled circle: follows the system -->
-						<circle cx="8" cy="8" r="5.5" />
-						<path class="filled" d="M8 2.5a5.5 5.5 0 0 0 0 11z" />
-					{:else if option.value === 'light'}
-						<circle cx="8" cy="8" r="2.75" />
-						<path
-							d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06"
-						/>
-					{:else}
-						<path d="M13.5 9.6A5.75 5.75 0 0 1 6.4 2.5a5.75 5.75 0 1 0 7.1 7.1z" />
-					{/if}
-				</svg>
-			</button>
-		{/each}
-	</div>
+	<footer class="footer">
+		<button type="button" class="footer-button" onclick={onsubscriptions}>
+			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+				<path d="M3.5 3.5a9 9 0 0 1 9 9M3.5 7.5a5 5 0 0 1 5 5" />
+				<circle class="filled" cx="4.25" cy="11.75" r="1.25" />
+			</svg>
+			Subscriptions
+		</button>
+		<div class="appearance segmented" role="radiogroup" aria-label="Appearance">
+			{#each appearances as option (option.value)}
+				<button
+					type="button"
+					role="radio"
+					aria-checked={appearance === option.value}
+					aria-label={option.label}
+					title={option.label}
+					class={{ segment: true, selected: appearance === option.value }}
+					onclick={() => (appearance = option.value)}
+				>
+					<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+						{#if option.value === 'system'}
+							<!-- Half-filled circle: follows the system -->
+							<circle cx="8" cy="8" r="5.5" />
+							<path class="filled" d="M8 2.5a5.5 5.5 0 0 0 0 11z" />
+						{:else if option.value === 'light'}
+							<circle cx="8" cy="8" r="2.75" />
+							<path
+								d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06"
+							/>
+						{:else}
+							<path d="M13.5 9.6A5.75 5.75 0 0 1 6.4 2.5a5.75 5.75 0 1 0 7.1 7.1z" />
+						{/if}
+					</svg>
+				</button>
+			{/each}
+		</div>
+	</footer>
 </aside>
 
 <style>
@@ -296,10 +307,55 @@
 		stroke-linecap: round;
 	}
 
+	/* Footer: subscriptions and appearance */
+	.footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-sm);
+	}
+
+	.footer-button {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-xs);
+		min-width: 0;
+		height: var(--control-height);
+		padding: 0 var(--space-xs);
+		border: 0;
+		border-radius: var(--radius-md);
+		background: transparent;
+		color: var(--text-secondary);
+		white-space: nowrap;
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.footer-button:hover {
+		color: var(--text);
+		background: var(--fill-hover);
+	}
+
+	.footer-button:active {
+		background: var(--fill-pressed);
+	}
+
+	.footer-button svg {
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+	}
+
+	.footer-button .filled {
+		fill: currentColor;
+		stroke: none;
+	}
+
 	/* Appearance control (prototype only): icons only, sized to its content */
 	.segmented {
 		display: flex;
-		align-self: flex-start;
+		flex: none;
 		padding: var(--space-2xs);
 		border-radius: var(--radius-md);
 		background: var(--fill-control);

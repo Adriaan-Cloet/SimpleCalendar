@@ -46,6 +46,9 @@ rusqlite_migration = "2.6"
 # store already builds.
 sha2 = "0.10"
 thiserror = "2"
+# Random ids for new sources (§8: the keychain account is `source:<uuid>`). Already built
+# through Tauri with the same `v4` feature, so it adds nothing to the binary.
+uuid = { version = "1", features = ["v4"] }
 # `spawn_blocking` for the blocking SQLite calls, channels for the sync engine. Already built
 # through Tauri. `time` (the sync timer) is the only feature Tauri does not enable already.
 tokio = { version = "1", features = ["rt", "sync", "time"] }
