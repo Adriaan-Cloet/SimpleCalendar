@@ -1310,6 +1310,24 @@ Implementation notes (#9):
   without a source in the app. The calendars and events go with the row (`ON DELETE CASCADE`),
   and `calendar:changed` names the removed calendars.
 
+Implementation notes (#11):
+
+- `list_occurrences(from, to, tz)` takes dates (`YYYY-MM-DD`, `to` exclusive), not instants.
+  Rust turns them into the viewer's midnights with the RFC 5545 gap rules, so a week with a DST
+  change is 167 or 169 hours long without the frontend knowing. A range of 1 to 400 days is
+  accepted; anything else, or an unknown zone, is `invalid_input`. The display zone is not
+  remembered yet; reminders (#25) add that.
+- `list_calendars` returns every calendar with `source_kind`, the resolved `color` (override,
+  else provider, else `null`), `editable` and `visible`, oldest source first, primary calendar
+  first, then by name. `update_calendar` follows in #12.
+- The week view places occurrences with `placeWeek` (`src/lib/week-layout.ts`): it reads the
+  wall-clock date and time as written, draws a timed occurrence on every day it touches (not
+  on the next day when it ends at midnight), and moves timed occurrences of 24 hours or more to
+  the all-day row. All-day bars are stacked in rows: earliest first day, then longest, then
+  earliest start.
+- A calendar without a colour gets a palette colour by its id (`calendarColor`), so it keeps
+  it across restarts.
+
 ### Logic that does live in the frontend
 
 One piece of non-trivial logic belongs in TypeScript: **the overlap layout of the week and day

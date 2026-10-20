@@ -1,20 +1,19 @@
 <script lang="ts">
+	import type { Occurrence } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
 	import type { Placement } from '#lib/overlap-layout.js';
-	import type { Calendar, TimedEvent } from '#lib/prototype/fake-week.js';
 
 	interface Props {
-		event: TimedEvent;
+		event: Occurrence;
 		/** Where the overlap layout puts it (design.md §11, "Overlapping events") */
 		placement: Placement;
-		calendar: Calendar;
 		timeLabel: string;
 		hidden: boolean;
 		selected: boolean;
 		onselect: (anchor: HTMLElement) => void;
 	}
 
-	let { event, placement, calendar, timeLabel, hidden, selected, onselect }: Props = $props();
+	let { event, placement, timeLabel, hidden, selected, onselect }: Props = $props();
 
 	// The drawn length: at least the layout's minimum, so a very short event stays readable
 	const duration = $derived(placement.bottom - placement.top);
@@ -33,7 +32,7 @@
 		selected,
 		hidden
 	}}
-	style:--cal={calendarColor(calendar.color)}
+	style:--cal={calendarColor(event.color, event.calendar_id)}
 	style:--start={placement.top}
 	style:--duration={duration}
 	style:--indent={placement.indent}

@@ -1,56 +1,48 @@
 <script lang="ts">
+	import { occurrenceKey, type CalendarInfo, type Occurrence } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
-	import type { AllDayEvent, Calendar, TimedEvent } from '#lib/prototype/fake-week.js';
-	import {
-		addDays,
-		atMinutes,
-		isSameDay,
-		minutesSinceMidnight
-	} from '#lib/prototype/week-dates.js';
+	import { wallClock } from '#lib/occurrence-text.js';
 	import { layoutDay } from '#lib/overlap-layout.js';
+	import { addDays, atMinutes, isSameDay, isoDate, minutesSinceMidnight } from '#lib/week-dates.js';
+	import { placeWeek } from '#lib/week-layout.js';
 	import EventBlock from './EventBlock.svelte';
 
 	interface Props {
 		weekStart: Date;
 		now: Date;
-		calendars: Record<string, Calendar>;
-		timedEvents: TimedEvent[];
-		allDayEvents: AllDayEvent[];
-		visible: Record<string, boolean>;
-		selectedId: string | null;
-		onselect: (id: string, anchor: HTMLElement) => void;
+		calendars: Map<number, CalendarInfo>;
+		/** The week's occurrences from `list_occurrences`, sorted by start */
+		occurrences: Occurrence[];
+		visible: Record<number, boolean>;
+		selectedKey: string | null;
+		onselect: (key: string, anchor: HTMLElement) => void;
 		onscroll: () => void;
 	}
 
-	let {
-		weekStart,
-		now,
-		calendars,
-		timedEvents,
-		allDayEvents,
-		visible,
-		selectedId,
-		onselect,
-		onscroll
-	}: Props = $props();
+	let { weekStart, now, calendars, occurrences, visible, selectedKey, onselect, onscroll }: Props =
+		$props();
 
 	const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)));
 	const todayIndex = $derived(days.findIndex((day) => isSameDay(day, now)));
 	const nowMinutes = $derived(minutesSinceMidnight(now));
 	const hours = Array.from({ length: 23 }, (_, i) => i + 1);
-	const allDayRows = $derived(Math.max(1, ...allDayEvents.map((e) => e.row + 1)));
+
+	const week = $derived(placeWeek(occurrences, days.map(isoDate)));
+	const allDayRows = $derived(Math.max(1, week.rows));
 
 	// Each day's timed events with their place, in drawing order. Hidden calendars stay in the
 	// layout, so hiding one fades its events without moving the others (design.md §8).
-	const eventsById = $derived(new Map(timedEvents.map((e) => [e.id, e])));
 	const layouts = $derived(
-		days.map((_, i) =>
-			layoutDay(timedEvents.filter((e) => e.day === i)).map((placement) => ({
-				placement,
-				event: eventsById.get(placement.id)!
-			}))
-		)
+		week.timed.map((pieces) => {
+			const byKey = new Map(pieces.map((p) => [occurrenceKey(p.occurrence), p.occurrence]));
+			return layoutDay(
+				pieces.map((p) => ({ id: occurrenceKey(p.occurrence), start: p.start, end: p.end }))
+			).map((placement) => ({ placement, event: byKey.get(placement.id)! }));
+		})
 	);
+
+	// An occurrence whose calendar is not listed yet, or hidden in the sidebar
+	const isHidden = (o: Occurrence) => !calendars.has(o.calendar_id) || !visible[o.calendar_id];
 
 	const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
 	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });
@@ -104,23 +96,20 @@
 					style:grid-column={i + 2}
 				></div>
 			{/each}
-			{#each allDayEvents as event (event.id)}
-				{@const calendar = calendars[event.calendarId]}
+			{#each week.allDay as { occurrence, first, last, row } (occurrenceKey(occurrence))}
+				{@const key = occurrenceKey(occurrence)}
+				{@const hidden = isHidden(occurrence)}
 				<button
 					type="button"
-					class={{
-						'all-day-event': true,
-						selected: event.id === selectedId,
-						hidden: !visible[event.calendarId]
-					}}
-					style:grid-column="{event.firstDay + 2} / {event.lastDay + 3}"
-					style:grid-row={event.row + 1}
-					style:--cal={calendarColor(calendar.color)}
+					class={{ 'all-day-event': true, selected: key === selectedKey, hidden }}
+					style:grid-column="{first + 2} / {last + 3}"
+					style:grid-row={row + 1}
+					style:--cal={calendarColor(occurrence.color, occurrence.calendar_id)}
 					data-event
-					aria-pressed={event.id === selectedId}
-					aria-hidden={!visible[event.calendarId]}
-					tabindex={visible[event.calendarId] ? undefined : -1}
-					onclick={(e) => onselect(event.id, e.currentTarget)}>{event.title}</button
+					aria-pressed={key === selectedKey}
+					aria-hidden={hidden}
+					tabindex={hidden ? -1 : undefined}
+					onclick={(e) => onselect(key, e.currentTarget)}>{occurrence.title}</button
 				>
 			{/each}
 		</div>
@@ -148,15 +137,14 @@
 
 		{#each days as day, i (i)}
 			<div class={{ day: true, weekend: isWeekend(day) }} style:grid-column={i + 2}>
-				{#each layouts[i] as { event, placement } (event.id)}
+				{#each layouts[i] as { event, placement } (placement.id)}
 					<EventBlock
 						{event}
 						{placement}
-						calendar={calendars[event.calendarId]}
-						timeLabel={timeFormat.format(atMinutes(day, event.start))}
-						hidden={!visible[event.calendarId]}
-						selected={event.id === selectedId}
-						onselect={(anchor) => onselect(event.id, anchor)}
+						timeLabel={timeFormat.format(wallClock(event.start))}
+						hidden={isHidden(event)}
+						selected={placement.id === selectedKey}
+						onselect={(anchor) => onselect(placement.id, anchor)}
 					/>
 				{/each}
 				{#if i === todayIndex}

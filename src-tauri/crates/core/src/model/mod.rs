@@ -5,7 +5,7 @@
 //! the features that need them whole.
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 /// The kind of a source, stored in `sources.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -123,7 +123,8 @@ impl TimeKind {
     }
 }
 
-/// A start or end as the views show it, in the viewer's zone.
+/// A start or end as the views show it, in the viewer's zone. Serialises as an ISO 8601 string:
+/// `2026-10-20T09:00:00+02:00` for a timed value, `2026-10-20` for a date (§10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OccurrenceTime {
     /// A timed value with the viewer's offset at that instant.
@@ -133,8 +134,19 @@ pub enum OccurrenceTime {
     Date(NaiveDate),
 }
 
+impl Serialize for OccurrenceTime {
+    // Rust note: `collect_str` serialises anything that implements `Display` as a string,
+    // without building a `String` first. Chrono's `format` returns such a value.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OccurrenceTime::Timed(t) => serializer.collect_str(&t.format("%Y-%m-%dT%H:%M:%S%:z")),
+            OccurrenceTime::Date(d) => serializer.collect_str(&d.format("%Y-%m-%d")),
+        }
+    }
+}
+
 /// One appearance of an event on the timeline. Computed per query, never stored (§4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Occurrence {
     /// The event row. For a series, also when an exception replaced this occurrence, it is the
     /// master's id. Together with `original_start` it identifies the occurrence.

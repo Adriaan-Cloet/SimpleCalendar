@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::model::{Occurrence, OccurrenceTime};
 use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
@@ -264,6 +265,198 @@ async fn without_a_keychain_the_source_is_kept() {
         "{err:?}"
     );
     assert_eq!(s.source_rows().await.len(), 1);
+}
+
+// ---- calendars -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn calendars_are_listed_per_source_with_their_resolved_colour() {
+    let s = setup();
+    let first = s.service.add_ics_source(FEED, "First").await.unwrap();
+    let second = s.service.add_ics_source(FEED, "Second").await.unwrap();
+    let ids = (first.id.clone(), second.id.clone());
+    s.db.write(move |c| {
+        let (first, second) = ids;
+        c.execute(
+            "UPDATE sources SET created_at = created_at + 1 WHERE id = ?1",
+            [&second],
+        )?;
+        c.execute(
+            "INSERT INTO calendars (source_id, remote_id, name, color, color_override, access,
+                                    visible, is_primary)
+             VALUES (?1, 'b', 'beta', '#111111', NULL, 'read', 1, 0),
+                    (?1, 'a', 'Alpha', '#222222', '#333333', 'write', 0, 0),
+                    (?1, 'p', 'Zulu', NULL, NULL, 'read', 1, 1),
+                    (?2, 'x', 'Another', '#444444', NULL, 'read', 1, 0)",
+            params![second, first],
+        )
+    })
+    .await
+    .unwrap();
+
+    let calendars = s.service.list_calendars().await.unwrap();
+
+    let names: Vec<_> = calendars.iter().map(|c| c.name.as_str()).collect();
+    // Oldest source first; in a source the primary calendar, then by name.
+    assert_eq!(names, vec!["Another", "Zulu", "Alpha", "beta"]);
+    let alpha = &calendars[2];
+    assert_eq!(alpha.source_id, second.id);
+    assert_eq!(alpha.source_kind, SourceKind::Ics);
+    assert_eq!(alpha.color.as_deref(), Some("#333333"));
+    assert!(alpha.editable);
+    assert!(!alpha.visible);
+    assert_eq!(calendars[1].color, None);
+    assert_eq!(calendars[3].color.as_deref(), Some("#111111"));
+    assert!(!calendars[3].editable);
+}
+
+// ---- occurrences ---------------------------------------------------------------------------
+
+/// One timed event per instant in `starts` (epoch seconds), each 30 minutes long, titled by
+/// its index.
+async fn timed_events(s: &Setup, starts: &[i64]) {
+    let source = s.service.add_ics_source(FEED, "Feed").await.unwrap();
+    let id = s.calendar(&source.id, "cal", 0, "[]").await;
+    let starts = starts.to_vec();
+    s.db.write(move |c| {
+        // The helper's own event lies at 1970; it never shows in these ranges.
+        for (i, start) in starts.into_iter().enumerate() {
+            c.execute(
+                "INSERT INTO events (calendar_id, remote_id, title, start_utc, end_utc, start_tz)
+                 VALUES (?1, ?2, ?2, ?3, ?4, 'UTC')",
+                params![id, i.to_string(), start, start + 1800],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+fn titles(occurrences: &[Occurrence]) -> Vec<&str> {
+    occurrences.iter().map(|o| o.title.as_str()).collect()
+}
+
+fn instant(tz: chrono_tz::Tz, y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+    use chrono::TimeZone;
+    tz.with_ymd_and_hms(y, mo, d, h, mi, 0)
+        .earliest()
+        .unwrap()
+        .timestamp()
+}
+
+#[tokio::test]
+async fn the_range_runs_from_midnight_to_midnight_in_the_viewer_zone() {
+    use chrono_tz::Europe::Brussels;
+    let s = setup();
+    // The week of 19 October 2026 ends on the day summer time does, so it is 169 hours long.
+    timed_events(
+        &s,
+        &[
+            instant(Brussels, 2026, 10, 18, 23, 0), // 0: ends at midnight, before the week
+            instant(Brussels, 2026, 10, 19, 0, 0),  // 1: Monday at midnight
+            instant(Brussels, 2026, 10, 25, 23, 30), // 2: the last half hour
+            instant(Brussels, 2026, 10, 26, 0, 0),  // 3: the Monday after
+        ],
+    )
+    .await;
+
+    let week = s
+        .service
+        .list_occurrences("2026-10-19", "2026-10-26", "Europe/Brussels")
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&week), vec!["1", "2"]);
+}
+
+#[tokio::test]
+async fn the_same_dates_cover_other_instants_in_another_zone() {
+    use chrono::TimeZone;
+    use chrono_tz::America::New_York;
+    use chrono_tz::Europe::Brussels;
+    let s = setup();
+    timed_events(
+        &s,
+        &[
+            instant(Brussels, 2026, 10, 19, 3, 0), // 0: Sunday 21:00 in New York
+            instant(Brussels, 2026, 10, 26, 3, 0), // 1: Sunday 22:00 in New York
+        ],
+    )
+    .await;
+
+    let week = s
+        .service
+        .list_occurrences("2026-10-19", "2026-10-26", "America/New_York")
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&week), vec!["1"]);
+    assert_eq!(
+        week[0].start,
+        OccurrenceTime::Timed(
+            New_York
+                .with_ymd_and_hms(2026, 10, 25, 22, 0, 0)
+                .unwrap()
+                .fixed_offset()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_bad_zone_date_or_range_is_invalid_input() {
+    let s = setup();
+    for (from, to, tz) in [
+        ("2026-10-19", "2026-10-26", "Mars/Olympus"),
+        ("2026-10-19", "2026-10-26", ""),
+        ("19/10/2026", "2026-10-26", "UTC"),
+        ("2026-10-19", "2026-10-19", "UTC"),
+        ("2026-10-26", "2026-10-19", "UTC"),
+        ("2026-01-01", "2028-01-01", "UTC"),
+    ] {
+        let err = s.service.list_occurrences(from, to, tz).await.unwrap_err();
+        assert!(
+            matches!(err, ServiceError::InvalidInput(_)),
+            "{from} {to} {tz}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn occurrences_serialise_as_the_frontend_contract_says() {
+    use chrono::{NaiveDate, TimeZone};
+    use chrono_tz::Europe::Brussels;
+    let occurrence = Occurrence {
+        event_id: 7,
+        original_start: 1_792_000_000,
+        calendar_id: 3,
+        title: "Standup".into(),
+        location: None,
+        color: Some("#336699".into()),
+        start: OccurrenceTime::Timed(
+            Brussels
+                .with_ymd_and_hms(2026, 10, 20, 9, 0, 0)
+                .unwrap()
+                .fixed_offset(),
+        ),
+        end: OccurrenceTime::Date(NaiveDate::from_ymd_opt(2026, 10, 21).unwrap()),
+        editable: false,
+    };
+
+    assert_eq!(
+        serde_json::to_value(occurrence).unwrap(),
+        serde_json::json!({
+            "event_id": 7,
+            "original_start": 1_792_000_000,
+            "calendar_id": 3,
+            "title": "Standup",
+            "location": null,
+            "color": "#336699",
+            "start": "2026-10-20T09:00:00+02:00",
+            "end": "2026-10-21",
+            "editable": false
+        })
+    );
 }
 
 // ---- errors for the frontend ---------------------------------------------------------------

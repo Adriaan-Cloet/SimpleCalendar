@@ -65,7 +65,9 @@ pub fn run() {
             commands::list_sources,
             commands::add_ics_source,
             commands::remove_source,
-            commands::sync_now
+            commands::sync_now,
+            commands::list_occurrences,
+            commands::list_calendars
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
