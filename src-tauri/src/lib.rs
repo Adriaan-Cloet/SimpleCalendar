@@ -6,6 +6,7 @@ use serde::Serialize;
 use simplecalendar_core::CoreEvent;
 use simplecalendar_core::db::Db;
 use simplecalendar_core::provider::Providers;
+use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
 use simplecalendar_core::sync::SyncEngine;
 use tauri::{AppHandle, Emitter, Manager};
@@ -47,10 +48,10 @@ pub fn run() {
             });
             app.manage(secrets.clone());
 
-            // The sync engine (§7.1). No provider is registered yet: the ICS provider comes
-            // with #7, and until then a sync finds nothing to do.
+            // The sync engine (§7.1), with a provider for every kind of remote source.
+            let providers = Providers::new().with(Arc::new(IcsProvider::new()?));
             let (events, rx) = mpsc::unbounded_channel();
-            let (engine, sync) = SyncEngine::new(db, secrets, Providers::new(), events);
+            let (engine, sync) = SyncEngine::new(db, secrets, providers, events);
             tauri::async_runtime::spawn(engine.run());
             tauri::async_runtime::spawn(forward_events(app.handle().clone(), rx));
             // The "app start" trigger.

@@ -175,7 +175,6 @@ async fn the_cursor_sends_conditional_headers_and_304_means_no_change() {
     Mock::given(method("GET"))
         .and(path("/feed.ics"))
         .and(header("If-None-Match", "\"v1\""))
-        .and(header("If-Modified-Since", "Mon, 01 Jun 2026 09:00:00 GMT"))
         .respond_with(ResponseTemplate::new(304))
         .expect(1)
         .mount(&server)
@@ -186,6 +185,13 @@ async fn the_cursor_sends_conditional_headers_and_304_means_no_change() {
     assert!(!changes.full);
     assert!(changes.upserts.is_empty() && changes.deletions.is_empty());
     assert_eq!(cursor_of(&changes), cursor);
+    // Checked here rather than with a matcher: wiremock's `header` matcher splits values at
+    // commas, and an HTTP date contains one.
+    let request = &server.received_requests().await.unwrap()[0];
+    assert_eq!(
+        request.headers["If-Modified-Since"],
+        "Mon, 01 Jun 2026 09:00:00 GMT"
+    );
 }
 
 #[tokio::test]
@@ -200,6 +206,33 @@ async fn an_unchanged_body_means_no_change() {
     assert!(!second.full);
     assert!(second.upserts.is_empty() && second.deletions.is_empty());
     assert_eq!(decode(&cursor_of(&second)).hash, decode(&cursor).hash);
+}
+
+/// Google stamps every event with the time of the request, so its feeds differ on every fetch.
+/// `DTSTAMP` is not stored, so a change there alone is no change.
+#[tokio::test]
+async fn a_body_that_differs_only_in_dtstamp_means_no_change() {
+    let stamped = |stamp: &str| FEED.replace("UID:a\r\n", &format!("UID:a\r\nDTSTAMP:{stamp}\r\n"));
+    let first_server = server().await;
+    serve(
+        &first_server,
+        ResponseTemplate::new(200).set_body_string(stamped("20261020T154148Z")),
+    )
+    .await;
+    let first = pull(&feed_at(&first_server), None).await.unwrap();
+    let second_server = server().await;
+    serve(
+        &second_server,
+        ResponseTemplate::new(200).set_body_string(stamped("20261020T154150Z")),
+    )
+    .await;
+
+    let second = pull(&feed_at(&second_server), Some(&cursor_of(&first)))
+        .await
+        .unwrap();
+
+    assert!(!second.full);
+    assert!(second.upserts.is_empty());
 }
 
 #[tokio::test]
@@ -354,4 +387,29 @@ async fn a_body_over_the_limit_is_permanent() {
 async fn a_source_without_url_is_permanent() {
     let error = pull(&cx(None), None).await.unwrap_err();
     assert!(matches!(error, ProviderError::Permanent(_)), "{error:?}");
+}
+
+// ---- the real thing ------------------------------------------------------------------------
+
+/// Fetches a public feed over HTTPS: rustls with `ring` and the OS certificate store, then the
+/// parser on real data. Needs the network, so it only runs on request:
+/// `cargo test -p simplecalendar-core real_feed -- --ignored`.
+#[tokio::test]
+#[ignore = "needs the network"]
+async fn a_real_feed_is_fetched_over_https_and_parsed() {
+    let url = "webcal://calendar.google.com/calendar/ical/\
+               en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics";
+
+    let changes = pull(&cx(Some(url.into())), None).await.unwrap();
+
+    assert!(changes.full);
+    assert!(
+        changes.upserts.len() > 10,
+        "{} events",
+        changes.upserts.len()
+    );
+    let again = pull(&cx(Some(url.into())), Some(&cursor_of(&changes)))
+        .await
+        .unwrap();
+    assert!(again.upserts.is_empty(), "an unchanged feed is no change");
 }

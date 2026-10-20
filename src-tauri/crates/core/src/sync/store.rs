@@ -14,6 +14,7 @@ use crate::provider::{CalendarRef, RemoteCalendar, RemoteEvent, SeriesRole, Sync
 /// A source, as far as a cycle needs it.
 pub(super) struct SourceRow {
     pub kind: SourceKind,
+    pub display_name: String,
     pub auth_required: bool,
     /// `sources.sync_interval_s`; `None` means the provider default.
     pub interval_s: Option<i64>,
@@ -36,7 +37,7 @@ pub(super) fn remote_source_ids(conn: &Connection) -> rusqlite::Result<Vec<Strin
 /// The source `id`, or `None` if it was removed.
 pub(super) fn load_source(conn: &Connection, id: &str) -> rusqlite::Result<Option<SourceRow>> {
     conn.query_row(
-        "SELECT kind, status, sync_interval_s FROM sources WHERE id = ?1",
+        "SELECT kind, status, sync_interval_s, display_name FROM sources WHERE id = ?1",
         [id],
         |r| {
             let kind: String = r.get(0)?;
@@ -51,6 +52,7 @@ pub(super) fn load_source(conn: &Connection, id: &str) -> rusqlite::Result<Optio
                 })?,
                 auth_required: status == "auth_required",
                 interval_s: r.get(2)?,
+                display_name: r.get(3)?,
             })
         },
     )
