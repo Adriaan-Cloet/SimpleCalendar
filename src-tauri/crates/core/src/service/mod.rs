@@ -1,0 +1,327 @@
+//! `CalendarService`: the one entry point into the core (`docs/architecture.md` §2, §10).
+//!
+//! Tauri commands are thin wrappers around these methods. Reads go straight to SQLite, sync
+//! requests go to the engine, and secrets go to the keychain only.
+
+#[cfg(test)]
+mod tests;
+
+use std::collections::BTreeSet;
+
+use reqwest::Url;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
+use serde::ser::SerializeStruct;
+use tokio::sync::mpsc;
+
+use crate::CoreEvent;
+use crate::db::{Db, DbError};
+use crate::model::SourceKind;
+use crate::provider::ics::feed_url;
+use crate::secrets::{Secret, SecretError, Secrets, SecretsUnavailable};
+use crate::sync::{SyncHandle, SyncState};
+
+/// What `get_status` reports. Sources needing sign-in and open conflicts join this in later
+/// versions (§10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Status {
+    /// `None` while the keychain is usable. Otherwise the structured `secrets_unavailable`
+    /// error, with the message to show.
+    pub secrets_unavailable: Option<SecretsUnavailable>,
+}
+
+/// A source as the UI lists it. Holds nothing secret: an ICS source shows its host, never its
+/// URL (§8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceInfo {
+    pub id: String,
+    pub kind: SourceKind,
+    pub display_name: String,
+    /// The ICS host or the Google account.
+    pub account_label: Option<String>,
+    /// The outcome of the last sync: `ok`, `error` or `auth_required`. While a sync runs, the
+    /// `sync:status` events say so.
+    pub state: SyncState,
+    pub last_error: Option<String>,
+    /// When the last sync of any of its calendars finished, in epoch seconds. `None` before the
+    /// first successful sync.
+    pub last_synced_at: Option<i64>,
+    /// The warnings of all its calendars, sorted, each once (§7.7).
+    pub warnings: Vec<String>,
+}
+
+/// Why a service call failed. Serialises as `{"kind": ..., "message": ...}` for the frontend;
+/// `secrets_unavailable` also carries its `reason` (§8).
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error(transparent)]
+    SecretsUnavailable(SecretsUnavailable),
+    /// The user's input cannot be used. The message says what to change.
+    #[error("{0}")]
+    InvalidInput(String),
+    #[error("This subscription no longer exists.")]
+    NotFound,
+    #[error(transparent)]
+    Secrets(SecretError),
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
+
+impl From<SecretError> for ServiceError {
+    fn from(e: SecretError) -> ServiceError {
+        match e {
+            SecretError::Unavailable(unavailable) => ServiceError::SecretsUnavailable(unavailable),
+            other => ServiceError::Secrets(other),
+        }
+    }
+}
+
+impl From<SecretsUnavailable> for ServiceError {
+    fn from(e: SecretsUnavailable) -> ServiceError {
+        ServiceError::SecretsUnavailable(e)
+    }
+}
+
+impl Serialize for ServiceError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let ServiceError::SecretsUnavailable(unavailable) = self {
+            return unavailable.serialize(serializer);
+        }
+        let kind = match self {
+            ServiceError::SecretsUnavailable(_) => unreachable!("handled above"),
+            ServiceError::InvalidInput(_) => "invalid_input",
+            ServiceError::NotFound => "not_found",
+            ServiceError::Secrets(_) => "keychain",
+            ServiceError::Db(_) => "database",
+        };
+        let mut s = serializer.serialize_struct("ServiceError", 2)?;
+        s.serialize_field("kind", kind)?;
+        s.serialize_field("message", &self.to_string())?;
+        s.end()
+    }
+}
+
+/// The core, as the shell sees it. Cloning is cheap: every field is a handle.
+#[derive(Clone)]
+pub struct CalendarService {
+    db: Db,
+    secrets: Secrets,
+    sync: SyncHandle,
+    events: mpsc::UnboundedSender<CoreEvent>,
+}
+
+impl CalendarService {
+    /// `events` is the same channel the sync engine reports on.
+    pub fn new(
+        db: Db,
+        secrets: Secrets,
+        sync: SyncHandle,
+        events: mpsc::UnboundedSender<CoreEvent>,
+    ) -> CalendarService {
+        CalendarService {
+            db,
+            secrets,
+            sync,
+            events,
+        }
+    }
+
+    /// The app's status. If the keychain was unavailable, it is probed again first, so a "Try
+    /// again" button only calls this.
+    pub async fn status(&self) -> Status {
+        Status {
+            secrets_unavailable: self.secrets.status().await,
+        }
+    }
+
+    /// Syncs one source now, or every remote source for `None`. Returns at once; progress
+    /// arrives as `sync:status` events.
+    pub fn sync_now(&self, source_id: Option<String>) {
+        self.sync.sync_now(source_id);
+    }
+
+    /// Subscribes to the feed at `url`. `name` may be empty; the feed's host is used then.
+    ///
+    /// The URL goes to the keychain only. The database stores the host, for display (§8). The
+    /// first sync starts at once; whether the address works shows in its `sync:status`.
+    pub async fn add_ics_source(&self, url: &str, name: &str) -> Result<SourceInfo, ServiceError> {
+        let url = url.trim();
+        let host = feed_host(url).ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "Enter a feed address that starts with https://, http:// or webcal://.".into(),
+            )
+        })?;
+        self.secrets.require().await?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let display_name = match name.trim() {
+            "" => host.clone(),
+            name => name.to_owned(),
+        };
+        // The secret first: a source row without its secret could never sync.
+        self.secrets
+            .set(
+                &id,
+                &Secret::IcsUrl {
+                    url: url.to_owned(),
+                },
+            )
+            .await?;
+        let row = (id.clone(), display_name, host);
+        let inserted = self
+            .db
+            .write(move |c| {
+                let (id, display_name, host) = row;
+                c.execute(
+                    "INSERT INTO sources (id, kind, display_name, account_label, created_at)
+                     VALUES (?1, 'ics', ?2, ?3, ?4)",
+                    params![id, display_name, host, now()],
+                )?;
+                Ok(())
+            })
+            .await;
+        if let Err(e) = inserted {
+            // Leave nothing behind in the keychain for a source that does not exist.
+            if let Err(cleanup) = self.secrets.delete(&id).await {
+                log::warn!("source {id}: cannot remove its secret after a failed add: {cleanup}");
+            }
+            return Err(e.into());
+        }
+
+        self.sync.sync_now(Some(id.clone()));
+        let source = self.db.read(move |c| source_info(c, &id)).await?;
+        source.ok_or(ServiceError::NotFound)
+    }
+
+    /// Every remote source, oldest first. The built-in local source is not listed.
+    pub async fn list_sources(&self) -> Result<Vec<SourceInfo>, ServiceError> {
+        Ok(self
+            .db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id FROM sources WHERE kind <> 'local' ORDER BY created_at, id",
+                )?;
+                let ids = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut sources = Vec::with_capacity(ids.len());
+                for id in ids {
+                    sources.extend(source_info(c, &id)?);
+                }
+                Ok(sources)
+            })
+            .await?)
+    }
+
+    /// Removes a source with its calendars and events, and its secret from the keychain.
+    ///
+    /// The secret goes first. If the keychain cannot be reached, the source stays and the error
+    /// says why, so a feed URL is never left behind without a source that shows it exists.
+    pub async fn remove_source(&self, source_id: &str) -> Result<(), ServiceError> {
+        let id = source_id.to_owned();
+        let exists = self
+            .db
+            .read(move |c| {
+                c.query_row(
+                    "SELECT 1 FROM sources WHERE id = ?1 AND kind <> 'local'",
+                    [id],
+                    |_| Ok(()),
+                )
+                .optional()
+            })
+            .await?;
+        if exists.is_none() {
+            return Err(ServiceError::NotFound);
+        }
+
+        self.secrets.delete(source_id).await?;
+        let id = source_id.to_owned();
+        let calendar_ids = self
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let calendar_ids = tx
+                    .prepare("SELECT id FROM calendars WHERE source_id = ?1 ORDER BY id")?
+                    .query_map([&id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<i64>>>()?;
+                // Calendars and their events go with it, through `ON DELETE CASCADE`.
+                tx.execute("DELETE FROM sources WHERE id = ?1", [&id])?;
+                tx.commit()?;
+                Ok(calendar_ids)
+            })
+            .await?;
+        if !calendar_ids.is_empty() {
+            // Only fails when the shell stopped listening, which happens when the app exits.
+            let _ = self
+                .events
+                .send(CoreEvent::CalendarChanged { calendar_ids });
+        }
+        Ok(())
+    }
+}
+
+/// The host of a feed address, or `None` if it is not an `http`, `https`, `webcal` or
+/// `webcals` URL with a host.
+fn feed_host(url: &str) -> Option<String> {
+    let parsed = Url::parse(&feed_url(url)).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+}
+
+/// One source with what its calendars add: the last sync time and the warnings.
+fn source_info(c: &Connection, id: &str) -> rusqlite::Result<Option<SourceInfo>> {
+    let Some(mut source) = c
+        .query_row(
+            "SELECT s.id, s.kind, s.display_name, s.account_label, s.status, s.last_error,
+                    (SELECT max(last_synced_at) FROM calendars WHERE source_id = s.id)
+             FROM sources s WHERE s.id = ?1",
+            [id],
+            |r| {
+                let kind: String = r.get(1)?;
+                let status: String = r.get(4)?;
+                Ok(SourceInfo {
+                    id: r.get(0)?,
+                    kind: SourceKind::parse(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            format!("unknown source kind {kind:?}").into(),
+                        )
+                    })?,
+                    display_name: r.get(2)?,
+                    account_label: r.get(3)?,
+                    state: match status.as_str() {
+                        "auth_required" => SyncState::AuthRequired,
+                        "error" => SyncState::Error,
+                        _ => SyncState::Ok,
+                    },
+                    last_error: r.get(5)?,
+                    last_synced_at: r.get(6)?,
+                    warnings: Vec::new(),
+                })
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+
+    let mut warnings = BTreeSet::new();
+    let mut stmt = c.prepare("SELECT warnings FROM calendars WHERE source_id = ?1")?;
+    for json in stmt.query_map([id], |r| r.get::<_, String>(0))? {
+        // A value this code did not write is skipped rather than failing the list.
+        warnings.extend(serde_json::from_str::<Vec<String>>(&json?).unwrap_or_default());
+    }
+    source.warnings = warnings.into_iter().collect();
+    Ok(Some(source))
+}
+
+/// The current time in epoch seconds.
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}

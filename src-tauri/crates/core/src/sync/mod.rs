@@ -98,6 +98,38 @@ impl SyncHandle {
     }
 }
 
+#[cfg(test)]
+impl SyncHandle {
+    /// A handle that no engine reads, with the queue it writes to. For testing callers of the
+    /// engine without running one.
+    pub(crate) fn detached() -> (SyncHandle, Requests) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (SyncHandle { tx }, Requests(rx))
+    }
+}
+
+/// What was sent to a detached handle.
+#[cfg(test)]
+pub(crate) struct Requests(mpsc::UnboundedReceiver<Msg>);
+
+#[cfg(test)]
+impl Requests {
+    /// The sources of the `sync_now` requests since the last call, in order.
+    pub(crate) fn manual(&mut self) -> Vec<Option<String>> {
+        let mut requested = Vec::new();
+        while let Ok(msg) = self.0.try_recv() {
+            if let Msg::Sync {
+                source_id,
+                manual: true,
+            } = msg
+            {
+                requested.push(source_id);
+            }
+        }
+        requested
+    }
+}
+
 /// Requests to the engine task, including the ones it sends itself.
 #[derive(Debug)]
 enum Msg {

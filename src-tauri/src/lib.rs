@@ -3,12 +3,12 @@ mod commands;
 use std::sync::Arc;
 
 use serde::Serialize;
-use simplecalendar_core::CoreEvent;
 use simplecalendar_core::db::Db;
 use simplecalendar_core::provider::Providers;
 use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
 use simplecalendar_core::sync::SyncEngine;
+use simplecalendar_core::{CalendarService, CoreEvent};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
@@ -29,7 +29,6 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db = Db::open(&data_dir.join("simplecalendar.db"))?;
-            app.manage(db.clone());
 
             // Keychain entries use the bundle identifier as service name (§8). The probe runs
             // in the background: on Linux it may wait for an unlock prompt, and without a
@@ -46,21 +45,26 @@ pub fn run() {
                     }
                 }
             });
-            app.manage(secrets.clone());
 
             // The sync engine (§7.1), with a provider for every kind of remote source.
             let providers = Providers::new().with(Arc::new(IcsProvider::new()?));
             let (events, rx) = mpsc::unbounded_channel();
-            let (engine, sync) = SyncEngine::new(db, secrets, providers, events);
+            let (engine, sync) =
+                SyncEngine::new(db.clone(), secrets.clone(), providers, events.clone());
             tauri::async_runtime::spawn(engine.run());
             tauri::async_runtime::spawn(forward_events(app.handle().clone(), rx));
             // The "app start" trigger.
             sync.sync_all();
-            app.manage(sync);
+
+            // Every command goes through the service (§2).
+            app.manage(CalendarService::new(db, secrets, sync, events));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
+            commands::list_sources,
+            commands::add_ics_source,
+            commands::remove_source,
             commands::sync_now
         ])
         .run(tauri::generate_context!())
