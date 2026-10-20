@@ -2,6 +2,7 @@
 	// Design prototype: a static week with fake data. See docs/design.md.
 	import EventPopover, { type EventDetails } from '#lib/components/EventPopover.svelte';
 	import Sidebar from '#lib/components/Sidebar.svelte';
+	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import WeekView from '#lib/components/WeekView.svelte';
 	import { allDayEvents, calendars, timedEvents } from '#lib/prototype/fake-week.js';
@@ -28,6 +29,7 @@
 		Object.fromEntries(calendars.map((c) => [c.id, true]))
 	);
 	let selected = $state<{ id: string; anchor: HTMLElement } | null>(null);
+	let subscriptionsOpen = $state(false);
 
 	const dateFormat = new Intl.DateTimeFormat(undefined, {
 		weekday: 'long',
@@ -79,7 +81,12 @@
 </script>
 
 <div class="app">
-	<Sidebar today={now} {calendars} bind:visible />
+	<Sidebar
+		today={now}
+		{calendars}
+		bind:visible
+		onsubscriptions={() => (subscriptionsOpen = true)}
+	/>
 	<main>
 		<Toolbar {title} />
 		<WeekView
@@ -95,6 +102,8 @@
 		/>
 	</main>
 </div>
+
+<SubscriptionsDialog bind:open={subscriptionsOpen} />
 
 {#if selected && details}
 	{#key selected.id}
