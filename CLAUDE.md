@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Lightweight, local-first desktop calendar. Tauri 2 + Rust core + Svelte 5 + TypeScript. Package manager is npm.
 
-Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). SQLite storage exists (`src-tauri/crates/core/src/db/`: two connections, migrations, the v0.1 schema), and the app opens it at startup. Reading a date range works in the core (`db/occurrences/`: recurrence expansion in `recurrence/`, model in `model/`), but no Tauri command calls it yet. No sync, providers, Tauri commands or keychain code exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
+Current state: scaffold plus a static week-view design prototype on fake data (`src/routes/+page.svelte`, data in `src/lib/prototype/`). SQLite storage exists (`src-tauri/crates/core/src/db/`: two connections, migrations, the v0.1 schema), and the app opens it at startup. Reading a date range works in the core (`db/occurrences/`: recurrence expansion in `recurrence/`, model in `model/`), but no Tauri command calls it yet. Secrets go through `secrets::Secrets` (OS keychain, probed at startup; `get_status` is the only Tauri command). No sync or providers exist yet. The plan is in `docs/roadmap.md` (versions v0.1 to v1.0, one GitHub milestone each) and `docs/architecture.md`.
 
 ## Scope
 
@@ -45,6 +45,7 @@ npm run format       # prettier --write
 ```
 
 - `cargo` commands run from `src-tauri/`. Pass `--workspace` (`--all` for `cargo fmt`), or only the app crate is checked. A single Rust test: `cargo test -p simplecalendar-core <name>`.
+- `scripts/test-keychain.sh` runs the opt-in tests against a real Secret Service, in throwaway D-Bus sessions (Linux; needs `dbus-run-session` and `gnome-keyring-daemon`).
 - The frontend has no test runner.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
 - CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.
