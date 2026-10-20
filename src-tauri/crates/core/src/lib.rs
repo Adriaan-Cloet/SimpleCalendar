@@ -5,8 +5,21 @@
 
 pub mod db;
 pub mod model;
+pub mod provider;
 pub mod recurrence;
 pub mod secrets;
+pub mod sync;
+
+/// What the core reports to the shell. The app crate forwards these to the webview (§2, §10).
+///
+/// They are sent after the change they describe is committed, so a re-query sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreEvent {
+    /// Events or settings of these calendars changed (`calendar:changed`).
+    CalendarChanged { calendar_ids: Vec<i64> },
+    /// A source started or finished a sync cycle (`sync:status`).
+    SyncStatus(sync::SyncStatus),
+}
 
 /// Version of this crate, as set in its `Cargo.toml`.
 pub fn version() -> &'static str {

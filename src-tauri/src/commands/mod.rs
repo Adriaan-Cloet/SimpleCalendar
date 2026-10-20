@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use simplecalendar_core::secrets::{Secrets, SecretsUnavailable};
+use simplecalendar_core::sync::SyncHandle;
 use tauri::State;
 
 /// What `get_status` reports. Sources needing sign-in and open conflicts join this in later
@@ -23,4 +24,11 @@ pub async fn get_status(secrets: State<'_, Secrets>) -> Result<Status, ()> {
     Ok(Status {
         secrets_unavailable: secrets.status().await,
     })
+}
+
+/// Syncs one source now, or every source when `source` is left out. Returns at once; progress
+/// arrives as `sync:status` events.
+#[tauri::command]
+pub fn sync_now(sync: State<'_, SyncHandle>, source: Option<String>) {
+    sync.sync_now(source);
 }

@@ -38,3 +38,6 @@ log = "0.4"
 tauri = { version = "2.12.3", features = [] }
 tauri-plugin-log = "2"
 simplecalendar-core = { path = "crates/core" }
+# The channel that carries `CoreEvent`s from the core to the event forwarder. Already built
+# through Tauri, which runs on tokio.
+tokio = { version = "1", features = ["sync"] }
