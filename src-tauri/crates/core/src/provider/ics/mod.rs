@@ -7,6 +7,9 @@
 mod parse;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tz_cases;
+mod windows_zones;
 
 use std::time::Duration;
 
@@ -160,11 +163,12 @@ impl CalendarProvider for IcsProvider {
 
         // Parsing a large feed takes a while; it runs on a blocking thread so it does not hold
         // up the async runtime that other tasks share.
-        let events =
-            tokio::task::spawn_blocking(move || parse::parse_feed(&String::from_utf8_lossy(&body)))
-                .await
-                .map_err(|e| ProviderError::Permanent(format!("parsing the feed failed: {e}")))?
-                .map_err(|e| ProviderError::Permanent(e.to_string()))?;
+        let events = tokio::task::spawn_blocking(move || {
+            parse::parse_feed(&String::from_utf8_lossy(&body)).map(|feed| feed.events)
+        })
+        .await
+        .map_err(|e| ProviderError::Permanent(format!("parsing the feed failed: {e}")))?
+        .map_err(|e| ProviderError::Permanent(e.to_string()))?;
 
         Ok(ChangeSet {
             upserts: events,

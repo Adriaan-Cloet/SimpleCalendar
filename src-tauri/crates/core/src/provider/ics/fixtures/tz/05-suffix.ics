@@ -1,0 +1,16 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//SimpleCalendar//Time zone case//EN
+BEGIN:VEVENT
+UID:case-5-freeassociation
+DTSTART;TZID=/freeassociation.sourceforge.net/Europe/Brussels:20260601T090000
+DTEND;TZID=/freeassociation.sourceforge.net/Europe/Brussels:20260601T100000
+SUMMARY:libical prefix
+END:VEVENT
+BEGIN:VEVENT
+UID:case-5-mozilla
+DTSTART;TZID=/mozilla.org/20050126_1/Europe/Brussels:20260601T090000
+DTEND;TZID=/mozilla.org/20050126_1/Europe/Brussels:20260601T100000
+SUMMARY:Mozilla prefix
+END:VEVENT
+END:VCALENDAR

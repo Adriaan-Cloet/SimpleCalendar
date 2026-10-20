@@ -23,7 +23,9 @@ fn feed(body: &str) -> String {
 
 /// One event from a feed with one `VEVENT` holding `props`.
 fn one(props: &str) -> RemoteEvent {
-    let events = parse_feed(&feed(&format!("BEGIN:VEVENT\n{props}\nEND:VEVENT"))).unwrap();
+    let events = parse_feed(&feed(&format!("BEGIN:VEVENT\n{props}\nEND:VEVENT")))
+        .unwrap()
+        .events;
     assert_eq!(events.len(), 1, "{events:#?}");
     events.into_iter().next().unwrap()
 }
@@ -323,7 +325,8 @@ fn components_may_come_in_any_order() {
          BEGIN:VEVENT\nUID:m\nDTSTART:20260601T090000Z\nRRULE:FREQ=DAILY\nEND:VEVENT\n\
          BEGIN:VEVENT\nUID:s\nDTSTART:20260601T120000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let mut ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     ids.sort();
     assert_eq!(ids, vec!["m", &format!("m#{}", utc(2026, 6, 3, 9, 0)), "s"]);
@@ -341,7 +344,7 @@ fn an_exdate_without_rule_is_a_single_event() {
 fn folded_lines_and_bare_newlines_are_read() {
     let text = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:a\nDTSTART:20260601T090000Z\n\
                 SUMMARY:A long\n  title\nEND:VEVENT\nEND:VCALENDAR\n";
-    let events = parse_feed(text).unwrap();
+    let events = parse_feed(text).unwrap().events;
     assert_eq!(events[0].title, "A long title");
 }
 
@@ -354,7 +357,8 @@ fn todos_journals_and_time_zones_are_not_events() {
          BEGIN:VJOURNAL\nUID:j\nDTSTART:20260601T090000Z\nEND:VJOURNAL\n\
          BEGIN:VEVENT\nUID:e\nDTSTART:20260601T090000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     assert_eq!(ids, vec!["e"]);
 }
@@ -367,14 +371,15 @@ fn broken_events_are_skipped_and_the_rest_kept() {
          BEGIN:VEVENT\nUID:bad-start\nDTSTART:tomorrow\nEND:VEVENT\n\
          BEGIN:VEVENT\nUID:good\nDTSTART:20260601T090000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     assert_eq!(ids, vec!["good"]);
 }
 
 #[test]
 fn an_empty_calendar_has_no_events() {
-    assert_eq!(parse_feed(&feed("")).unwrap(), vec![]);
+    assert!(parse_feed(&feed("")).unwrap().events.is_empty());
 }
 
 #[test]

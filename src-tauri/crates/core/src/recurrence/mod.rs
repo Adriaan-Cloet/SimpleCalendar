@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 mod tests;
+pub mod vtimezone;
 
 use std::collections::BTreeSet;
 

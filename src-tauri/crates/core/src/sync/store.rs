@@ -155,7 +155,7 @@ pub(super) fn apply_calendars(
 
 /// Applies one page of changes and adds the remote ids it upserted to `seen`. Returns whether
 /// anything changed.
-pub(super) fn apply_page(
+pub(crate) fn apply_page(
     tx: &Transaction,
     calendar_id: i64,
     upserts: &[RemoteEvent],
