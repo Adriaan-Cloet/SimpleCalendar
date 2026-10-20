@@ -8,6 +8,8 @@ mod tests;
 
 use std::collections::BTreeSet;
 
+use chrono::{NaiveDate, NaiveTime};
+use chrono_tz::Tz;
 use reqwest::Url;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -15,9 +17,10 @@ use serde::ser::SerializeStruct;
 use tokio::sync::mpsc;
 
 use crate::CoreEvent;
-use crate::db::{Db, DbError};
-use crate::model::SourceKind;
+use crate::db::{Db, DbError, occurrences};
+use crate::model::{Occurrence, SourceKind};
 use crate::provider::ics::feed_url;
+use crate::recurrence::resolve_local;
 use crate::secrets::{Secret, SecretError, Secrets, SecretsUnavailable};
 use crate::sync::{SyncHandle, SyncState};
 
@@ -49,6 +52,24 @@ pub struct SourceInfo {
     /// The warnings of all its calendars, sorted, each once (§7.7).
     pub warnings: Vec<String>,
 }
+
+/// A calendar as the sidebar and the event popover show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CalendarInfo {
+    pub id: i64,
+    pub source_id: String,
+    pub source_kind: SourceKind,
+    pub name: String,
+    /// The user's colour, else the provider's. `None` if neither set one.
+    pub color: Option<String>,
+    /// Whether events can be created and changed in it: write access (§4).
+    pub editable: bool,
+    pub visible: bool,
+}
+
+/// The longest range `list_occurrences` accepts. A month view needs six weeks; this leaves room
+/// for a year view or an agenda without letting a typo expand a series for centuries.
+const MAX_RANGE_DAYS: i64 = 400;
 
 /// Why a service call failed. Serialises as `{"kind": ..., "message": ...}` for the frontend;
 /// `secrets_unavailable` also carries its `reason` (§8).
@@ -132,6 +153,63 @@ impl CalendarService {
         Status {
             secrets_unavailable: self.secrets.status().await,
         }
+    }
+
+    /// Every occurrence on a visible calendar from the start of date `from` to the start of
+    /// date `to` in the zone `tz`, sorted by start. Dates are `YYYY-MM-DD`, `tz` an IANA name.
+    ///
+    /// The frontend passes dates, not instants, so it never needs to know when a day starts in
+    /// its zone: a week that contains a DST change is 167 or 169 hours long (§10).
+    pub async fn list_occurrences(
+        &self,
+        from: &str,
+        to: &str,
+        tz: &str,
+    ) -> Result<Vec<Occurrence>, ServiceError> {
+        let viewer: Tz = tz
+            .parse()
+            .map_err(|_| ServiceError::InvalidInput(format!("Unknown time zone {tz:?}.")))?;
+        let (from, to) = (parse_date(from)?, parse_date(to)?);
+        if !(1..=MAX_RANGE_DAYS).contains(&(to - from).num_days()) {
+            return Err(ServiceError::InvalidInput(format!(
+                "Choose a range of 1 to {MAX_RANGE_DAYS} days."
+            )));
+        }
+        let midnight = |date: NaiveDate| resolve_local(viewer, date.and_time(NaiveTime::MIN));
+        let (from, to) = (midnight(from).timestamp(), midnight(to).timestamp());
+        Ok(self
+            .db
+            .read(move |c| occurrences::list_occurrences(c, from, to, viewer))
+            .await?)
+    }
+
+    /// Every calendar, local ones included: the oldest source first, in a source the primary
+    /// calendar first, then by name.
+    pub async fn list_calendars(&self) -> Result<Vec<CalendarInfo>, ServiceError> {
+        Ok(self
+            .db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT c.id, c.source_id, s.kind, c.name,
+                            coalesce(c.color_override, c.color), c.access = 'write', c.visible
+                     FROM calendars c JOIN sources s ON s.id = c.source_id
+                     ORDER BY s.created_at, s.id, c.is_primary DESC, c.name COLLATE NOCASE, c.id",
+                )?;
+                stmt.query_map([], |r| {
+                    let kind: String = r.get(2)?;
+                    Ok(CalendarInfo {
+                        id: r.get(0)?,
+                        source_id: r.get(1)?,
+                        source_kind: parse_kind(2, &kind)?,
+                        name: r.get(3)?,
+                        color: r.get(4)?,
+                        editable: r.get(5)?,
+                        visible: r.get(6)?,
+                    })
+                })?
+                .collect()
+            })
+            .await?)
     }
 
     /// Syncs one source now, or every remote source for `None`. Returns at once; progress
@@ -273,6 +351,23 @@ fn feed_host(url: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A `YYYY-MM-DD` date from the frontend.
+fn parse_date(value: &str) -> Result<NaiveDate, ServiceError> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| ServiceError::InvalidInput(format!("{value:?} is not a YYYY-MM-DD date.")))
+}
+
+/// A `sources.kind` value read from column `column`.
+fn parse_kind(column: usize, kind: &str) -> rusqlite::Result<SourceKind> {
+    SourceKind::parse(kind).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            format!("unknown source kind {kind:?}").into(),
+        )
+    })
+}
+
 /// One source with what its calendars add: the last sync time and the warnings.
 fn source_info(c: &Connection, id: &str) -> rusqlite::Result<Option<SourceInfo>> {
     let Some(mut source) = c
@@ -286,13 +381,7 @@ fn source_info(c: &Connection, id: &str) -> rusqlite::Result<Option<SourceInfo>>
                 let status: String = r.get(4)?;
                 Ok(SourceInfo {
                     id: r.get(0)?,
-                    kind: SourceKind::parse(&kind).ok_or_else(|| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            format!("unknown source kind {kind:?}").into(),
-                        )
-                    })?,
+                    kind: parse_kind(1, &kind)?,
                     display_name: r.get(2)?,
                     account_label: r.get(3)?,
                     state: match status.as_str() {
