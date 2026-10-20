@@ -6,6 +6,9 @@
 
 #[cfg(test)]
 mod tests;
+mod zones;
+
+use std::collections::BTreeSet;
 
 use chrono::{Days, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
@@ -14,6 +17,7 @@ use icalendar::parser::{self, Component, Property};
 use crate::model::EventStatus;
 use crate::provider::{RemoteEvent, SeriesRole};
 use crate::recurrence::resolve_local;
+use zones::{Zone, Zones, local_time};
 
 const DAY: i64 = 24 * 3600;
 
@@ -22,9 +26,18 @@ const DAY: i64 = 24 * 3600;
 #[error("not an iCalendar feed: {0}")]
 pub(super) struct ParseError(&'static str);
 
+/// What a feed holds.
+#[derive(Debug)]
+pub(super) struct Feed {
+    pub events: Vec<RemoteEvent>,
+    /// Problems the user should know about, such as a time zone that could not be resolved
+    /// (§7.7). Each is listed once, however many events it affects.
+    pub warnings: Vec<String>,
+}
+
 /// Every event in the feed. Events without a `UID` or a usable `DTSTART` are logged and left
 /// out, so one broken event never hides the rest.
-pub(super) fn parse_feed(text: &str) -> Result<Vec<RemoteEvent>, ParseError> {
+pub(super) fn parse_feed(text: &str) -> Result<Feed, ParseError> {
     // Lines may be folded (RFC 5545 §3.1): a line that starts with a space continues the one
     // before it. The parser expects them joined.
     let unfolded = parser::unfold(text.trim_start_matches('\u{feff}'));
@@ -37,30 +50,43 @@ pub(super) fn parse_feed(text: &str) -> Result<Vec<RemoteEvent>, ParseError> {
     }
 
     // `VALARM`s are sub-components of their event and never looked at, `VTODO`s and
-    // `VJOURNAL`s are skipped here, and `VTIMEZONE`s are left to time-zone resolution (#8).
-    let events = calendars
-        .into_iter()
-        .flat_map(|cal| cal.components.iter())
-        .filter(|c| is(c, "VEVENT"))
-        .filter_map(|c| {
-            event(c)
-                .inspect_err(|e| log::warn!("skipping an event in the feed: {e}"))
-                .ok()
-        })
-        .collect();
-    Ok(events)
+    // `VJOURNAL`s are skipped here, and `VTIMEZONE`s are read by `Zones`.
+    let mut events = Vec::new();
+    let mut warnings = BTreeSet::new();
+    for calendar in calendars {
+        let mut zones = Zones::of(calendar);
+        events.extend(
+            calendar
+                .components
+                .iter()
+                .filter(|c| is(c, "VEVENT"))
+                .filter_map(|c| {
+                    event(c, &mut zones)
+                        .inspect_err(|e| log::warn!("skipping an event in the feed: {e}"))
+                        .ok()
+                }),
+        );
+        warnings.extend(zones.into_warnings());
+    }
+    Ok(Feed {
+        events,
+        warnings: warnings.into_iter().collect(),
+    })
 }
 
 /// One `VEVENT` as an event row.
-fn event(c: &Component<'_>) -> Result<RemoteEvent, String> {
+fn event(c: &Component<'_>, zones: &mut Zones) -> Result<RemoteEvent, String> {
     let uid = prop(c, "UID")
         .map(|p| p.val.as_str().trim())
         .filter(|uid| !uid.is_empty())
         .ok_or("no UID")?;
-    let start = Time::parse(prop(c, "DTSTART").ok_or_else(|| format!("{uid}: no DTSTART"))?)
-        .map_err(|e| format!("{uid}: DTSTART {e}"))?;
+    let start = Time::parse(
+        prop(c, "DTSTART").ok_or_else(|| format!("{uid}: no DTSTART"))?,
+        zones,
+    )
+    .map_err(|e| format!("{uid}: DTSTART {e}"))?;
     let mut end = match (prop(c, "DTEND"), prop(c, "DURATION")) {
-        (Some(p), _) => Time::parse(p).map_err(|e| format!("{uid}: DTEND {e}"))?,
+        (Some(p), _) => Time::parse(p, zones).map_err(|e| format!("{uid}: DTEND {e}"))?,
         (None, Some(p)) => start.plus(Duration::parse(p.val.as_str())?),
         // RFC 5545 §3.6.1: a date lasts one day, a date-time ends where it starts.
         (None, None) if start.all_day => start.plus(Duration::days(1)),
@@ -74,11 +100,11 @@ fn event(c: &Component<'_>) -> Result<RemoteEvent, String> {
     let series = match prop(c, "RECURRENCE-ID") {
         Some(p) => SeriesRole::Exception {
             master_remote_id: uid.to_owned(),
-            original_start_utc: Time::parse(p)
+            original_start_utc: Time::parse(p, zones)
                 .map_err(|e| format!("{uid}: RECURRENCE-ID {e}"))?
                 .stored,
         },
-        None => master(c).unwrap_or(SeriesRole::Single),
+        None => master(c, zones).unwrap_or(SeriesRole::Single),
     };
     // An exception shares its master's UID; the occurrence it replaces makes it unique.
     let remote_id = match &series {
@@ -108,14 +134,14 @@ fn event(c: &Component<'_>) -> Result<RemoteEvent, String> {
         end_tz: end.zone_name(),
         series,
         remote_updated_at: prop(c, "LAST-MODIFIED")
-            .and_then(|p| Time::parse(p).ok())
+            .and_then(|p| Time::parse(p, zones).ok())
             .map(|t| t.stored),
     })
 }
 
 /// The master role, if the event has an `RRULE` or `RDATE`. An `EXDATE` alone excludes
 /// nothing and does not make a series.
-fn master(c: &Component<'_>) -> Option<SeriesRole> {
+fn master(c: &Component<'_>, zones: &mut Zones) -> Option<SeriesRole> {
     let lines: Vec<&Property<'_>> = c
         .properties
         .iter()
@@ -125,7 +151,7 @@ fn master(c: &Component<'_>) -> Option<SeriesRole> {
     has_rule.then(|| SeriesRole::Master {
         recurrence: lines
             .into_iter()
-            .map(recurrence_line)
+            .map(|p| recurrence_line(p, zones))
             .collect::<Vec<_>>()
             .join("\n"),
     })
@@ -133,33 +159,47 @@ fn master(c: &Component<'_>) -> Option<SeriesRole> {
 
 /// A recurrence property as a line the `recurrence` module reads.
 ///
-/// Only `TZID` and `VALUE` are kept. The `TZID` goes through the same resolution as `DTSTART`,
-/// and is written as the IANA name it resolved to, or left out (floating) if it did not.
-fn recurrence_line(p: &Property<'_>) -> String {
-    let mut line = p.name.as_str().to_ascii_uppercase();
-    for param in &p.params {
-        let Some(value) = &param.val else { continue };
-        let key = param.key.as_str();
-        if key.eq_ignore_ascii_case("TZID") {
-            match resolve_tzid(value.as_str()) {
-                Some(tz) => line.push_str(&format!(";TZID={}", tz.name())),
-                None => log::warn!("unknown time zone {:?} in {line}", value.as_str()),
-            }
-        } else if key.eq_ignore_ascii_case("VALUE") {
-            line.push_str(&format!(";VALUE={}", value.as_str()));
+/// Only `TZID` and `VALUE` are kept. Local times are resolved like `DTSTART` (§7.7 "Mixed
+/// forms"): written with the IANA name their `TZID` resolves to, or with the feed's zone if they
+/// have none. A zone that only resolves to fixed offsets has no name to write, so its values are
+/// converted to UTC instead. Floating values stay without `TZID`.
+fn recurrence_line(p: &Property<'_>, zones: &mut Zones) -> String {
+    let name = p.name.as_str().to_ascii_uppercase();
+    let value = p.val.as_str().trim();
+    let value_param = param(p, "VALUE")
+        .map(|v| format!(";VALUE={v}"))
+        .unwrap_or_default();
+    // Dates, UTC times and periods are not affected by a zone.
+    let Some(first) = value.split(',').find_map(local_time) else {
+        return format!("{name}{value_param}:{value}");
+    };
+    let tzid = param(p, "TZID");
+    let zone = match tzid {
+        Some(tzid) => zones.resolve(tzid, first),
+        None => zones.default(),
+    };
+    match (zone, tzid) {
+        (Some(Zone::Iana(tz)), _) => format!("{name};TZID={}{value_param}:{value}", tz.name()),
+        (Some(Zone::Fixed(_)), Some(tzid)) => {
+            let values: Vec<String> = value
+                .split(',')
+                .map(|v| match local_time(v) {
+                    Some(local) => {
+                        let instant = zones
+                            .resolve(tzid, local)
+                            .map_or(local.and_utc().timestamp(), |z| z.instant(local));
+                        chrono::DateTime::from_timestamp(instant, 0)
+                            .unwrap_or_default()
+                            .format("%Y%m%dT%H%M%SZ")
+                            .to_string()
+                    }
+                    None => v.trim().to_owned(),
+                })
+                .collect();
+            format!("{name}{value_param}:{}", values.join(","))
         }
+        _ => format!("{name}{value_param}:{value}"),
     }
-    line.push(':');
-    line.push_str(p.val.as_str().trim());
-    line
-}
-
-/// The zone a `TZID` names, or `None` if it is not known.
-///
-/// For now only IANA names, with quotes and spaces trimmed. Windows names, `VTIMEZONE`
-/// definitions and the feed's `X-WR-TIMEZONE` follow with the full resolution of §7.7 (#8).
-fn resolve_tzid(name: &str) -> Option<Tz> {
-    name.trim().trim_matches('"').trim().parse().ok()
 }
 
 /// A `DTSTART`, `DTEND`, `RECURRENCE-ID` or `LAST-MODIFIED` value, as stored (§4).
@@ -169,12 +209,12 @@ struct Time {
     /// as UTC for a floating or all-day one.
     stored: i64,
     /// `None` for floating and all-day values.
-    zone: Option<Tz>,
+    zone: Option<Zone>,
     all_day: bool,
 }
 
 impl Time {
-    fn parse(p: &Property<'_>) -> Result<Time, String> {
+    fn parse(p: &Property<'_>, zones: &mut Zones) -> Result<Time, String> {
         let value = p.val.as_str().trim();
         let invalid = || format!("{value:?} is not a date or time");
         let is_date =
@@ -193,20 +233,14 @@ impl Time {
             None => (value, false),
         };
         let local = NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").map_err(|_| invalid())?;
-        let zone = if utc {
-            Some(Tz::UTC)
-        } else {
-            param(p, "TZID").and_then(|name| {
-                let tz = resolve_tzid(name);
-                if tz.is_none() {
-                    log::warn!("unknown time zone {name:?}; reading the time as floating");
-                }
-                tz
-            })
+        let zone = match param(p, "TZID") {
+            _ if utc => Some(Zone::Iana(Tz::UTC)),
+            Some(tzid) => zones.resolve(tzid, local),
+            None => zones.default(),
         };
         Ok(Time {
             stored: match zone {
-                Some(tz) => resolve_local(tz, local).timestamp(),
+                Some(zone) => zone.instant(local),
                 None => local.and_utc().timestamp(),
             },
             zone,
@@ -218,7 +252,7 @@ impl Time {
     /// clock, so a day across a daylight-saving change is 23 or 25 hours long.
     fn plus(self, d: Duration) -> Time {
         let stored = match self.zone {
-            Some(tz) => {
+            Some(Zone::Iana(tz)) => {
                 let wall = chrono::DateTime::from_timestamp(self.stored, 0)
                     .unwrap_or_default()
                     .with_timezone(&tz)
@@ -230,13 +264,14 @@ impl Time {
                 };
                 resolve_local(tz, moved.unwrap_or(wall)).timestamp() + d.seconds
             }
-            None => self.stored + d.days * DAY + d.seconds,
+            // A fixed offset has no daylight saving: a day is always 24 hours.
+            Some(Zone::Fixed(_)) | None => self.stored + d.days * DAY + d.seconds,
         };
         Time { stored, ..self }
     }
 
     fn zone_name(&self) -> Option<String> {
-        self.zone.map(|tz| tz.name().to_owned())
+        self.zone.map(Zone::column)
     }
 }
 

@@ -23,7 +23,9 @@ fn feed(body: &str) -> String {
 
 /// One event from a feed with one `VEVENT` holding `props`.
 fn one(props: &str) -> RemoteEvent {
-    let events = parse_feed(&feed(&format!("BEGIN:VEVENT\n{props}\nEND:VEVENT"))).unwrap();
+    let events = parse_feed(&feed(&format!("BEGIN:VEVENT\n{props}\nEND:VEVENT")))
+        .unwrap()
+        .events;
     assert_eq!(events.len(), 1, "{events:#?}");
     events.into_iter().next().unwrap()
 }
@@ -99,10 +101,10 @@ fn time_without_zone_is_floating() {
     assert!(!e.all_day);
 }
 
-/// Until #8 resolves Windows names and `VTIMEZONE`s, an unknown zone keeps the event visible at
-/// its wall-clock time.
+/// An unknown zone keeps the event visible at its wall-clock time. The other `TZID` forms are
+/// the cases in `tz_cases`.
 #[test]
-fn unknown_tzid_is_floating_for_now() {
+fn unknown_tzid_without_a_feed_zone_is_floating() {
     let e = one("UID:a\nDTSTART;TZID=Nowhere Standard Time:20260601T090000");
     assert_eq!(e.start_utc, wall(2026, 6, 1, 9, 0));
     assert_eq!(e.start_tz, None);
@@ -237,6 +239,78 @@ fn master_keeps_its_recurrence_lines() {
     );
 }
 
+/// The recurrence lines of the first event in `feed`.
+fn recurrence_of(text: &str) -> Vec<String> {
+    let events = parse_feed(text).unwrap().events;
+    let SeriesRole::Master { recurrence } = &events[0].series else {
+        panic!("not a master: {:?}", events[0].series);
+    };
+    recurrence.lines().map(str::to_owned).collect()
+}
+
+#[test]
+fn a_windows_tzid_in_recurrence_lines_is_written_as_its_iana_name() {
+    let lines = recurrence_of(&feed(
+        "BEGIN:VEVENT\nUID:m\nDTSTART;TZID=Romance Standard Time:20260601T090000\n\
+         RRULE:FREQ=DAILY\nEXDATE;TZID=Romance Standard Time:20260602T090000\nEND:VEVENT",
+    ));
+    assert_eq!(
+        lines,
+        vec![
+            "RRULE:FREQ=DAILY",
+            "EXDATE;TZID=Europe/Paris:20260602T090000"
+        ]
+    );
+}
+
+#[test]
+fn recurrence_lines_in_an_unmatched_zone_are_written_in_utc() {
+    let lines = recurrence_of(&feed(
+        "BEGIN:VTIMEZONE\nTZID:Strange\nBEGIN:STANDARD\nDTSTART:19700101T000000\n\
+         TZOFFSETFROM:+0117\nTZOFFSETTO:+0117\nEND:STANDARD\nEND:VTIMEZONE\n\
+         BEGIN:VEVENT\nUID:m\nDTSTART;TZID=Strange:20260601T090000\nRRULE:FREQ=DAILY\n\
+         EXDATE;TZID=Strange:20260602T090000,20260603T090000\nEND:VEVENT",
+    ));
+    assert_eq!(
+        lines,
+        vec![
+            "RRULE:FREQ=DAILY",
+            "EXDATE:20260602T074300Z,20260603T074300Z"
+        ]
+    );
+}
+
+#[test]
+fn local_recurrence_values_without_tzid_get_the_feed_zone() {
+    let lines = recurrence_of(&feed(
+        "X-WR-TIMEZONE:America/New_York\n\
+         BEGIN:VEVENT\nUID:m\nDTSTART;TZID=Europe/Brussels:20260601T090000\n\
+         RRULE:FREQ=DAILY\nEXDATE:20260602T030000\nRDATE;VALUE=DATE:20260610\n\
+         RDATE:20260611T070000Z\nEND:VEVENT",
+    ));
+    assert_eq!(
+        lines,
+        vec![
+            "RRULE:FREQ=DAILY",
+            "EXDATE;TZID=America/New_York:20260602T030000",
+            "RDATE;VALUE=DATE:20260610",
+            "RDATE:20260611T070000Z",
+        ]
+    );
+}
+
+#[test]
+fn a_zone_problem_is_one_warning_however_many_events_have_it() {
+    let feed = parse_feed(&feed(
+        "BEGIN:VEVENT\nUID:a\nDTSTART;TZID=Nowhere:20260601T090000\n\
+         DTEND;TZID=Nowhere:20260601T100000\nEND:VEVENT\n\
+         BEGIN:VEVENT\nUID:b\nDTSTART;TZID=Nowhere:20270601T090000\nEND:VEVENT",
+    ))
+    .unwrap();
+    assert_eq!(feed.events.len(), 2);
+    assert_eq!(feed.warnings.len(), 1, "{:?}", feed.warnings);
+}
+
 #[test]
 fn a_quoted_tzid_in_recurrence_lines_is_written_plainly() {
     let e = one(
@@ -323,7 +397,8 @@ fn components_may_come_in_any_order() {
          BEGIN:VEVENT\nUID:m\nDTSTART:20260601T090000Z\nRRULE:FREQ=DAILY\nEND:VEVENT\n\
          BEGIN:VEVENT\nUID:s\nDTSTART:20260601T120000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let mut ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     ids.sort();
     assert_eq!(ids, vec!["m", &format!("m#{}", utc(2026, 6, 3, 9, 0)), "s"]);
@@ -341,7 +416,7 @@ fn an_exdate_without_rule_is_a_single_event() {
 fn folded_lines_and_bare_newlines_are_read() {
     let text = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:a\nDTSTART:20260601T090000Z\n\
                 SUMMARY:A long\n  title\nEND:VEVENT\nEND:VCALENDAR\n";
-    let events = parse_feed(text).unwrap();
+    let events = parse_feed(text).unwrap().events;
     assert_eq!(events[0].title, "A long title");
 }
 
@@ -354,7 +429,8 @@ fn todos_journals_and_time_zones_are_not_events() {
          BEGIN:VJOURNAL\nUID:j\nDTSTART:20260601T090000Z\nEND:VJOURNAL\n\
          BEGIN:VEVENT\nUID:e\nDTSTART:20260601T090000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     assert_eq!(ids, vec!["e"]);
 }
@@ -367,14 +443,15 @@ fn broken_events_are_skipped_and_the_rest_kept() {
          BEGIN:VEVENT\nUID:bad-start\nDTSTART:tomorrow\nEND:VEVENT\n\
          BEGIN:VEVENT\nUID:good\nDTSTART:20260601T090000Z\nEND:VEVENT",
     ))
-    .unwrap();
+    .unwrap()
+    .events;
     let ids: Vec<_> = events.iter().map(|e| e.remote_id.as_str()).collect();
     assert_eq!(ids, vec!["good"]);
 }
 
 #[test]
 fn an_empty_calendar_has_no_events() {
-    assert_eq!(parse_feed(&feed("")).unwrap(), vec![]);
+    assert!(parse_feed(&feed("")).unwrap().events.is_empty());
 }
 
 #[test]

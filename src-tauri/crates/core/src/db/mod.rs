@@ -4,7 +4,7 @@
 //! never a second writer. The read connection serves the UI; in WAL mode it is not blocked by
 //! an open write transaction and sees the last committed state.
 
-mod migrations;
+pub(crate) mod migrations;
 pub mod occurrences;
 #[cfg(test)]
 mod tests;

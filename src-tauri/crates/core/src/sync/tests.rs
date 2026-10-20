@@ -214,6 +214,22 @@ impl Harness {
             .unwrap()
     }
 
+    async fn warnings(&self, calendar: &str) -> Vec<String> {
+        let calendar = calendar.to_owned();
+        let json: String = self
+            .db
+            .read(move |c| {
+                c.query_row(
+                    "SELECT warnings FROM calendars WHERE remote_id = ?1",
+                    [calendar],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
     async fn calendar_id(&self, remote_id: &str) -> Option<i64> {
         let remote_id = remote_id.to_owned();
         self.db
@@ -360,6 +376,14 @@ fn page(upserts: Vec<RemoteEvent>, deletions: &[&str], full: bool, next: Next) -
         deletions: deletions.iter().map(|d| (*d).to_owned()).collect(),
         full,
         next,
+        warnings: Vec::new(),
+    }
+}
+
+fn warned(changes: ChangeSet, warnings: &[&str]) -> ChangeSet {
+    ChangeSet {
+        warnings: warnings.iter().map(|w| (*w).to_owned()).collect(),
+        ..changes
     }
 }
 
@@ -376,6 +400,97 @@ fn ids(names: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
         .iter()
         .map(|(id, master)| ((*id).to_owned(), master.map(str::to_owned)))
         .collect()
+}
+
+// ---- warnings ------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_full_pull_stores_the_warnings_of_all_its_pages() {
+    let mut h = Harness::new().await;
+    h.fake.script(
+        "src-1",
+        vec![
+            Ok(warned(
+                page(vec![single("a")], &[], true, more("p2")),
+                &["w1"],
+            )),
+            Ok(warned(
+                page(vec![single("b")], &[], true, done("c1")),
+                &["w2", "w1"],
+            )),
+        ],
+    );
+
+    h.sync().await;
+
+    assert_eq!(h.warnings("cal-1").await, vec!["w1", "w2"]);
+}
+
+#[tokio::test]
+async fn the_next_full_pull_replaces_the_warnings() {
+    let mut h = Harness::new().await;
+    h.fake.script(
+        "src-1",
+        vec![
+            Ok(warned(
+                page(vec![single("a")], &[], true, done("c1")),
+                &["w1"],
+            )),
+            Ok(page(vec![single("a")], &[], true, done("c2"))),
+        ],
+    );
+
+    h.sync().await;
+    h.sync().await;
+
+    assert!(h.warnings("cal-1").await.is_empty());
+}
+
+#[tokio::test]
+async fn an_incremental_pull_adds_to_the_warnings() {
+    let mut h = Harness::new().await;
+    h.fake.script(
+        "src-1",
+        vec![
+            Ok(warned(
+                page(vec![single("a")], &[], true, done("c1")),
+                &["w2"],
+            )),
+            Ok(warned(
+                page(vec![single("b")], &[], false, done("c2")),
+                &["w1"],
+            )),
+            // Nothing changed: the warnings stay.
+            Ok(page(Vec::new(), &[], false, done("c3"))),
+        ],
+    );
+
+    h.sync().await;
+    h.sync().await;
+    h.sync().await;
+
+    assert_eq!(h.warnings("cal-1").await, vec!["w1", "w2"]);
+}
+
+#[tokio::test]
+async fn a_failed_pull_keeps_the_warnings() {
+    let mut h = Harness::new().await;
+    h.fake.script(
+        "src-1",
+        vec![
+            Ok(warned(
+                page(vec![single("a")], &[], true, done("c1")),
+                &["w1"],
+            )),
+            Ok(page(vec![single("b")], &[], true, more("p2"))),
+            Err(ProviderError::Transient { retry_after: None }),
+        ],
+    );
+
+    h.sync().await;
+    h.sync().await;
+
+    assert_eq!(h.warnings("cal-1").await, vec!["w1"]);
 }
 
 // ---- applying pages ------------------------------------------------------------------------

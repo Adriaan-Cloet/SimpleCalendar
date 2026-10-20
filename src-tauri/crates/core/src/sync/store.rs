@@ -3,7 +3,7 @@
 //! Plain functions on a connection or transaction. The cycle runs them through `Db::read` and
 //! `Db::write`, one transaction per page.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -155,7 +155,7 @@ pub(super) fn apply_calendars(
 
 /// Applies one page of changes and adds the remote ids it upserted to `seen`. Returns whether
 /// anything changed.
-pub(super) fn apply_page(
+pub(crate) fn apply_page(
     tx: &Transaction,
     calendar_id: i64,
     upserts: &[RemoteEvent],
@@ -309,6 +309,35 @@ pub(super) fn unlinked_exceptions(tx: &Transaction, calendar_id: i64) -> rusqlit
         [calendar_id],
         |r| r.get(0),
     )
+}
+
+/// Stores the warnings of a finished pull (§7.7). A full pull's warnings replace the earlier
+/// ones; an incremental pull's are added to them. Called in the transaction of the last page.
+pub(super) fn store_warnings(
+    tx: &Transaction,
+    calendar_id: i64,
+    warnings: BTreeSet<String>,
+    full: bool,
+) -> rusqlite::Result<()> {
+    let mut all = warnings;
+    if !full {
+        if all.is_empty() {
+            return Ok(());
+        }
+        let stored: String = tx.query_row(
+            "SELECT warnings FROM calendars WHERE id = ?1",
+            [calendar_id],
+            |r| r.get(0),
+        )?;
+        // A value this code did not write is dropped rather than failing the sync.
+        all.extend(serde_json::from_str::<Vec<String>>(&stored).unwrap_or_default());
+    }
+    let json = serde_json::to_string(&all).expect("strings serialise");
+    tx.execute(
+        "UPDATE calendars SET warnings = ?2 WHERE id = ?1",
+        params![calendar_id, json],
+    )?;
+    Ok(())
 }
 
 /// Stores the cursor of a finished pull. Called in the transaction of the last page.

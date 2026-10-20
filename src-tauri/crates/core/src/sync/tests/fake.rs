@@ -157,6 +157,7 @@ impl CalendarProvider for Fake {
                 upserts: Vec::new(),
                 deletions: Vec::new(),
                 full: false,
+                warnings: Vec::new(),
                 next: Next::Done(SyncCursor(
                     cursor.map_or("unchanged".to_owned(), |c| c.0.clone()),
                 )),

@@ -125,6 +125,10 @@ pub struct ChangeSet {
     /// This pull describes the whole calendar; anything not seen must be deleted locally.
     pub full: bool,
     pub next: Next,
+    /// Problems with the data the user should know about, such as an ICS time zone that could
+    /// not be resolved (§7.7). The warnings of a full pull replace the calendar's earlier ones;
+    /// those of an incremental pull are added to them.
+    pub warnings: Vec<String>,
 }
 
 /// What follows a page.

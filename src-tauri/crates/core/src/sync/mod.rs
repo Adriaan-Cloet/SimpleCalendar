@@ -6,7 +6,7 @@
 //! to providers and the only one that applies remote changes to the database.
 
 mod cycle;
-mod store;
+pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 
