@@ -30,7 +30,22 @@ impl TimeKind {
     /// event still shows, at its wall-clock time. The ICS provider resolves names before
     /// storing them (§7.7), so this is for damaged data.
     pub fn from_columns(start_tz: Option<&str>, all_day: bool) -> TimeKind {
-        todo!()
+        if all_day {
+            return TimeKind::AllDay;
+        }
+        let Some(name) = start_tz else {
+            return TimeKind::Floating;
+        };
+        // An offset always starts with a sign; an IANA name never does.
+        if name.starts_with(['+', '-']) {
+            if let Ok(offset) = name.parse() {
+                return TimeKind::Offset(offset);
+            }
+        } else if let Ok(tz) = name.parse() {
+            return TimeKind::Zoned(tz);
+        }
+        log::warn!("unknown time zone {name:?}; showing the event as floating");
+        TimeKind::Floating
     }
 }
 
