@@ -616,13 +616,14 @@ CREATE TABLE settings (
 ) STRICT, WITHOUT ROWID;
 ```
 
-| Table or column                                                     | Needed from             |
-| ------------------------------------------------------------------- | ----------------------- |
-| `sources`, `calendars`, `events`, `settings`                        | v0.1, ICS subscriptions |
-| `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked` | v0.1, ICS subscriptions |
-| `events.etag`, `events.is_organizer`, `events.guests_can_modify`    | v0.2, Google read       |
-| `outbox`, `events.pending_delete`                                   | v0.2, Google write      |
-| `event_reminders`, `fired_reminders`, `calendars.default_reminders` | v0.3, reminders         |
+| Table or column                                                                  | Needed from                          |
+| -------------------------------------------------------------------------------- | ------------------------------------ |
+| `sources`, `calendars`, `events`, `settings`                                     | v0.1, ICS subscriptions              |
+| `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked`              | v0.1, ICS subscriptions              |
+| `events.etag`, `events.is_organizer`, `events.guests_can_modify`                 | v0.2, Google read                    |
+| `event_reminders`, `events.use_default_reminders`, `calendars.default_reminders` | v0.2, Google read (migration 3, #14) |
+| `outbox`, `events.pending_delete`                                                | v0.2, Google write                   |
+| `fired_reminders`                                                                | v0.3, reminders                      |
 
 Notes:
 
@@ -958,6 +959,29 @@ Reading:
   `guests_can_modify` (§4). Both default to false when absent, as documented.
 - **Reminders** map to `reminders.useDefault` and `reminders.overrides` (at most 5, each 0 to
   40320 minutes). Calendar defaults are stored in `calendars.default_reminders`.
+
+Implementation notes (#14):
+
+- `provider/google/`: `json.rs` turns Google's resources into the provider's types, `mod.rs`
+  does the HTTP. Pages are 250 entries. Every request carries `singleEvents=false` and
+  `maxResults=250`; the first sync adds nothing else, later ones add `syncToken`, and a page
+  adds `pageToken`.
+- A 401 drops the access token and tries once more with a refreshed one; a second 401 is
+  `Auth`. 410 is `CursorInvalid`, 404 `NotFound`, 429, 5xx and a 403 with reason
+  `rateLimitExceeded`, `userRateLimitExceeded` or `quotaExceeded` are `Transient` (with
+  `Retry-After` when sent), anything else `Permanent` with Google's message.
+- The calendar list: the name is `summaryOverride`, else `summary`. Calendars with only
+  free/busy access are left out. `primary` sets `is_primary`; `defaultReminders` keeps the
+  popup ones. Calendar ids are percent-encoded in the path (`#` becomes `%23`).
+- Until Google write (#18) the provider does not write, so `owner` and `writer` calendars are
+  stored as `read` (§4: writable needs both). #18 flips `WRITES`.
+- Event colours: `colorId` 1 to 11 map to the colours Google Calendar shows today (Lavender
+  `#7986cb` to Tomato `#d50000`), not the paler palette of the API's `colors` resource.
+- A cancelled occurrence without its own `start` and `end` takes its `originalStartTime` for
+  both. An event that cannot be read is skipped with a warning on its calendar.
+- Reminders: `useDefault` and `overrides` (`popup` and `email`) go to
+  `events.use_default_reminders` and `event_reminders`, replaced as a whole on every update.
+- The sidebar shows one group per Google account, named after it (`groupCalendars`).
 
 Writing:
 
@@ -1341,9 +1365,9 @@ Implementation notes (#11):
   change is 167 or 169 hours long without the frontend knowing. A range of 1 to 400 days is
   accepted; anything else, or an unknown zone, is `invalid_input`. The display zone is not
   remembered yet; reminders (#25) add that.
-- `list_calendars` returns every calendar with `source_kind`, the resolved `color` (override,
-  else provider, else `null`), `editable` and `visible`, oldest source first, primary calendar
-  first, then by name.
+- `list_calendars` returns every calendar with `source_kind`, `source_name` (since #14), the
+  resolved `color` (override, else provider, else `null`), `editable` and `visible`, oldest
+  source first, primary calendar first, then by name.
 - The week view places occurrences with `placeWeek` (`src/lib/week-layout.ts`): it reads the
   wall-clock date and time as written, draws a timed occurrence on every day it touches (not
   on the next day when it ends at midnight), and moves timed occurrences of 24 hours or more to
@@ -1625,8 +1649,10 @@ To be settled in the implementation plan, not guessed here.
    oldest is dropped silently. To confirm once a real client exists (#29).
 9. **More reasons an event is not editable** (Google read). Google also has a `locked` flag and
    special event types (`birthday`, `fromGmail`, `workingLocation` and others) that restrict
-   changes. Decide whether they fold into the same rule as `is_organizer` and
-   `guests_can_modify`.
+   changes. **Decided (#14): they fold into the same rule.** The provider stores
+   `is_organizer` and `guests_can_modify` as false for a locked event and for every
+   `eventType` other than `default`, so they are read-only. That is stricter than Google for
+   some types (`focusTime`, `outOfOffice`); loosen it per type if users ask.
 10. **`sendUpdates=none`** (Google write, revisit after v1). Guests outside Google Calendar are
     not told about a change. Once the app can show guests, ask the user per edit and pass
     `all`.
