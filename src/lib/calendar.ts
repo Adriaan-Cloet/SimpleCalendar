@@ -9,6 +9,8 @@ export interface CalendarInfo {
 	id: number;
 	source_id: string;
 	source_kind: SourceKind;
+	/** A Google account's address, a feed's name */
+	source_name: string;
 	name: string;
 	/** The user's colour, else the provider's: a `#rrggbb` value */
 	color: string | null;

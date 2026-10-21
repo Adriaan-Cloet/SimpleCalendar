@@ -310,6 +310,7 @@ async fn calendars_are_listed_per_source_with_their_resolved_colour() {
     let alpha = &calendars[2];
     assert_eq!(alpha.source_id, second.id);
     assert_eq!(alpha.source_kind, SourceKind::Ics);
+    assert_eq!(alpha.source_name, "Second");
     assert_eq!(alpha.color.as_deref(), Some("#333333"));
     assert!(alpha.editable);
     assert!(!alpha.visible);

@@ -161,7 +161,7 @@ pub struct Occurrence {
     pub color: Option<String>,
     pub start: OccurrenceTime,
     pub end: OccurrenceTime,
-    /// Whether the UI may offer editing. In v0.1 this is the calendar's write access; v0.2
-    /// adds the organizer rule from §4.
+    /// Whether the UI may offer editing: the calendar is writable and the event's calendar
+    /// organises it or lets guests change it (§4).
     pub editable: bool,
 }

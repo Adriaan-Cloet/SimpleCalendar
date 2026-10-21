@@ -23,7 +23,8 @@ const WIDEN: i64 = 14 * 3600;
 /// The columns both queries select, in this order. `color` is already resolved: the event's own,
 /// else the user's calendar colour, else the provider's.
 const COLUMNS: &str = "e.id, e.calendar_id, e.title, e.location,
-    coalesce(e.color, c.color_override, c.color), c.access = 'write',
+    coalesce(e.color, c.color_override, c.color),
+    c.access = 'write' AND (e.is_organizer OR e.guests_can_modify),
     e.all_day, e.start_utc, e.end_utc, e.start_tz, e.recurrence,
     e.recurring_event_id, e.original_start_utc";
 
@@ -140,6 +141,7 @@ struct EventRow {
     title: String,
     location: Option<String>,
     color: Option<String>,
+    /// Writable calendar, and the organizer rule of §4.
     writable: bool,
     kind: TimeKind,
     start: i64,

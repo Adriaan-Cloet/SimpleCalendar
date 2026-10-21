@@ -113,6 +113,8 @@ async fn a_feed_is_one_read_only_calendar_named_after_the_source() {
             color: None,
             time_zone: None,
             access: Access::Read,
+            is_primary: true,
+            default_reminders: Vec::new(),
         }]
     );
 }

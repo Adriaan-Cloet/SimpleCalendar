@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::model::{Access, EventStatus, SourceKind};
 use crate::secrets::Secret;
 
+pub mod google;
 pub(crate) mod http;
 pub mod ics;
 
@@ -50,6 +51,10 @@ pub struct RemoteCalendar {
     /// IANA name.
     pub time_zone: Option<String>,
     pub access: Access,
+    /// The account's main calendar. Listed first in its source.
+    pub is_primary: bool,
+    /// Popup reminders for events that use the calendar's defaults, in minutes before the start.
+    pub default_reminders: Vec<u32>,
 }
 
 /// Which calendar `pull` should read: the provider's own id, plus what the provider reported
@@ -100,6 +105,56 @@ pub struct RemoteEvent {
     pub end_tz: Option<String>,
     pub series: SeriesRole,
     pub remote_updated_at: Option<i64>,
+    /// The server's version tag, sent back as `If-Match` when the event is changed.
+    pub etag: Option<String>,
+    /// The calendar this copy is on organises the event (Google: `organizer.self`). Together
+    /// with `guests_can_modify` it decides whether the event can be changed (§4).
+    pub is_organizer: bool,
+    pub guests_can_modify: bool,
+    pub reminders: Reminders,
+}
+
+/// An event's reminders (§7.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reminders {
+    /// The calendar's default reminders apply, and `overrides` is empty.
+    pub use_default: bool,
+    pub overrides: Vec<Reminder>,
+}
+
+impl Default for Reminders {
+    /// The calendar's defaults, which is what a provider without reminders means.
+    fn default() -> Reminders {
+        Reminders {
+            use_default: true,
+            overrides: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reminder {
+    pub method: ReminderMethod,
+    /// 0 to 40320 (four weeks).
+    pub minutes_before: u32,
+}
+
+/// How a reminder reaches the user. Only `Popup` produces a notification; `Email` is kept so it
+/// survives an edit (§6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderMethod {
+    Popup,
+    Email,
+}
+
+impl ReminderMethod {
+    /// The value in `event_reminders.method`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReminderMethod::Popup => "popup",
+            ReminderMethod::Email => "email",
+        }
+    }
 }
 
 /// A position in the provider's change history. Opaque: the engine stores it and hands it

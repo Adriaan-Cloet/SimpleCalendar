@@ -202,6 +202,38 @@ fn editable_follows_calendar_write_access() {
 }
 
 #[test]
+fn on_a_writable_calendar_only_the_organiser_or_permitted_guests_may_edit() {
+    let conn = test_connection();
+    setup(&conn);
+    let cal = add_calendar(&conn, "cal-w", "write", true);
+    let start = utc(2026, 6, 15, 9, 0);
+    for (remote_id, organizer, guests) in [
+        ("mine", true, false),
+        ("theirs", false, false),
+        ("shared", false, true),
+    ] {
+        Ev::new(remote_id, start, start + HOUR, Some("UTC")).insert(&conn, cal);
+        conn.execute(
+            "UPDATE events SET is_organizer = ?2, guests_can_modify = ?3 WHERE remote_id = ?1",
+            params![remote_id, organizer, guests],
+        )
+        .unwrap();
+    }
+
+    let got = list(
+        &conn,
+        utc(2026, 6, 15, 0, 0),
+        utc(2026, 6, 16, 0, 0),
+        Brussels,
+    );
+    let editable: Vec<(&str, bool)> = got.iter().map(|o| (o.title.as_str(), o.editable)).collect();
+    assert_eq!(
+        editable,
+        vec![("mine", true), ("theirs", false), ("shared", true)]
+    );
+}
+
+#[test]
 fn colour_prefers_event_then_override_then_calendar() {
     let conn = test_connection();
     let cal = setup(&conn);

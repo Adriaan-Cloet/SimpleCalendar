@@ -64,6 +64,8 @@ pub struct CalendarInfo {
     pub id: i64,
     pub source_id: String,
     pub source_kind: SourceKind,
+    /// The source's name: a Google account's address, a feed's name.
+    pub source_name: String,
     pub name: String,
     /// The user's colour, else the provider's. `None` if neither set one.
     pub color: Option<String>,
@@ -449,7 +451,7 @@ fn parse_date(value: &str) -> Result<NaiveDate, ServiceError> {
 
 /// The columns `calendar_info` reads, without `WHERE` or `ORDER BY`.
 const CALENDAR_INFO: &str = "SELECT c.id, c.source_id, s.kind, c.name,
-        coalesce(c.color_override, c.color), c.access = 'write', c.visible
+        coalesce(c.color_override, c.color), c.access = 'write', c.visible, s.display_name
     FROM calendars c JOIN sources s ON s.id = c.source_id";
 
 /// One row of `CALENDAR_INFO`.
@@ -463,6 +465,7 @@ fn calendar_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<CalendarInfo> {
         color: r.get(4)?,
         editable: r.get(5)?,
         visible: r.get(6)?,
+        source_name: r.get(7)?,
     })
 }
 

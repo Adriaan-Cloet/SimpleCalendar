@@ -15,7 +15,7 @@ use chrono_tz::Tz;
 use icalendar::parser::{self, Component, Property};
 
 use crate::model::EventStatus;
-use crate::provider::{RemoteEvent, SeriesRole};
+use crate::provider::{Reminders, RemoteEvent, SeriesRole};
 use crate::recurrence::resolve_local;
 use zones::{Zone, Zones, local_time};
 
@@ -136,6 +136,11 @@ fn event(c: &Component<'_>, zones: &mut Zones) -> Result<RemoteEvent, String> {
         remote_updated_at: prop(c, "LAST-MODIFIED")
             .and_then(|p| Time::parse(p, zones).ok())
             .map(|t| t.stored),
+        // A feed is read-only through its calendar's access; these only matter for writing.
+        etag: None,
+        is_organizer: true,
+        guests_can_modify: false,
+        reminders: Reminders::default(),
     })
 }
 

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import type { CalendarInfo, CalendarUpdate } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
+	import { groupCalendars } from '#lib/calendar-groups.js';
 	import CalendarColorMenu from '#lib/components/CalendarColorMenu.svelte';
-	import type { SourceKind } from '#lib/sources.js';
 	import { addDays, isSameDay, startOfWeek } from '#lib/week-dates.js';
 
 	interface Props {
@@ -17,14 +17,6 @@
 	}
 
 	let { today, weekStart, calendars, onupdate, onsubscriptions }: Props = $props();
-
-	// In this order. CalDAV accounts join in v0.4.
-	const sourceLabels: Record<SourceKind, string> = {
-		local: 'On this computer',
-		google: 'Google',
-		caldav: 'CalDAV',
-		ics: 'Subscriptions'
-	};
 
 	const monthTitle = $derived(
 		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today)
@@ -46,15 +38,7 @@
 	const weekdays = $derived(weeks[0].map((day) => weekdayFormat.format(day)));
 	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });
 
-	const groups = $derived(
-		(Object.keys(sourceLabels) as SourceKind[])
-			.map((source) => ({
-				source,
-				label: sourceLabels[source],
-				calendars: calendars.filter((c) => c.source_kind === source)
-			}))
-			.filter((group) => group.calendars.length > 0)
-	);
+	const groups = $derived(groupCalendars(calendars));
 
 	// The colour menu, opened with a right click or the context menu key on a calendar
 	let colorMenu = $state<{ id: number; x: number; y: number; row: HTMLElement } | null>(null);
@@ -122,7 +106,7 @@
 	</section>
 
 	<nav class="calendars" aria-label="Calendars">
-		{#each groups as group (group.source)}
+		{#each groups as group (group.key)}
 			<section class="group">
 				<h2 class="group-title">{group.label}</h2>
 				<ul>
