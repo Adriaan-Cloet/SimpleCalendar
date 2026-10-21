@@ -98,6 +98,8 @@ impl CalendarProvider for IcsProvider {
             color: None,
             time_zone: None,
             access: Access::Read,
+            is_primary: true,
+            default_reminders: Vec::new(),
         }])
     }
 

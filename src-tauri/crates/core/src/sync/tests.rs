@@ -13,8 +13,8 @@ use super::*;
 use crate::db::occurrences::list_occurrences;
 use crate::model::{Access, EventStatus};
 use crate::provider::{
-    CalendarProvider, ChangeSet, Next, PageToken, ProviderError, RemoteEvent, SeriesRole,
-    SyncCursor,
+    CalendarProvider, ChangeSet, Next, PageToken, ProviderError, Reminder, ReminderMethod,
+    Reminders, RemoteEvent, SeriesRole, SyncCursor,
 };
 use crate::secrets::{MemoryStore, Secret, UnavailableReason};
 use fake::{Fake, Pull, calendar};
@@ -342,6 +342,10 @@ fn single(remote_id: &str) -> RemoteEvent {
         end_tz: Some("UTC".to_owned()),
         series: SeriesRole::Single,
         remote_updated_at: None,
+        etag: Some(format!("\"{remote_id}-1\"")),
+        is_organizer: true,
+        guests_can_modify: false,
+        reminders: Reminders::default(),
     }
 }
 
@@ -938,6 +942,107 @@ async fn a_sync_keeps_the_users_colour_and_visibility() {
         .await
         .unwrap();
     assert_eq!(row, (Some("#123456".into()), Some("#ff9500".into()), false));
+}
+
+#[tokio::test]
+async fn a_calendar_keeps_its_default_reminders_and_primary_flag() {
+    let mut h = Harness::new().await;
+    let mut primary = calendar("cal-1", "One");
+    primary.is_primary = true;
+    primary.default_reminders = vec![10, 30];
+    h.fake.set_calendars(vec![primary.clone()]);
+    h.sync().await;
+
+    let read = |db: Db| async move {
+        db.read(|c| {
+            c.query_row(
+                "SELECT is_primary, default_reminders FROM calendars",
+                [],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(read(h.db.clone()).await, (true, "[10,30]".into()));
+
+    primary.default_reminders = vec![];
+    h.changed.clear();
+    h.fake.set_calendars(vec![primary]);
+    h.sync().await;
+    assert_eq!(read(h.db.clone()).await, (true, "[]".into()));
+    assert_eq!(h.changed.len(), 1, "a change of the defaults is a change");
+}
+
+#[tokio::test]
+async fn an_event_keeps_its_etag_editability_and_reminders() {
+    let mut h = Harness::new().await;
+    let mut meeting = single("a");
+    meeting.is_organizer = false;
+    meeting.guests_can_modify = true;
+    meeting.reminders = Reminders {
+        use_default: false,
+        overrides: vec![
+            Reminder {
+                method: ReminderMethod::Popup,
+                minutes_before: 10,
+            },
+            Reminder {
+                method: ReminderMethod::Email,
+                minutes_before: 1440,
+            },
+        ],
+    };
+    h.fake.script(
+        "src-1",
+        vec![
+            Ok(page(vec![meeting.clone()], &[], true, done("c1"))),
+            Ok(page(vec![single("a")], &[], false, done("c2"))),
+        ],
+    );
+
+    let row = |db: Db| async move {
+        db.read(|c| {
+            let flags = c.query_row(
+                "SELECT etag, is_organizer, guests_can_modify, use_default_reminders
+                 FROM events WHERE remote_id = 'a'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, bool>(3)?,
+                    ))
+                },
+            )?;
+            let mut stmt = c.prepare(
+                "SELECT method, minutes_before FROM event_reminders ORDER BY minutes_before",
+            )?;
+            let reminders = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((flags, reminders))
+        })
+        .await
+        .unwrap()
+    };
+
+    h.sync().await;
+    assert_eq!(
+        row(h.db.clone()).await,
+        (
+            (Some("\"a-1\"".into()), false, true, false),
+            vec![("popup".into(), 10), ("email".into(), 1440)]
+        )
+    );
+
+    // The next version uses the calendar's defaults: its own reminders go.
+    h.sync().await;
+    assert_eq!(
+        row(h.db.clone()).await,
+        ((Some("\"a-1\"".into()), true, false, true), vec![])
+    );
 }
 
 #[tokio::test]

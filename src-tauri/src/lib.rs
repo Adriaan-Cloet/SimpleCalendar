@@ -6,6 +6,7 @@ use serde::Serialize;
 use simplecalendar_core::db::Db;
 use simplecalendar_core::google::{ClientConfig, Endpoints, GoogleAuth};
 use simplecalendar_core::provider::Providers;
+use simplecalendar_core::provider::google::GoogleProvider;
 use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
 use simplecalendar_core::sync::SyncEngine;
@@ -47,8 +48,18 @@ pub fn run() {
                 }
             });
 
+            // Google sign-in and access tokens, shared by the service and the provider (§8).
+            let google = Arc::new(GoogleAuth::new(
+                db.clone(),
+                secrets.clone(),
+                compiled_google_client(),
+                Endpoints::google(),
+            )?);
+
             // The sync engine (§7.1), with a provider for every kind of remote source.
-            let providers = Providers::new().with(Arc::new(IcsProvider::new()?));
+            let providers = Providers::new()
+                .with(Arc::new(IcsProvider::new()?))
+                .with(Arc::new(GoogleProvider::new(google.clone())));
             let (events, rx) = mpsc::unbounded_channel();
             let (engine, sync) =
                 SyncEngine::new(db.clone(), secrets.clone(), providers, events.clone());
@@ -56,14 +67,6 @@ pub fn run() {
             tauri::async_runtime::spawn(forward_events(app.handle().clone(), rx));
             // The "app start" trigger.
             sync.sync_all();
-
-            // Google sign-in and access tokens, shared with the Google provider (§8).
-            let google = Arc::new(GoogleAuth::new(
-                db.clone(),
-                secrets.clone(),
-                compiled_google_client(),
-                Endpoints::google(),
-            )?);
 
             // Every command goes through the service (§2).
             app.manage(CalendarService::new(db, secrets, sync, events, google));

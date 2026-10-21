@@ -173,6 +173,8 @@ pub fn calendar(remote_id: &str, name: &str) -> RemoteCalendar {
         color: Some("#336699".to_owned()),
         time_zone: Some("Europe/Brussels".to_owned()),
         access: Access::Read,
+        is_primary: false,
+        default_reminders: vec![10],
     }
 }
 

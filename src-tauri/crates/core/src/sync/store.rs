@@ -11,6 +11,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::model::SourceKind;
 use crate::provider::{CalendarRef, RemoteCalendar, RemoteEvent, SeriesRole, SyncCursor};
 
+/// The longest reminder Google allows, and `event_reminders` accepts: four weeks.
+const MAX_REMINDER_MINUTES: u32 = 40320;
+
 /// A source, as far as a cycle needs it.
 pub(super) struct SourceRow {
     pub kind: SourceKind,
@@ -74,7 +77,8 @@ pub(super) fn set_status(
 }
 
 /// Makes the source's calendars match the provider's list: adds new ones, updates name,
-/// colour, zone and access, and removes those that are gone, with their events.
+/// colour, zone, access, primary flag and default reminders, and removes those that are gone,
+/// with their events. The user's colour and visibility are never touched.
 ///
 /// Returns the calendars in the provider's order, and the ids of those that were added,
 /// changed or removed.
@@ -87,6 +91,9 @@ pub(super) fn apply_calendars(
     let mut changed = Vec::new();
 
     for cal in remote {
+        // Rust note: a `Vec<u32>` serialises to a JSON array such as `[10,30]` and cannot fail.
+        let defaults =
+            serde_json::to_string(&cal.default_reminders).expect("numbers serialise to JSON");
         let existing: Option<(i64, Option<String>)> = tx
             .query_row(
                 "SELECT id, sync_cursor FROM calendars WHERE source_id = ?1 AND remote_id = ?2",
@@ -99,11 +106,21 @@ pub(super) fn apply_calendars(
                 // `IS NOT` instead of `<>`: it compares NULLs as values, so a colour that
                 // goes from NULL to '#336699' counts as a change.
                 let updated = tx.execute(
-                    "UPDATE calendars SET name = ?2, color = ?3, time_zone = ?4, access = ?5
+                    "UPDATE calendars SET name = ?2, color = ?3, time_zone = ?4, access = ?5,
+                                          is_primary = ?6, default_reminders = ?7
                      WHERE id = ?1
                        AND (name IS NOT ?2 OR color IS NOT ?3 OR time_zone IS NOT ?4
-                            OR access IS NOT ?5)",
-                    params![id, cal.name, cal.color, cal.time_zone, cal.access.as_str()],
+                            OR access IS NOT ?5 OR is_primary IS NOT ?6
+                            OR default_reminders IS NOT ?7)",
+                    params![
+                        id,
+                        cal.name,
+                        cal.color,
+                        cal.time_zone,
+                        cal.access.as_str(),
+                        cal.is_primary,
+                        defaults
+                    ],
                 )?;
                 if updated > 0 {
                     changed.push(id);
@@ -112,15 +129,18 @@ pub(super) fn apply_calendars(
             }
             None => {
                 tx.execute(
-                    "INSERT INTO calendars (source_id, remote_id, name, color, time_zone, access)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO calendars (source_id, remote_id, name, color, time_zone, access,
+                                            is_primary, default_reminders)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         source_id,
                         cal.remote_id,
                         cal.name,
                         cal.color,
                         cal.time_zone,
-                        cal.access.as_str()
+                        cal.access.as_str(),
+                        cal.is_primary,
+                        defaults
                     ],
                 )?;
                 let id = tx.last_insert_rowid();
@@ -201,8 +221,10 @@ fn upsert_event(tx: &Transaction, calendar_id: i64, event: &RemoteEvent) -> rusq
         "INSERT INTO events (calendar_id, remote_id, ical_uid, status, title, description,
                              location, color, all_day, start_utc, end_utc, start_tz, end_tz,
                              recurrence, recurring_remote_id, original_start_utc,
-                             remote_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                             remote_updated_at, etag, is_organizer, guests_can_modify,
+                             use_default_reminders)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19, ?20, ?21)
          ON CONFLICT (calendar_id, remote_id) DO UPDATE SET
              ical_uid = excluded.ical_uid,
              status = excluded.status,
@@ -219,7 +241,11 @@ fn upsert_event(tx: &Transaction, calendar_id: i64, event: &RemoteEvent) -> rusq
              recurring_remote_id = excluded.recurring_remote_id,
              recurring_event_id = NULL,
              original_start_utc = excluded.original_start_utc,
-             remote_updated_at = excluded.remote_updated_at
+             remote_updated_at = excluded.remote_updated_at,
+             etag = excluded.etag,
+             is_organizer = excluded.is_organizer,
+             guests_can_modify = excluded.guests_can_modify,
+             use_default_reminders = excluded.use_default_reminders
          RETURNING id",
         params![
             calendar_id,
@@ -239,9 +265,27 @@ fn upsert_event(tx: &Transaction, calendar_id: i64, event: &RemoteEvent) -> rusq
             master_remote_id,
             original_start,
             event.remote_updated_at,
+            event.etag,
+            event.is_organizer,
+            event.guests_can_modify,
+            event.reminders.use_default,
         ],
         |r| r.get(0),
     )?;
+
+    // The event's own reminders, replaced as a whole like Google's `overrides` array. A value
+    // outside the column's range would fail the whole page, so it is dropped instead.
+    tx.execute("DELETE FROM event_reminders WHERE event_id = ?1", [id])?;
+    for reminder in &event.reminders.overrides {
+        if reminder.minutes_before > MAX_REMINDER_MINUTES {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO event_reminders (event_id, method, minutes_before)
+             VALUES (?1, ?2, ?3)",
+            params![id, reminder.method.as_str(), reminder.minutes_before],
+        )?;
+    }
 
     match &event.series {
         SeriesRole::Single => {}

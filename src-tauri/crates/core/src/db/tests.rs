@@ -54,7 +54,34 @@ fn migrations_are_valid() {
 
 #[test]
 fn user_version_is_latest_migration() {
-    assert_eq!(user_version(&test_connection()), 2);
+    assert_eq!(user_version(&test_connection()), 3);
+}
+
+#[test]
+fn a_v0_1_database_keeps_its_events_and_gets_the_google_columns() {
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::configure_write(&conn).unwrap();
+    MIGRATIONS.to_version(&mut conn, 2).unwrap();
+    conn.execute_batch(
+        "INSERT INTO sources (id, kind, display_name, created_at) VALUES ('s', 'ics', 'S', 0);
+         INSERT INTO calendars (id, source_id, remote_id, name, access)
+             VALUES (1, 's', 'c', 'C', 'read');
+         INSERT INTO events (calendar_id, remote_id, start_utc, end_utc) VALUES (1, 'e', 0, 0);",
+    )
+    .unwrap();
+
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+
+    let row: (Option<String>, bool, bool, bool, String) = conn
+        .query_row(
+            "SELECT e.etag, e.is_organizer, e.guests_can_modify, e.use_default_reminders,
+                    c.default_reminders
+             FROM events e JOIN calendars c ON c.id = e.calendar_id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (None, true, false, true, "[]".into()));
 }
 
 #[test]
@@ -238,7 +265,7 @@ async fn open_is_idempotent() {
     let path = dir.path().join("test.db");
     drop(Db::open(&path).unwrap());
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 2);
+    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 3);
 }
 
 #[tokio::test]
