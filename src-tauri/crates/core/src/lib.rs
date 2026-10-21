@@ -4,6 +4,7 @@
 //! Tauri commands; see `docs/architecture.md` §3.
 
 pub mod db;
+pub mod google;
 pub mod model;
 pub mod provider;
 pub mod recurrence;

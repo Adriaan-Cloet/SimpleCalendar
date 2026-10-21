@@ -43,6 +43,11 @@ pub trait SecretStore: Send + Sync {
 pub enum Secret {
     /// The full URL of an ICS feed. Private feed URLs contain a token that grants access.
     IcsUrl { url: String },
+    /// A Google account's refresh token. Its access tokens live in memory only (§8).
+    GoogleRefreshToken { refresh_token: String },
+    /// The secret of the user's own Google OAuth client, the override of the compiled-in one.
+    /// Stored under an app account, not a source (`app_account`).
+    ClientSecret { secret: String },
 }
 
 /// Never prints the secret itself, so a stray `{:?}` in a log line cannot leak it.
@@ -50,6 +55,10 @@ impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Secret::IcsUrl { .. } => f.write_str("IcsUrl { url: <redacted> }"),
+            Secret::GoogleRefreshToken { .. } => {
+                f.write_str("GoogleRefreshToken { refresh_token: <redacted> }")
+            }
+            Secret::ClientSecret { .. } => f.write_str("ClientSecret { secret: <redacted> }"),
         }
     }
 }
@@ -201,21 +210,43 @@ impl Secrets {
 
     /// The secret of `source_id`, or `None` if it has none.
     pub async fn get(&self, source_id: &str) -> Result<Option<Secret>, SecretError> {
-        let account = account(source_id);
-        let raw = self.run(move |store| store.get(&account)).await?;
-        raw.as_deref().map(decode).transpose()
+        self.get_account(account(source_id)).await
     }
 
     /// Stores the secret of `source_id`, replacing any earlier one.
     pub async fn set(&self, source_id: &str, secret: &Secret) -> Result<(), SecretError> {
-        let account = account(source_id);
-        let value = encode(secret);
-        self.run(move |store| store.set(&account, &value)).await
+        self.set_account(account(source_id), secret).await
     }
 
     /// Removes the secret of `source_id`, if there is one.
     pub async fn delete(&self, source_id: &str) -> Result<(), SecretError> {
-        let account = account(source_id);
+        self.delete_account(account(source_id)).await
+    }
+
+    /// An app-wide secret that belongs to no source, such as `google-client-secret`.
+    pub async fn get_app(&self, name: &str) -> Result<Option<Secret>, SecretError> {
+        self.get_account(app_account(name)).await
+    }
+
+    pub async fn set_app(&self, name: &str, secret: &Secret) -> Result<(), SecretError> {
+        self.set_account(app_account(name), secret).await
+    }
+
+    pub async fn delete_app(&self, name: &str) -> Result<(), SecretError> {
+        self.delete_account(app_account(name)).await
+    }
+
+    async fn get_account(&self, account: String) -> Result<Option<Secret>, SecretError> {
+        let raw = self.run(move |store| store.get(&account)).await?;
+        raw.as_deref().map(decode).transpose()
+    }
+
+    async fn set_account(&self, account: String, secret: &Secret) -> Result<(), SecretError> {
+        let value = encode(secret);
+        self.run(move |store| store.set(&account, &value)).await
+    }
+
+    async fn delete_account(&self, account: String) -> Result<(), SecretError> {
         self.run(move |store| store.delete(&account)).await
     }
 
@@ -249,4 +280,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The keychain account of a source (§8).
 pub fn account(source_id: &str) -> String {
     format!("source:{source_id}")
+}
+
+/// The keychain account of an app-wide secret. Source ids are UUIDs, so the two never collide.
+pub fn app_account(name: &str) -> String {
+    format!("app:{name}")
 }

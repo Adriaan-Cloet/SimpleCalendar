@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::google::{ClientConfig, Endpoints};
 use crate::model::{Occurrence, OccurrenceTime};
 use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
@@ -21,13 +22,20 @@ struct Setup {
 }
 
 fn setup() -> Setup {
+    setup_with(None, Endpoints::google())
+}
+
+/// A service whose Google sign-in uses `client` and talks to `endpoints`.
+fn setup_with(client: Option<ClientConfig>, endpoints: Endpoints) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("test.db")).unwrap();
     let store = Arc::new(MemoryStore::new());
+    let secrets = Secrets::new(store.clone());
     let (sync, requests) = SyncHandle::detached();
     let (tx, events) = mpsc::unbounded_channel();
+    let google = GoogleAuth::new(db.clone(), secrets.clone(), client, endpoints).unwrap();
     Setup {
-        service: CalendarService::new(db.clone(), Secrets::new(store.clone()), sync, tx),
+        service: CalendarService::new(db.clone(), secrets, sync, tx, Arc::new(google)),
         db,
         store,
         requests,
@@ -562,6 +570,268 @@ fn occurrences_serialise_as_the_frontend_contract_says() {
     );
 }
 
+// ---- Google sign-in ------------------------------------------------------------------------
+
+mod google_sign_in {
+    use reqwest::Url;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const REFRESH: &str = "1//refresh-token";
+
+    /// A fake Google: the token endpoint and the primary calendar of `account`.
+    async fn google(account: &str) -> (Setup, MockServer) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "ya29.access",
+                "expires_in": 3599,
+                "refresh_token": REFRESH
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/calendar/v3/users/me/calendarList/primary"))
+            .and(header("authorization", "Bearer ya29.access"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": account })),
+            )
+            .mount(&server)
+            .await;
+        let base = Url::parse(&server.uri()).unwrap();
+        let endpoints = Endpoints {
+            authorize: base.join("auth").unwrap(),
+            token: base.join("token").unwrap(),
+            api: base.join("calendar/v3/").unwrap(),
+        };
+        let client = ClientConfig {
+            client_id: "app.apps.googleusercontent.com".into(),
+            client_secret: Some("shh".into()),
+        };
+        (setup_with(Some(client), endpoints), server)
+    }
+
+    /// A browser that follows the consent page straight back to the app with `answer`
+    /// (`code=...` or `error=...`).
+    fn browser(answer: &'static str) -> impl FnOnce(&str) -> Result<(), String> + Send {
+        move |url: &str| {
+            let url = Url::parse(url).unwrap();
+            let get = |key: &str| {
+                url.query_pairs()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap()
+            };
+            let back = format!("{}?state={}&{answer}", get("redirect_uri"), get("state"));
+            tokio::spawn(async move {
+                let http = crate::provider::http::client().unwrap();
+                http.get(back).send().await.unwrap();
+            });
+            Ok(())
+        }
+    }
+
+    async fn status(s: &Setup, id: &str) -> String {
+        let id = id.to_owned();
+        s.db.read(move |c| {
+            c.query_row("SELECT status FROM sources WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn signing_in_adds_the_account_with_its_refresh_token_only_in_the_keychain() {
+        let (mut s, _server) = google("me@example.com").await;
+
+        let source = s
+            .service
+            .begin_google_sign_in(None, browser("code=4%2Fcode"))
+            .await
+            .unwrap();
+
+        assert_eq!(source.kind, SourceKind::Google);
+        assert_eq!(source.display_name, "me@example.com");
+        assert_eq!(source.account_label.as_deref(), Some("me@example.com"));
+        assert_eq!(source.state, SyncState::Ok);
+        let stored = s.store.raw(&account(&source.id)).expect("secret stored");
+        assert!(stored.contains(REFRESH), "{stored}");
+        assert!(
+            !stored.contains("ya29"),
+            "the access token stays in memory: {stored}"
+        );
+        for row in s.source_rows().await {
+            for value in row.into_iter().flatten() {
+                assert!(!value.contains("refresh-token"), "token in SQLite: {value}");
+            }
+        }
+        assert_eq!(s.requests.manual(), vec![Some(source.id)]);
+    }
+
+    #[tokio::test]
+    async fn signing_in_to_the_same_account_again_reconnects_it() {
+        let (s, _server) = google("me@example.com").await;
+        let first = s
+            .service
+            .begin_google_sign_in(None, browser("code=c"))
+            .await
+            .unwrap();
+        let id = first.id.clone();
+        s.db.write(move |c| {
+            c.execute(
+                "UPDATE sources SET status = 'auth_required', last_error = 'x' WHERE id = ?1",
+                [id],
+            )
+        })
+        .await
+        .unwrap();
+
+        // Once from "Sign in again" on the source, once as if adding it anew.
+        let again = s
+            .service
+            .begin_google_sign_in(Some(&first.id), browser("code=c"))
+            .await
+            .unwrap();
+        let added = s
+            .service
+            .begin_google_sign_in(None, browser("code=c"))
+            .await
+            .unwrap();
+
+        assert_eq!(again.id, first.id);
+        assert_eq!(added.id, first.id);
+        assert_eq!(status(&s, &first.id).await, "ok");
+        assert_eq!(again.last_error, None);
+        assert_eq!(s.source_rows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconnecting_as_another_account_is_refused() {
+        let (s, _server) = google("someone.else@example.com").await;
+        let id = "11111111-2222-3333-4444-555555555555".to_owned();
+        let row = id.clone();
+        s.db.write(move |c| {
+            c.execute(
+                "INSERT INTO sources (id, kind, display_name, account_label, status, created_at)
+                 VALUES (?1, 'google', 'me', 'me@example.com', 'auth_required', 0)",
+                [row],
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = s
+            .service
+            .begin_google_sign_in(Some(&id), browser("code=c"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, ServiceError::SignIn(m) if m.contains("me@example.com")),
+            "{err:?}"
+        );
+        assert_eq!(status(&s, &id).await, "auth_required");
+        assert_eq!(s.store.raw(&account(&id)), None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_in_the_browser_adds_nothing() {
+        let (s, _server) = google("me@example.com").await;
+        let err = s
+            .service
+            .begin_google_sign_in(None, browser("error=access_denied"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::SignIn(_)), "{err:?}");
+        assert_eq!(s.count("sources").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_sign_in_can_be_cancelled() {
+        let (s, _server) = google("me@example.com").await;
+        let service = s.service.clone();
+        let (opened_tx, opened) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(async move {
+            service
+                .begin_google_sign_in(None, move |_: &str| {
+                    // The user never finishes in the browser.
+                    let _ = opened_tx.send(());
+                    Ok(())
+                })
+                .await
+        });
+        opened.await.unwrap();
+
+        s.service.cancel_google_sign_in();
+
+        assert!(matches!(
+            waiting.await.unwrap(),
+            Err(ServiceError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn without_a_client_sign_in_asks_for_one_and_opens_nothing() {
+        let s = setup();
+        let err = s
+            .service
+            .begin_google_sign_in(None, |_: &str| panic!("no browser without a client"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::GoogleClientMissing), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn the_users_own_client_goes_to_settings_and_its_secret_to_the_keychain() {
+        let s = setup();
+        assert_eq!(
+            s.service.google_client().await.unwrap(),
+            GoogleClientInfo {
+                custom_client_id: None,
+                built_in: false
+            }
+        );
+
+        let info = s
+            .service
+            .set_google_client(" mine.apps.googleusercontent.com ", "my-secret")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            info.custom_client_id.as_deref(),
+            Some("mine.apps.googleusercontent.com")
+        );
+        let stored = s.store.raw("app:google-client-secret").unwrap();
+        assert!(stored.contains("my-secret"), "{stored}");
+
+        let cleared = s.service.set_google_client("", "").await.unwrap();
+        assert_eq!(cleared.custom_client_id, None);
+        assert_eq!(s.store.raw("app:google-client-secret"), None);
+    }
+
+    #[tokio::test]
+    async fn a_client_id_must_look_like_one() {
+        let s = setup();
+        for bad in [
+            "mine",
+            "a b.apps.googleusercontent.com",
+            "https://example.com",
+        ] {
+            let err = s.service.set_google_client(bad, "").await.unwrap_err();
+            assert!(
+                matches!(err, ServiceError::InvalidInput(_)),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+}
+
 // ---- errors for the frontend ---------------------------------------------------------------
 
 #[test]
@@ -575,6 +845,12 @@ fn errors_serialise_with_a_kind_and_a_message() {
         json(ServiceError::NotFound(SOURCE_GONE))["kind"],
         "not_found"
     );
+    assert_eq!(
+        json(ServiceError::GoogleClientMissing)["kind"],
+        "google_client_missing"
+    );
+    assert_eq!(json(ServiceError::SignIn("x".into()))["kind"], "sign_in");
+    assert_eq!(json(ServiceError::Cancelled)["kind"], "cancelled");
     let locked = json(ServiceError::SecretsUnavailable(SecretsUnavailable {
         reason: UnavailableReason::Locked,
     }));

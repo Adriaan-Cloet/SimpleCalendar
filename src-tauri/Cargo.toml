@@ -37,6 +37,11 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.12.3", features = [] }
 tauri-plugin-log = "2"
+# Opens the system browser for Google sign-in (§8, §11). The crate `tauri-plugin-opener` uses
+# for this; the plugin itself would add `zbus` and 30 more crates on Linux for "reveal in
+# folder". `shellexecute-on-windows` opens through ShellExecuteW instead of `cmd /c start`,
+# which would split the URL at its `&`s, as the plugin does; its `dunce` is already built.
+open = { version = "5", features = ["shellexecute-on-windows"] }
 simplecalendar-core = { path = "crates/core" }
 # The channel that carries `CoreEvent`s from the core to the event forwarder. Already built
 # through Tauri, which runs on tokio.

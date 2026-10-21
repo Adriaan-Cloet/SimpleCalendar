@@ -40,7 +40,26 @@ export interface Status {
 /** What a failed command rejects with */
 export type ServiceError =
 	| SecretsUnavailable
-	| { kind: 'invalid_input' | 'not_found' | 'keychain' | 'database' | 'unknown'; message: string };
+	| {
+			kind:
+				| 'invalid_input'
+				| 'not_found'
+				| 'keychain'
+				| 'database'
+				| 'google_client_missing'
+				| 'sign_in'
+				| 'cancelled'
+				| 'unknown';
+			message: string;
+	  };
+
+/** Which OAuth client Google sign-in uses; never holds the secret */
+export interface GoogleClientInfo {
+	/** The user's own client id. It takes precedence over the built-in one. */
+	custom_client_id: string | null;
+	/** Whether this build has a client compiled in */
+	built_in: boolean;
+}
 
 export const getStatus = () => invoke<Status>('get_status');
 export const listSources = () => invoke<SourceInfo[]>('list_sources');
@@ -48,6 +67,16 @@ export const addIcsSource = (url: string, name: string) =>
 	invoke<SourceInfo>('add_ics_source', { url, name });
 export const removeSource = (source: string) => invoke<void>('remove_source', { source });
 export const syncNow = (source: string | null = null) => invoke<void>('sync_now', { source });
+
+/** Signs in in the system browser and resolves when that finishes. With `source`, signs that
+ * account in again. */
+export const beginGoogleSignIn = (source: string | null = null) =>
+	invoke<SourceInfo>('begin_google_sign_in', { source });
+export const cancelGoogleSignIn = () => invoke<void>('cancel_google_sign_in');
+export const getGoogleClient = () => invoke<GoogleClientInfo>('get_google_client');
+/** An empty `clientId` goes back to the built-in client */
+export const setGoogleClient = (clientId: string, clientSecret: string) =>
+	invoke<GoogleClientInfo>('set_google_client', { clientId, clientSecret });
 
 export const onSyncStatus = (handler: (status: SyncStatus) => void): Promise<UnlistenFn> =>
 	listen<SyncStatus>('sync:status', (event) => handler(event.payload));

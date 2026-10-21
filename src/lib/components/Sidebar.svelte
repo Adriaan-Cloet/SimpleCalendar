@@ -167,7 +167,7 @@
 				<path d="M3.5 3.5a9 9 0 0 1 9 9M3.5 7.5a5 5 0 0 1 5 5" />
 				<circle class="filled" cx="4.25" cy="11.75" r="1.25" />
 			</svg>
-			Subscriptions
+			Accounts
 		</button>
 		<div class="appearance segmented" role="radiogroup" aria-label="Appearance">
 			{#each appearances as option (option.value)}

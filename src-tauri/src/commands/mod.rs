@@ -7,7 +7,7 @@
 use simplecalendar_core::CalendarService;
 use simplecalendar_core::model::Occurrence;
 use simplecalendar_core::service::{
-    CalendarInfo, CalendarUpdate, ServiceError, SourceInfo, Status,
+    CalendarInfo, CalendarUpdate, GoogleClientInfo, ServiceError, SourceInfo, Status,
 };
 use tauri::State;
 
@@ -81,4 +81,42 @@ pub async fn update_calendar(
     update: CalendarUpdate,
 ) -> Result<CalendarInfo, ServiceError> {
     service.update_calendar(calendar, update).await
+}
+
+/// Signs in to a Google account in the system browser. Resolves when the browser step
+/// finishes. With `source`, signs that account in again.
+#[tauri::command]
+pub async fn begin_google_sign_in(
+    service: State<'_, CalendarService>,
+    source: Option<String>,
+) -> Result<SourceInfo, ServiceError> {
+    // The browser is opened from Rust, so the frontend needs no permission for it (§10).
+    // Rust note: `that_detached` starts the browser as its own process and does not wait for
+    // it, so the sign-in goes on waiting for the redirect instead.
+    let open = |url: &str| open::that_detached(url).map_err(|e| e.to_string());
+    service.begin_google_sign_in(source.as_deref(), open).await
+}
+
+/// Stops a Google sign-in that is waiting for the browser.
+#[tauri::command]
+pub fn cancel_google_sign_in(service: State<'_, CalendarService>) {
+    service.cancel_google_sign_in();
+}
+
+/// Which OAuth client Google sign-in uses.
+#[tauri::command]
+pub async fn get_google_client(
+    service: State<'_, CalendarService>,
+) -> Result<GoogleClientInfo, ServiceError> {
+    service.google_client().await
+}
+
+/// Sets the user's own OAuth client; an empty `client_id` goes back to the built-in one.
+#[tauri::command]
+pub async fn set_google_client(
+    service: State<'_, CalendarService>,
+    client_id: String,
+    client_secret: String,
+) -> Result<GoogleClientInfo, ServiceError> {
+    service.set_google_client(&client_id, &client_secret).await
 }

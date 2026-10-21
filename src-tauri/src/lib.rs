@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use simplecalendar_core::db::Db;
+use simplecalendar_core::google::{ClientConfig, Endpoints, GoogleAuth};
 use simplecalendar_core::provider::Providers;
 use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
@@ -56,8 +57,16 @@ pub fn run() {
             // The "app start" trigger.
             sync.sync_all();
 
+            // Google sign-in and access tokens, shared with the Google provider (§8).
+            let google = Arc::new(GoogleAuth::new(
+                db.clone(),
+                secrets.clone(),
+                compiled_google_client(),
+                Endpoints::google(),
+            )?);
+
             // Every command goes through the service (§2).
-            app.manage(CalendarService::new(db, secrets, sync, events));
+            app.manage(CalendarService::new(db, secrets, sync, events, google));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -68,10 +77,26 @@ pub fn run() {
             commands::sync_now,
             commands::list_occurrences,
             commands::list_calendars,
-            commands::update_calendar
+            commands::update_calendar,
+            commands::begin_google_sign_in,
+            commands::cancel_google_sign_in,
+            commands::get_google_client,
+            commands::set_google_client
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
+}
+
+/// The Google OAuth client compiled into this build, if `build.rs` found one (§8).
+//
+// Rust note: `option_env!` reads a variable at compile time and gives `None` when it is not
+// set, so a build without the variables still compiles.
+fn compiled_google_client() -> Option<ClientConfig> {
+    let client_id = option_env!("SIMPLECALENDAR_GOOGLE_CLIENT_ID")?;
+    Some(ClientConfig {
+        client_id: client_id.to_owned(),
+        client_secret: option_env!("SIMPLECALENDAR_GOOGLE_CLIENT_SECRET").map(str::to_owned),
+    })
 }
 
 /// The payload of `calendar:changed`.

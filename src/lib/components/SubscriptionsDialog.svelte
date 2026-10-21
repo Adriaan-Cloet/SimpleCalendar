@@ -1,14 +1,20 @@
 <script lang="ts">
-	// Add, refresh and remove ICS subscriptions (issue #9). The feed address goes straight to
-	// the keychain in Rust; this dialog only ever shows the host.
+	// Add, refresh and remove ICS subscriptions (issue #9) and Google accounts (#13). The feed
+	// address and the Google sign-in token go straight to the keychain in Rust; this dialog only
+	// ever shows the host or the account's address.
 	import {
 		addIcsSource,
+		beginGoogleSignIn,
+		cancelGoogleSignIn,
+		getGoogleClient,
 		getStatus,
+		setGoogleClient,
 		listSources,
 		onSyncStatus,
 		removeSource,
 		serviceError,
 		syncNow,
+		type GoogleClientInfo,
 		type SecretsUnavailable,
 		type SourceInfo
 	} from '#lib/sources.js';
@@ -35,6 +41,16 @@
 	let addError = $state<string | null>(null);
 	let checking = $state(false);
 
+	/** The Google sign-in waiting for the browser: `new` for a new account, else a source id */
+	let signingIn = $state<string | null>(null);
+	let googleError = $state<string | null>(null);
+	/** The form for the user's own OAuth client, when shown */
+	let client = $state<GoogleClientInfo | null>(null);
+	let clientId = $state('');
+	let clientSecret = $state('');
+	let savingClient = $state(false);
+	let clientError = $state<string | null>(null);
+
 	$effect(() => {
 		if (!dialog) return;
 		if (open && !dialog.open) dialog.showModal();
@@ -47,6 +63,8 @@
 		confirming = null;
 		listError = null;
 		addError = null;
+		googleError = null;
+		client = null;
 		void refreshStatus();
 		void reload();
 		const unlisten = onSyncStatus((status) => {
@@ -55,6 +73,8 @@
 		}).catch(() => null);
 		return () => {
 			void unlisten.then((stop) => stop?.());
+			// Closing the dialog gives up a sign-in that still waits for the browser
+			if (signingIn) void cancelGoogleSignIn().catch(() => undefined);
 		};
 	});
 
@@ -120,6 +140,55 @@
 		}
 	}
 
+	async function signIn(source: SourceInfo | null) {
+		if (signingIn) return;
+		signingIn = source?.id ?? 'new';
+		googleError = null;
+		try {
+			await beginGoogleSignIn(source?.id ?? null);
+			await reload();
+		} catch (e) {
+			const error = serviceError(e);
+			if (error.kind === 'cancelled') return;
+			// Without a client the form below explains what to enter
+			if (error.kind === 'google_client_missing') await showClientForm();
+			else if (error.kind === 'secrets_unavailable') keyring = error;
+			else googleError = error.message;
+		} finally {
+			signingIn = null;
+		}
+	}
+
+	async function showClientForm() {
+		clientError = null;
+		try {
+			client = await getGoogleClient();
+			clientId = client.custom_client_id ?? '';
+			clientSecret = '';
+		} catch (e) {
+			googleError = serviceError(e).message;
+		}
+	}
+
+	/** Saves the form, or with `builtIn` goes back to the built-in client */
+	async function saveClient(event: SubmitEvent | null, builtIn = false) {
+		event?.preventDefault();
+		if (savingClient) return;
+		savingClient = true;
+		clientError = null;
+		try {
+			await setGoogleClient(builtIn ? '' : clientId, builtIn ? '' : clientSecret);
+			client = null;
+			googleError = null;
+		} catch (e) {
+			const error = serviceError(e);
+			if (error.kind === 'secrets_unavailable') keyring = error;
+			else clientError = error.message;
+		} finally {
+			savingClient = false;
+		}
+	}
+
 	const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
 	function updated(seconds: number): string {
@@ -133,6 +202,9 @@
 
 	function statusLine(source: SourceInfo): { text: string; problem: boolean } {
 		if (syncing[source.id]) return { text: 'Syncing…', problem: false };
+		if (source.state === 'auth_required') {
+			return { text: 'Sign in again to keep this account in sync.', problem: true };
+		}
 		if (source.state !== 'ok' && source.last_error) {
 			// The core's messages start in lower case ("the server answered HTTP 404")
 			const text = source.last_error;
@@ -150,7 +222,7 @@
 	onclose={() => (open = false)}
 >
 	<header>
-		<h2 id="subscriptions-title" class="title">Subscriptions</h2>
+		<h2 id="subscriptions-title" class="title">Accounts</h2>
 		<button type="button" class="icon-button" aria-label="Close" onclick={() => (open = false)}>
 			<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 				<path d="M4 4l8 8M12 4l-8 8" />
@@ -168,7 +240,7 @@
 	{/if}
 
 	{#if sources.length === 0}
-		<p class="empty">No subscriptions yet. Add a calendar feed below.</p>
+		<p class="empty">No accounts yet. Sign in with Google or add a calendar feed below.</p>
 	{:else}
 		<ul class="sources">
 			{#each sources as source (source.id)}
@@ -196,6 +268,16 @@
 								Remove
 							</button>
 						{:else}
+							{#if source.kind === 'google' && source.state === 'auth_required'}
+								<button
+									type="button"
+									class="button"
+									disabled={signingIn !== null || keyring !== null}
+									onclick={() => signIn(source)}
+								>
+									{signingIn === source.id ? 'Waiting for browser…' : 'Sign in again'}
+								</button>
+							{/if}
 							<button
 								type="button"
 								class="icon-button"
@@ -222,6 +304,85 @@
 	{#if listError}
 		<p class="error" role="alert">{listError}</p>
 	{/if}
+
+	<section class="add" aria-labelledby="google-title">
+		<h3 id="google-title" class="section-title">Add a Google account</h3>
+		<p class="hint">
+			Sign in with Google in your browser. Only a sign-in token is kept, in the system keyring.
+		</p>
+		{#if googleError}
+			<p class="error" role="alert">{googleError}</p>
+		{/if}
+		{#if client}
+			<form class="client" onsubmit={saveClient}>
+				<p class="hint">
+					{#if !client.built_in}This build has no Google client built in.{/if}
+					Use your own Google Cloud project: create an OAuth client of type “Desktop app” with the Google
+					Calendar API enabled, and enter its id and secret.
+				</p>
+				<label class="field">
+					<span class="label">Client ID</span>
+					<input
+						type="text"
+						bind:value={clientId}
+						placeholder="….apps.googleusercontent.com"
+						autocomplete="off"
+						spellcheck="false"
+						required
+					/>
+				</label>
+				<label class="field">
+					<span class="label">Client secret</span>
+					<input type="password" bind:value={clientSecret} autocomplete="off" />
+				</label>
+				{#if clientError}
+					<p class="error" role="alert">{clientError}</p>
+				{/if}
+				<div class="form-actions">
+					{#if client.built_in && client.custom_client_id}
+						<button
+							type="button"
+							class="button quiet leading"
+							disabled={savingClient}
+							onclick={() => saveClient(null, true)}
+						>
+							Use built-in client
+						</button>
+					{/if}
+					<button type="button" class="button quiet" onclick={() => (client = null)}>
+						Cancel
+					</button>
+					<button
+						type="submit"
+						class="button"
+						disabled={savingClient || keyring !== null || !clientId.trim()}
+					>
+						Save
+					</button>
+				</div>
+			</form>
+		{/if}
+		{#if !client}
+			<div class="form-actions">
+				<button type="button" class="button quiet leading" onclick={showClientForm}>
+					Use your own client…
+				</button>
+				{#if signingIn === 'new'}
+					<span class="waiting">Waiting for your browser…</span>
+					<button type="button" class="button" onclick={() => cancelGoogleSignIn()}>Cancel</button>
+				{:else}
+					<button
+						type="button"
+						class="button"
+						disabled={signingIn !== null || keyring !== null}
+						onclick={() => signIn(null)}
+					>
+						Sign in with Google
+					</button>
+				{/if}
+			</div>
+		{/if}
+	</section>
 
 	<form class="add" onsubmit={add}>
 		<h3 class="section-title">Add a subscription</h3>
@@ -465,7 +626,24 @@
 
 	.form-actions {
 		display: flex;
+		align-items: center;
 		justify-content: flex-end;
+		gap: var(--space-xs);
+	}
+
+	/* A secondary action on the left of a row of actions */
+	.leading {
+		margin-right: auto;
+	}
+
+	.client {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-md);
+	}
+
+	.waiting {
+		color: var(--text-secondary);
 	}
 
 	/* Buttons, as in the toolbar and the event popover */
