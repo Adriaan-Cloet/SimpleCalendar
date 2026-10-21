@@ -1319,7 +1319,7 @@ Implementation notes (#11):
   remembered yet; reminders (#25) add that.
 - `list_calendars` returns every calendar with `source_kind`, the resolved `color` (override,
   else provider, else `null`), `editable` and `visible`, oldest source first, primary calendar
-  first, then by name. `update_calendar` follows in #12.
+  first, then by name.
 - The week view places occurrences with `placeWeek` (`src/lib/week-layout.ts`): it reads the
   wall-clock date and time as written, draws a timed occurrence on every day it touches (not
   on the next day when it ends at midnight), and moves timed occurrences of 24 hours or more to
@@ -1327,6 +1327,21 @@ Implementation notes (#11):
   earliest start.
 - A calendar without a colour gets a palette colour by its id (`calendarColor`), so it keeps
   it across restarts.
+
+Implementation notes (#12):
+
+- `update_calendar(calendar, update)` takes `{visible?, color_override?}`. A field that is left
+  out stays as it is; `color_override: null` goes back to the provider's colour. A colour must
+  be `#rrggbb` and is stored in lower case; anything else is `invalid_input`, an unknown
+  calendar `not_found`. It returns the calendar as `list_calendars` would and sends
+  `calendar:changed` for it. The sync engine writes only `name`, `color`, `time_zone` and
+  `access`, so both preferences survive a sync.
+- The sidebar updates its row at once and calls `update_calendar`; the `calendar:changed`
+  that follows reads the week again. A calendar hidden while a week is on screen keeps its
+  occurrences there, faded (`keepHidden`, `src/lib/keep-hidden.ts`), until the week changes,
+  because Rust no longer returns them and the others must not move (design.md §8).
+- The colour menu opens with a right click or the context menu key on a calendar row. It
+  offers the ten palette colours, stored as their light value, and "Default colour".
 
 ### Logic that does live in the frontend
 
