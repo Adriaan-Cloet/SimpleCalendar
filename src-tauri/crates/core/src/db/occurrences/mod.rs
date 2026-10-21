@@ -10,7 +10,7 @@ mod tests;
 use std::collections::HashSet;
 
 use chrono_tz::Tz;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::model::{Occurrence, TimeKind};
 use crate::recurrence::{self, Series};
@@ -116,6 +116,35 @@ pub fn list_occurrences(
         .into_iter()
         .map(|(_, _, f)| f.into_occurrence(viewer))
         .collect())
+}
+
+/// The occurrence of the single event `event_id` in the `viewer` zone, also when its calendar
+/// is hidden. `None` if there is no such event, or it belongs to a series.
+pub fn single_occurrence(
+    conn: &Connection,
+    event_id: i64,
+    viewer: Tz,
+) -> rusqlite::Result<Option<Occurrence>> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT {COLUMNS} FROM events e JOIN calendars c ON c.id = e.calendar_id
+                 WHERE e.id = ?1 AND e.recurrence IS NULL AND e.recurring_remote_id IS NULL"
+            ),
+            [event_id],
+            EventRow::read,
+        )
+        .optional()?;
+    Ok(row.map(|row| {
+        Found {
+            event_id: row.id,
+            original_start: row.start,
+            start: row.start,
+            end: row.end,
+            row,
+        }
+        .into_occurrence(viewer)
+    }))
 }
 
 /// The stored starts of a series in the range, or only its first one if the recurrence cannot

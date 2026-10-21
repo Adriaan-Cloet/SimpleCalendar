@@ -16,9 +16,12 @@
 		selectedKey: string | null;
 		onselect: (key: string, anchor: HTMLElement) => void;
 		onscroll: () => void;
+		/** A double click on an empty spot: a new event there, local wall-clock start */
+		oncreate: (start: Date, allDay: boolean) => void;
 	}
 
-	let { weekStart, now, calendars, occurrences, selectedKey, onselect, onscroll }: Props = $props();
+	let { weekStart, now, calendars, occurrences, selectedKey, onselect, onscroll, oncreate }: Props =
+		$props();
 
 	const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)));
 	const todayIndex = $derived(days.findIndex((day) => isSameDay(day, now)));
@@ -61,6 +64,14 @@
 		return todayIndex >= 0 && Math.abs(hour * 60 - nowMinutes) < 12;
 	}
 
+	// A double click in a day column starts an event at that half hour; one on an event does not
+	function createAt(e: MouseEvent, day: Date) {
+		if ((e.target as Element).closest('[data-event]')) return;
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const halfHours = Math.floor(((e.clientY - rect.top) / rect.height) * 48);
+		oncreate(atMinutes(day, Math.min(47, Math.max(0, halfHours)) * 30), false);
+	}
+
 	let scroller: HTMLElement | undefined = $state();
 	let body: HTMLElement | undefined = $state();
 
@@ -89,9 +100,12 @@
 		<div class="row all-day" style:--rows={allDayRows}>
 			<div class="gutter-label">all-day</div>
 			{#each days as day, i (i)}
+				<!-- Mouse only: the toolbar's "New event" is the keyboard way to create one -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
 					class={{ 'all-day-cell': true, weekend: isWeekend(day) }}
 					style:grid-column={i + 2}
+					ondblclick={() => oncreate(day, true)}
 				></div>
 			{/each}
 			{#each week.allDay as { occurrence, first, last, row } (occurrenceKey(occurrence))}
@@ -134,7 +148,13 @@
 		</div>
 
 		{#each days as day, i (i)}
-			<div class={{ day: true, weekend: isWeekend(day) }} style:grid-column={i + 2}>
+			<!-- Mouse only: the toolbar's "New event" is the keyboard way to create one -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class={{ day: true, weekend: isWeekend(day) }}
+				style:grid-column={i + 2}
+				ondblclick={(e) => createAt(e, day)}
+			>
 				{#each layouts[i] as { event, placement } (placement.id)}
 					<EventBlock
 						{event}

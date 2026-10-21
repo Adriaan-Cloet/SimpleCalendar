@@ -11,9 +11,12 @@
 		onpick: (color: string | null) => void;
 		/** `restoreFocus` is true when it closed from the keyboard or a pick */
 		onclose: (restoreFocus: boolean) => void;
+		/** Offered for local calendars only */
+		onrename?: () => void;
+		ondelete?: () => void;
 	}
 
-	let { calendar, x, y, onpick, onclose }: Props = $props();
+	let { calendar, x, y, onpick, onclose, onrename, ondelete }: Props = $props();
 
 	let menu: HTMLElement | undefined = $state();
 	let position = $state({ left: 0, top: 0, ready: false });
@@ -35,7 +38,7 @@
 	});
 
 	function menuItems(): HTMLElement[] {
-		return menu ? [...menu.querySelectorAll<HTMLElement>('[role="menuitemradio"]')] : [];
+		return menu ? [...menu.querySelectorAll<HTMLElement>('[role^="menuitem"]')] : [];
 	}
 
 	function pick(color: string | null) {
@@ -43,19 +46,24 @@
 		onclose(true);
 	}
 
-	// Arrows move through the swatches like a grid, then on to "Default colour"
+	// Arrows move through the swatches like a grid, then down the list below them
 	function onmenukeydown(e: KeyboardEvent) {
 		const items = menuItems();
 		const index = items.indexOf(document.activeElement as HTMLElement);
+		const inGrid = index < palette.length;
 		const step: Record<string, number> = {
 			ArrowRight: 1,
 			ArrowLeft: -1,
-			ArrowDown: COLUMNS,
-			ArrowUp: -COLUMNS
+			ArrowDown: inGrid ? COLUMNS : 1,
+			ArrowUp: inGrid || index === palette.length ? -COLUMNS : -1
 		};
 		let next: number | undefined;
-		if (e.key in step) next = Math.min(items.length - 1, Math.max(0, index + step[e.key]));
-		else if (e.key === 'Home') next = 0;
+		if (e.key in step) {
+			next = index + step[e.key];
+			// Down from the last row of swatches lands on the first item below them
+			if (inGrid && next > palette.length) next = palette.length;
+			next = Math.min(items.length - 1, Math.max(0, next));
+		} else if (e.key === 'Home') next = 0;
 		else if (e.key === 'End') next = items.length - 1;
 		else if (e.key === 'Tab') onclose(true);
 		if (next === undefined) return;
@@ -86,7 +94,7 @@
 	style:top="{position.top}px"
 	role="menu"
 	tabindex="-1"
-	aria-label="Colour of {calendar.name}"
+	aria-label={calendar.name}
 	onkeydown={onmenukeydown}
 >
 	<div class="swatches">
@@ -114,6 +122,33 @@
 	>
 		Default colour
 	</button>
+	{#if onrename && ondelete}
+		<div class="separator" role="separator"></div>
+		<button
+			type="button"
+			role="menuitem"
+			tabindex="-1"
+			class="default"
+			onclick={() => {
+				onclose(false);
+				onrename();
+			}}
+		>
+			Rename…
+		</button>
+		<button
+			type="button"
+			role="menuitem"
+			tabindex="-1"
+			class="default danger"
+			onclick={() => {
+				onclose(false);
+				ondelete();
+			}}
+		>
+			Delete calendar…
+		</button>
+	{/if}
 </div>
 
 <style>
@@ -203,5 +238,15 @@
 	.default:focus-visible {
 		outline: none;
 		background: var(--fill-hover);
+	}
+
+	.danger {
+		color: var(--danger);
+	}
+
+	.separator {
+		height: 1px;
+		margin: var(--space-2xs) var(--space-sm);
+		background: var(--separator);
 	}
 </style>

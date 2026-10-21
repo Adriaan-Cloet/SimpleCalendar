@@ -988,8 +988,9 @@ Implementation notes (#14):
 - Descriptions are stored as Google sends them. Notes formatted in Google's web interface are
   HTML (`<br>`, `<b>`, links); the rest is plain text. `get_event` (#16) must turn them into
   plain text in Rust and the popover must never render them as HTML: a shared calendar could
-  otherwise inject markup. Until then occurrences carry no description and the popover shows
-  no notes.
+  otherwise inject markup. Since #16 it does (`service/text.rs`): line-breaking tags become
+  newlines, list items bullets, links "text (address)", other tags are dropped. Descriptions
+  of other sources are returned as they are, so a local note may contain `<b>` as text.
 
 Writing:
 
@@ -1315,8 +1316,8 @@ Commands (all async, all return `Result`):
 | `create_local_calendar`, `remove_calendar` | New calendar in the local source; delete a local one          | v0.2, local calendars   |
 | `list_occurrences(from, to, tz)`           | Everything the views render                                   | v0.1, ICS subscriptions |
 | `get_event(event_id)`                      | Full detail for the editor                                    | v0.2, local calendars   |
-| `create_event(draft)`                      | Returns the new occurrence                                    | v0.2, local calendars   |
-| `update_event(target, scope, draft)`       | `scope` is `this` or `all`                                    | v0.2, local calendars   |
+| `create_event(draft, tz)`                  | Returns the new occurrence                                    | v0.2, local calendars   |
+| `update_event(target, scope, draft, tz)`   | `scope` is `this` or `all`                                    | v0.2, local calendars   |
 | `delete_event(target, scope)`              |                                                               | v0.2, local calendars   |
 | `get_status`                               | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
 | `list_sources`, `remove_source`            | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
@@ -1428,6 +1429,43 @@ Implementation notes (#15):
   queue edits to calendars whose source has a provider, and the event editor (#16) writes local
   events with `is_organizer = 1` (the column default), so they are always editable.
 - There is no UI for this yet; the event editor (#16) adds it.
+
+Implementation notes (#16):
+
+- `get_event(event)` returns the whole event: plain-text `description`, `location`, `all_day`,
+  `start` and `end` as wall-clock times in the event's own zone (`2026-10-20T09:00`, or
+  `2026-10-20` all-day, end exclusive), `time_zone` (IANA, an offset for an unmapped ICS zone,
+  `null` for all-day and floating), the reminders that apply (the calendar's defaults when
+  `use_default_reminders`), `editable` and `recurring`.
+- `create_event(draft, tz)` and `update_event(target, scope, draft, tz)` take the whole event
+  in the same shape, not a change. A timed draft needs an IANA `time_zone`; its wall-clock
+  times are resolved with the RFC 5545 gap rules (§6), as everywhere else. `end` may equal
+  `start` but not precede it; an all-day `end` must lie after `start`. Title, location and
+  description are trimmed; a blank title becomes "New event". Reminders are sorted and
+  deduplicated, at most four weeks. Both return the occurrence in the viewer's zone `tz`, as
+  `list_occurrences` would, so the caller needs no second query; `tz` is an argument because
+  the display zone is not remembered yet (#25).
+- **Editability is checked in the write transaction**, by the rule of §4, before anything
+  else: an event that is not editable is `not_editable` for update and delete, whatever the
+  draft says, and so is a target calendar without write access. Tested for all eight
+  combinations of access, `is_organizer` and `guests_can_modify`.
+- **Only local calendars are written.** A writable remote calendar is `invalid_input` until
+  the outbox (#18) exists, because the next sync would undo a change written only here.
+  Google calendars are stored read-only until then, so this never shows; #18 replaces the
+  check with the outbox row. An event can move between local calendars by its `calendar_id`.
+- **A series is not written yet.** `scope` is accepted, but a master or an exception is
+  `invalid_input` for update and delete until #17. Nothing in v0.2 so far can create one in a
+  writable calendar.
+- New events get `remote_id` = a v4 UUID in hex (§7.3), `is_organizer = 1` by the column
+  default, and no `ical_uid`. `calendar:changed` names the calendar, and on a move both.
+- New error kind: `not_editable`.
+- The editor (`EventEditor.svelte`, design.md §13) is a modal dialog. Its form rules are pure
+  functions in `src/lib/event-form.ts`: wall-clock arithmetic only (keeping the length when the
+  start moves, the inclusive last day of an all-day event), never zones. A new event from the
+  toolbar starts at the next whole hour this week, else 09:00 on the week's first day; a double
+  click on the grid starts it at that half hour, on the all-day row as an all-day event.
+- Without a writable calendar the editor offers "Personal", and saving creates that local
+  calendar first. The sidebar's local group adds, renames and deletes local calendars.
 
 ### Logic that does live in the frontend
 

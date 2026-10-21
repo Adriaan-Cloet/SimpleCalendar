@@ -4,9 +4,10 @@
 		onprevious: () => void;
 		ontoday: () => void;
 		onnext: () => void;
+		onnew: () => void;
 	}
 
-	let { title, onprevious, ontoday, onnext }: Props = $props();
+	let { title, onprevious, ontoday, onnext, onnew }: Props = $props();
 
 	// Prototype: the view switcher shows its states but does not switch yet
 	const views = ['Day', 'Week', 'Month'];
@@ -41,7 +42,13 @@
 				</svg>
 			</button>
 		</div>
-		<button type="button" class="icon-button" aria-label="New event">
+		<button
+			type="button"
+			class="icon-button"
+			aria-label="New event"
+			title="New event"
+			onclick={onnew}
+		>
 			<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 				<path d="M8 3v10M3 8h10" />
 			</svg>

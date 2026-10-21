@@ -1,6 +1,6 @@
-// Calendars and occurrences through the Tauri commands of docs/architecture.md §10. The shapes
-// mirror `simplecalendar_core::service::{CalendarInfo, CalendarUpdate}` and
-// `simplecalendar_core::model::Occurrence`.
+// Calendars, occurrences and events through the Tauri commands of docs/architecture.md §10. The
+// shapes mirror `simplecalendar_core::service::{CalendarInfo, CalendarUpdate, EventDetail,
+// EventDraft}` and `simplecalendar_core::model::Occurrence`.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SourceKind } from './sources.js';
@@ -44,6 +44,61 @@ export interface CalendarUpdate {
 	color_override?: string | null;
 }
 
+export interface EventReminder {
+	/** 0 to 40320 (four weeks) */
+	minutes_before: number;
+	/** Only `popup` reminders notify; `email` ones are Google's and kept as they are */
+	method: 'popup' | 'email';
+}
+
+/** One event in full, from `getEvent` */
+export interface EventDetail {
+	id: number;
+	calendar_id: number;
+	title: string;
+	/** Plain text, never HTML */
+	description: string | null;
+	location: string | null;
+	all_day: boolean;
+	/** The wall clock in `time_zone`, `2026-10-20T09:00`, or `2026-10-20` all-day */
+	start: string;
+	/** Exclusive: an all-day end is the day after the last day */
+	end: string;
+	/** IANA name, or an offset such as `+05:30`; `null` for all-day and floating times */
+	time_zone: string | null;
+	/** The calendar's defaults apply; `reminders` lists them */
+	use_default_reminders: boolean;
+	/** Earliest first */
+	reminders: EventReminder[];
+	editable: boolean;
+	/** A series or one of its occurrences: these cannot be changed yet (#17) */
+	recurring: boolean;
+}
+
+/** A whole event, as `createEvent` and `updateEvent` take it */
+export interface EventDraft {
+	calendar_id: number;
+	/** A blank title becomes "New event" */
+	title: string;
+	description: string | null;
+	location: string | null;
+	all_day: boolean;
+	/** `YYYY-MM-DDTHH:MM` in `time_zone`, or `YYYY-MM-DD` all-day */
+	start: string;
+	/** Like `start`; exclusive for all-day */
+	end: string;
+	/** IANA name; needed unless all-day */
+	time_zone: string | null;
+	use_default_reminders: boolean;
+	reminders: EventReminder[];
+}
+
+/** Names an occurrence: the `event_id` and `original_start` of an `Occurrence` */
+export type OccurrenceRef = Pick<Occurrence, 'event_id' | 'original_start'>;
+
+/** Which part of a series a change applies to; the same for a single event */
+export type Scope = 'this' | 'all';
+
 /** Payload of `calendar:changed` */
 export interface CalendarChanged {
 	calendar_ids: number[];
@@ -65,6 +120,25 @@ export const createLocalCalendar = (name: string) =>
 	invoke<CalendarInfo>('create_local_calendar', { name });
 /** Deletes a local calendar with its events; `calendar:changed` follows */
 export const removeCalendar = (calendar: number) => invoke<void>('remove_calendar', { calendar });
+
+export const getEvent = (event: number) => invoke<EventDetail>('get_event', { event });
+/** Returns the new occurrence; `calendar:changed` follows */
+export const createEvent = (draft: EventDraft) =>
+	invoke<Occurrence>('create_event', { draft, tz: displayZone() });
+/** Replaces the event with `draft` and returns its occurrence; `calendar:changed` follows */
+export const updateEvent = (target: OccurrenceRef, draft: EventDraft, scope: Scope = 'all') =>
+	invoke<Occurrence>('update_event', {
+		target: { event_id: target.event_id, original_start: target.original_start },
+		scope,
+		draft,
+		tz: displayZone()
+	});
+/** `calendar:changed` follows */
+export const deleteEvent = (target: OccurrenceRef, scope: Scope = 'all') =>
+	invoke<void>('delete_event', {
+		target: { event_id: target.event_id, original_start: target.original_start },
+		scope
+	});
 
 export const onCalendarChanged = (
 	handler: (changed: CalendarChanged) => void

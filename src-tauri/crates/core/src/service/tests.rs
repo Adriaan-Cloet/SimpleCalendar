@@ -8,6 +8,8 @@ use crate::model::{LOCAL_SOURCE_ID, Occurrence, OccurrenceTime};
 use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
+mod events;
+
 const FEED: &str = "https://calendar.example.com/private/abc123token/basic.ics";
 
 // ---- helpers -------------------------------------------------------------------------------

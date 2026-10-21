@@ -1,21 +1,38 @@
 <script lang="ts">
 	import {
+		createEvent,
+		createLocalCalendar,
+		deleteEvent,
+		removeCalendar,
+		displayZone,
+		getEvent,
 		listCalendars,
 		listOccurrences,
 		occurrenceKey,
 		onCalendarChanged,
 		updateCalendar,
+		updateEvent,
 		type CalendarUpdate,
 		type CalendarInfo,
-		type Occurrence
+		type EventDetail,
+		type Occurrence,
+		type OccurrenceRef
 	} from '#lib/calendar.js';
+	import EventEditor, { NEW_LOCAL_CALENDAR } from '#lib/components/EventEditor.svelte';
 	import EventPopover, { type EventDetails } from '#lib/components/EventPopover.svelte';
 	import Sidebar from '#lib/components/Sidebar.svelte';
 	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import WeekView from '#lib/components/WeekView.svelte';
 	import { keepHidden } from '#lib/keep-hidden.js';
-	import { describeWhen } from '#lib/occurrence-text.js';
+	import {
+		defaultStart,
+		draftFromForm,
+		formFromEvent,
+		newEventForm,
+		type EventForm
+	} from '#lib/event-form.js';
+	import { describeWhen, wallClock } from '#lib/occurrence-text.js';
 	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
 
 	let now = $state(new Date());
@@ -69,6 +86,7 @@
 		const before = calendars[index];
 		calendars[index] = {
 			...before,
+			name: change.name?.trim() || before.name,
 			visible: change.visible ?? before.visible,
 			// Going back to the provider's colour shows when Rust answers with it
 			color: change.color_override ?? before.color
@@ -98,10 +116,30 @@
 	let selected = $state<{ key: string; anchor: HTMLElement } | null>(null);
 	let subscriptionsOpen = $state(false);
 
+	const selectedOccurrence = $derived(
+		selected ? occurrences.find((o) => occurrenceKey(o) === selected!.key) : undefined
+	);
+
+	// The selected event in full, for its notes and the editor. Read again when a sync or an
+	// edit changes the occurrence.
+	let selectedEvent = $state<EventDetail | null>(null);
+	$effect(() => {
+		const occurrence = selectedOccurrence;
+		selectedEvent = null;
+		if (!occurrence) return;
+		let current = true;
+		getEvent(occurrence.event_id)
+			.then((event) => {
+				if (current) selectedEvent = event;
+			})
+			.catch((e) => console.error('cannot read the event', e));
+		return () => {
+			current = false;
+		};
+	});
+
 	const details = $derived.by((): EventDetails | null => {
-		if (!selected) return null;
-		const key = selected.key;
-		const occurrence = occurrences.find((o) => occurrenceKey(o) === key);
+		const occurrence = selectedOccurrence;
 		const calendar = occurrence && calendarsById.get(occurrence.calendar_id);
 		if (!occurrence || !calendar) return null;
 		return {
@@ -109,10 +147,69 @@
 			calendar,
 			color: occurrence.color,
 			editable: occurrence.editable,
+			recurring: selectedEvent?.recurring ?? false,
 			when: describeWhen(occurrence),
-			location: occurrence.location ?? undefined
+			location: occurrence.location ?? undefined,
+			notes: selectedEvent?.description ?? undefined
 		};
 	});
+
+	/** The editor, when open: its starting form, and the occurrence it changes */
+	let editing = $state<{ form: EventForm; target: OccurrenceRef | null } | null>(null);
+	/** The local calendar a save in this editor already created, so a retry does not add another */
+	let createdCalendar: number | null = null;
+
+	function newEvent(start: Date, allDay: boolean) {
+		close();
+		createdCalendar = null;
+		const writable = calendars.filter((c) => c.editable);
+		// The first visible writable calendar; without one, the editor offers a new local one
+		const calendar = writable.find((c) => c.visible) ?? writable[0];
+		editing = {
+			form: newEventForm({
+				calendarId: calendar?.id ?? NEW_LOCAL_CALENDAR,
+				start,
+				allDay,
+				timeZone: displayZone()
+			}),
+			target: null
+		};
+	}
+
+	async function editSelected() {
+		if (!selectedOccurrence) return;
+		const { event_id, original_start } = selectedOccurrence;
+		try {
+			const event = selectedEvent ?? (await getEvent(event_id));
+			editing = { form: formFromEvent(event, displayZone()), target: { event_id, original_start } };
+			close();
+		} catch (e) {
+			console.error('cannot read the event', e);
+		}
+	}
+
+	async function save(form: EventForm) {
+		const target = editing?.target ?? null;
+		let calendarId = form.calendarId;
+		// Without a writable calendar the first event makes one on this computer (#15)
+		if (calendarId === NEW_LOCAL_CALENDAR) {
+			createdCalendar ??= (await createLocalCalendar('Personal')).id;
+			calendarId = createdCalendar;
+		}
+		const draft = draftFromForm({ ...form, calendarId });
+		const saved = target ? await updateEvent(target, draft) : await createEvent(draft);
+		editing = null;
+		// Show the week the event is in; `calendar:changed` reads it
+		const week = startOfWeek(wallClock(saved.start));
+		if (week.getTime() !== weekStart.getTime()) go(week);
+	}
+
+	async function removeSelected() {
+		if (!selectedOccurrence) return;
+		const { event_id, original_start } = selectedOccurrence;
+		await deleteEvent({ event_id, original_start });
+		close();
+	}
 
 	// Hiding the calendar of the open event, or the event going away in a sync, closes the
 	// popover
@@ -137,6 +234,10 @@
 		{calendars}
 		onupdate={update}
 		onsubscriptions={() => (subscriptionsOpen = true)}
+		oncreatecalendar={async (name) => {
+			await createLocalCalendar(name);
+		}}
+		onremovecalendar={removeCalendar}
 	/>
 	<main>
 		<Toolbar
@@ -144,6 +245,7 @@
 			onprevious={() => go(addDays(weekStart, -7))}
 			ontoday={() => go(startOfWeek(new Date()))}
 			onnext={() => go(addDays(weekStart, 7))}
+			onnew={() => newEvent(defaultStart(weekStart, new Date()), false)}
 		/>
 		<WeekView
 			{weekStart}
@@ -153,6 +255,7 @@
 			selectedKey={selected?.key ?? null}
 			onselect={(key, anchor) => (selected = { key, anchor })}
 			onscroll={close}
+			oncreate={newEvent}
 		/>
 	</main>
 </div>
@@ -161,8 +264,25 @@
 
 {#if selected && details}
 	{#key selected.key}
-		<EventPopover {details} anchor={selected.anchor} onclose={close} />
+		<EventPopover
+			{details}
+			anchor={selected.anchor}
+			onclose={close}
+			onedit={editSelected}
+			ondelete={removeSelected}
+		/>
 	{/key}
+{/if}
+
+{#if editing}
+	<EventEditor
+		initial={editing.form}
+		isNew={editing.target === null}
+		{calendars}
+		displayZone={displayZone()}
+		onsave={save}
+		onclose={() => (editing = null)}
+	/>
 {/if}
 
 <style>
