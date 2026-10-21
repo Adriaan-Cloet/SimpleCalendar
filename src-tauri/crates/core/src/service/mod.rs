@@ -3,10 +3,14 @@
 //! Tauri commands are thin wrappers around these methods. Reads go straight to SQLite, sync
 //! requests go to the engine, and secrets go to the keychain only.
 
+mod google;
 #[cfg(test)]
 mod tests;
 
+pub use google::GoogleClientInfo;
+
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use chrono::{NaiveDate, NaiveTime};
 use chrono_tz::Tz;
@@ -14,10 +18,11 @@ use reqwest::Url;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::CoreEvent;
 use crate::db::{Db, DbError, occurrences};
+use crate::google::GoogleAuth;
 use crate::model::{Occurrence, SourceKind};
 use crate::provider::ics::feed_url;
 use crate::recurrence::resolve_local;
@@ -108,6 +113,17 @@ pub enum ServiceError {
     Secrets(SecretError),
     #[error(transparent)]
     Db(#[from] DbError),
+    /// No Google client was compiled in and the user has not entered their own (§8).
+    #[error(
+        "Google sign-in needs the client id of a Google Cloud project. Enter yours to continue."
+    )]
+    GoogleClientMissing,
+    /// The Google sign-in did not complete. The message says why and what to do.
+    #[error("{0}")]
+    SignIn(String),
+    /// The user cancelled the sign-in, or started another one.
+    #[error("Sign-in was cancelled.")]
+    Cancelled,
 }
 
 impl From<SecretError> for ServiceError {
@@ -136,6 +152,9 @@ impl Serialize for ServiceError {
             ServiceError::NotFound(_) => "not_found",
             ServiceError::Secrets(_) => "keychain",
             ServiceError::Db(_) => "database",
+            ServiceError::GoogleClientMissing => "google_client_missing",
+            ServiceError::SignIn(_) => "sign_in",
+            ServiceError::Cancelled => "cancelled",
         };
         let mut s = serializer.serialize_struct("ServiceError", 2)?;
         s.serialize_field("kind", kind)?;
@@ -151,21 +170,28 @@ pub struct CalendarService {
     secrets: Secrets,
     sync: SyncHandle,
     events: mpsc::UnboundedSender<CoreEvent>,
+    google: Arc<GoogleAuth>,
+    /// Cancels the Google sign-in that is waiting for the browser, if one is.
+    sign_in: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 impl CalendarService {
-    /// `events` is the same channel the sync engine reports on.
+    /// `events` is the same channel the sync engine reports on; `google` is shared with the
+    /// Google provider.
     pub fn new(
         db: Db,
         secrets: Secrets,
         sync: SyncHandle,
         events: mpsc::UnboundedSender<CoreEvent>,
+        google: Arc<GoogleAuth>,
     ) -> CalendarService {
         CalendarService {
             db,
             secrets,
             sync,
             events,
+            google,
+            sign_in: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -352,7 +378,9 @@ impl CalendarService {
             .await?)
     }
 
-    /// Removes a source with its calendars and events, and its secret from the keychain.
+    /// Removes a source with its calendars and events, and its secret from the keychain. A
+    /// Google account's access is not revoked at Google; the user can do that in their Google
+    /// account settings.
     ///
     /// The secret goes first. If the keychain cannot be reached, the source stays and the error
     /// says why, so a feed URL is never left behind without a source that shows it exists.
@@ -374,6 +402,7 @@ impl CalendarService {
         }
 
         self.secrets.delete(source_id).await?;
+        self.google.forget(source_id).await;
         let id = source_id.to_owned();
         let calendar_ids = self
             .db
@@ -505,4 +534,11 @@ fn source_info(c: &Connection, id: &str) -> rusqlite::Result<Option<SourceInfo>>
 /// The current time in epoch seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// Locks a plain value, also after a panic elsewhere: it is always valid on its own.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

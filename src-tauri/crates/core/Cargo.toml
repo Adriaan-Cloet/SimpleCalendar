@@ -15,12 +15,17 @@ publish = false
 # Async methods on the provider traits, which the sync engine calls through `dyn` (§5). Native
 # `async fn` in traits is still not dyn-compatible on rustc 1.99 (§13 point 2).
 async-trait = "0.1"
+# URL-safe base64 for the PKCE challenge and random tokens (§8). Already built through reqwest and
+# Tauri; the same 0.23.
+base64 = "0.23"
 # Dates and times. Already built through Tauri; `rrule` is built on it (§11).
 chrono = "0.4"
 # The IANA zone database, embedded: Windows does not ship one. Same major as `rrule` uses.
 chrono-tz = "0.10"
 # ICS parsing (§7.6). Only its low-level parser is used, because §7.7 needs the raw `TZID`
 # parameters and `VTIMEZONE` parts, which the typed API does not expose (§13 point 3).
+# Random PKCE verifiers and `state` values. The 0.4 that `uuid` already builds.
+getrandom = "0.4"
 icalendar = { version = "0.17", default-features = false, features = ["parser"] }
 log = "0.4"
 # The OS keychain API (§8). The platform store crates below plug into it.
@@ -42,7 +47,7 @@ serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migrations, versioned in `PRAGMA user_version`.
 rusqlite_migration = "2.6"
-# Hash of a feed body, to detect an unchanged feed (§7.6). 0.10, the version the Linux keychain
+# Hash of a feed body, to detect an unchanged feed (§7.6), and the PKCE challenge (§8). 0.10, the version the Linux keychain
 # store already builds.
 sha2 = "0.10"
 thiserror = "2"
@@ -50,8 +55,9 @@ thiserror = "2"
 # through Tauri with the same `v4` feature, so it adds nothing to the binary.
 uuid = { version = "1", features = ["v4"] }
 # `spawn_blocking` for the blocking SQLite calls, channels for the sync engine. Already built
-# through Tauri. `time` (the sync timer) is the only feature Tauri does not enable already.
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+# through Tauri. `net` and `io-util` run the sign-in's loopback listener (§8); all four are
+# features Tauri's tree already enables.
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 
 # Secret Service over D-Bus (GNOME Keyring, KWallet). `libdbus` is already built through Tauri.
 # The crate requires a crypto backend for the encrypted session; `crypto-rust` keeps the app on

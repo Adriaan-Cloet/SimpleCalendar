@@ -73,7 +73,7 @@ flowchart TB
     subgraph APP["App crate: src-tauri/src"]
         CMD["Tauri commands"]
         FWD["Event forwarder"]
-        PLG["Plugins: notification, opener"]
+        PLG["Notification plugin, browser opener"]
     end
 
     subgraph CORE["simplecalendar-core: src-tauri/crates/core (no Tauri dependency)"]
@@ -1226,9 +1226,33 @@ _Needed from: v0.2 (Google read)._
 - Google treats the client secret of an installed application as not confidential, since it can
   be extracted from any binary. Keeping it out of git is still correct: it avoids the repository
   being flagged and makes rotating it a CI change.
-- To verify during implementation: Google's OAuth documentation says that projects whose consent
-  screen is in "Testing" status get refresh tokens that expire after 7 days. That would show up
-  here as `auth_required` once a week.
+- Google's OAuth documentation says that projects whose consent screen is in "Testing" status
+  get refresh tokens that expire after 7 days. That shows up here as `auth_required` once a week
+  (§13 point 8).
+
+Implementation notes (#13):
+
+- `simplecalendar_core::google`: `oauth.rs` (scopes, PKCE, authorization URL, code exchange,
+  refresh), `loopback.rs` (the listener) and `auth.rs` (`GoogleAuth`: which client to use, and
+  the access tokens in memory). The authorization URL asks for `access_type=offline` and
+  `prompt=consent`, so every sign-in returns a refresh token, also for an account that agreed
+  before. Signing in again passes the account as `login_hint`.
+- The listener answers the first `GET` that arrives, whatever its `state`, and closes; a
+  connection that sends nothing (a browser's preconnect) does not hold it up. A wrong `state` is
+  refused. It also stops when the user cancels.
+- The compiled-in client comes from `SIMPLECALENDAR_GOOGLE_CLIENT_ID` and
+  `SIMPLECALENDAR_GOOGLE_CLIENT_SECRET`: from the environment, else from the untracked `.env`
+  at the repository root, which `src-tauri/build.rs` reads (`.env.example` lists them). The
+  user's own client id is the setting `google.client_id`; its secret is the keychain account
+  `app:google-client-secret`.
+- A Google source's keychain value is `{"v": 1, "kind": "google_refresh_token", ...}`. Its
+  `display_name` and `account_label` are the account's address. Signing in to an account that is
+  already there reuses its source and sets it back to `ok`; signing in again from a source
+  refuses another account.
+- A refresh that Google answers with `invalid_grant` is `ProviderError::Auth`, which the engine
+  stores as `auth_required` (§7.2). The Google provider (#14) gets its tokens from
+  `GoogleAuth::access_token`.
+- Removing a Google source deletes its refresh token but does not revoke it at Google.
 
 ## 9. Reminders
 
@@ -1328,6 +1352,17 @@ Implementation notes (#11):
 - A calendar without a colour gets a palette colour by its id (`calendarColor`), so it keeps
   it across restarts.
 
+Implementation notes (#13):
+
+- `begin_google_sign_in(source?)` opens the browser from Rust with the `open` crate and
+  resolves with the source when the browser step is done. The frontend needs no permission for
+  that, so `capabilities/default.json` is unchanged. `cancel_google_sign_in`
+  stops a waiting sign-in; a new sign-in or closing the Accounts dialog does too.
+- `get_google_client` and `set_google_client(client_id, client_secret)` read and set the
+  user's own OAuth client. An empty id goes back to the built-in one.
+- New error kinds: `google_client_missing` (no client at all: the dialog asks for one),
+  `sign_in` (the message says what went wrong) and `cancelled` (not shown).
+
 Implementation notes (#12):
 
 - `update_calendar(calendar, update)` takes `{visible?, color_override?}`. A field that is left
@@ -1390,23 +1425,24 @@ inspected offline.
 | `reqwest` 0.13, only feature `rustls-no-provider`              | HTTP client                          | Async, on tokio, the de facto standard. Without default features: no HTTP/2, no system proxy lookup, no charset detection. Verifies with the OS store        | `ureq` (blocking), `google-calendar3` (large generated client)                                  | v0.1, ICS subscriptions |
 | `rustls` 0.23, feature `ring`                                  | TLS crypto provider for `reqwest`    | `ring` instead of the default `aws-lc-rs`, which needs a C and assembler toolchain on Windows (§13 point 1)                                                  | `aws-lc-rs`, `native-tls`                                                                       | v0.1, ICS subscriptions |
 | `icalendar` 0.17, only feature `parser`                        | ICS parsing                          | Maintained (release September 2026), on chrono. Only its low-level parser is used (§13 point 3)                                                              | `ical` (no release since March 2024), `calcard` (pulls in mail parsers)                         | v0.1, ICS subscriptions |
-| `sha2` 0.10                                                    | Hash of a feed body, PKCE challenge  | Small and pure Rust; `oauth2` needs it anyway. 0.10 is the version the keychain store already builds                                                         | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
+| `sha2` 0.10                                                    | Hash of a feed body, PKCE challenge  | Small and pure Rust. 0.10 is the version the keychain store already builds                                                                                   | A non-cryptographic hash (would do for feeds, but PKCE requires SHA-256)                        | v0.1, ICS subscriptions |
 | `async-trait`                                                  | Async methods on trait objects       | See §5                                                                                                                                                       | Enum dispatch (more boilerplate per provider)                                                   | v0.1, ICS subscriptions |
 | `keyring-core` 1.0                                             | Keychain API                         | `keyring` 4 was split into this crate plus one store crate per platform                                                                                      | Stronghold (not the OS keychain), any file-based store                                          | v0.1, ICS subscriptions |
 | `dbus-secret-service-keyring-store` 1.0, feature `crypto-rust` | Linux keychain backend               | Uses libdbus, which is already built through Tauri's windowing layer                                                                                         | `zbus-secret-service-keyring-store` (brings a second D-Bus implementation)                      | v0.1, ICS subscriptions |
 | `windows-native-keyring-store` 1.1                             | Windows keychain backend             | Credential Manager through `windows-sys`                                                                                                                     |                                                                                                 | v0.1, ICS subscriptions |
 | `wiremock` 0.6 (dev only)                                      | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | v0.1, ICS subscriptions |
-| `oauth2` 5.0                                                   | OAuth 2.0 with PKCE                  | PKCE, the state check and token refresh are easy to get subtly wrong. **Risk:** last release January 2025. Fallback: about 150 lines on `reqwest` and `sha2` | Hand-rolled as the first choice                                                                 | v0.2, Google read       |
+| `base64` 0.23                                                  | PKCE challenge, random tokens        | Already built through `reqwest` and Tauri, the same version                                                                                                  | `oauth2` (see below)                                                                            | v0.2, Google read       |
+| `getrandom` 0.4                                                | PKCE verifier, `state`               | Already built through `uuid`, the same version                                                                                                               |                                                                                                 | v0.2, Google read       |
 
 The two keychain store crates are platform-specific dependencies, so each platform compiles
 only its own.
 
 ### App crate
 
-| Crate                         | Purpose                             | Why                   | Needed from       |
-| ----------------------------- | ----------------------------------- | --------------------- | ----------------- |
-| `tauri-plugin-opener` 2       | Open the browser for Google sign-in | Official Tauri plugin | v0.2, Google read |
-| `tauri-plugin-notification` 2 | Reminder notifications              | Official Tauri plugin | v0.3, reminders   |
+| Crate                                       | Purpose                             | Why                                                                                                                                                               | Needed from       |
+| ------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `open` 5, feature `shellexecute-on-windows` | Open the browser for Google sign-in | The crate `tauri-plugin-opener` opens URLs with. Adds `open`, `is-wsl` and `is-docker` on Linux; on Windows it uses ShellExecuteW, whose `dunce` is already built | v0.2, Google read |
+| `tauri-plugin-notification` 2               | Reminder notifications              | Official Tauri plugin                                                                                                                                             | v0.3, reminders   |
 
 ### Frontend (npm)
 
@@ -1418,9 +1454,19 @@ No DOM emulation package (`jsdom`, `happy-dom`) is added: the function under tes
 
 ### Deliberately not added
 
+- `oauth2` (decided in #13): the plan picked it, with hand-written code as the fallback. Even
+  without its own `reqwest` 0.12 it adds `rand` 0.8, `base64` 0.22, `thiserror` 1 and
+  `serde_path_to_error`. PKCE, the `state` check, the code exchange and the refresh are about
+  150 lines in `google/oauth.rs` and `google/loopback.rs`, tested against a fake Google
+  (RFC 7636's test vector included). `tokio`'s `macros` feature is not added for them either:
+  the listener waits on one channel instead of `select!`.
+
 - `tauri-plugin-oauth`: the loopback listener is about 40 lines on `tokio::net::TcpListener`.
 - `tauri-plugin-store`, `tauri-plugin-stronghold`: not allowed to hold tokens, not needed for
   anything else.
+- `tauri-plugin-opener` (decided in #13): on Linux it always builds `zbus`, a second D-Bus
+  implementation, and an `async-io` runtime (35 crates) for "reveal in folder", which the app
+  does not use. The `open` crate it uses for URLs is taken directly instead.
 - `windows-timezones`: exists, but the mapping is a small static table that is checked in
   instead (§7.7).
 - `reqwest`'s `system-proxy` feature: it reads the proxy settings of the OS (the registry on
@@ -1563,9 +1609,20 @@ To be settled in the implementation plan, not guessed here.
 6. **Size of the first Google sync** (Google read). It fetches the complete history. A time
    window is a possible later optimisation, with the restriction that the parameters must stay
    identical across the sync chain.
-7. **OAuth scopes** (Google read). Use the narrowest scopes that allow listing calendars and
-   editing events. Exact names to be confirmed.
+7. **OAuth scopes** (Google read). **Decided (#13):**
+   `https://www.googleapis.com/auth/calendar.calendarlist.readonly` (list calendars) and
+   `https://www.googleapis.com/auth/calendar.events` (read and edit events on every calendar the
+   account can see). `calendar.events.owned` would hide calendars shared with the user, and the
+   full `calendar` scope also allows sharing and deleting calendars. No `email` or `openid`
+   scope: the account's address is the id of its primary calendar
+   (`calendarList/primary`), which the first scope already allows.
 8. **Refresh-token lifetime** for a consent screen in "Testing" status (Google read, §8).
+   **Checked in Google's documentation (#13), not yet observed:** a project with an external
+   user type in "Testing" gets refresh tokens that expire after 7 days, unless it only asks for
+   name, email and profile. The calendar scopes are more than that, so a test build shows
+   `auth_required` once a week; "Sign in again" fixes it. Google also keeps at most 100 refresh
+   tokens per account per client; every sign-in makes a new one (`prompt=consent`) and the
+   oldest is dropped silently. To confirm once a real client exists (#29).
 9. **More reasons an event is not editable** (Google read). Google also has a `locked` flag and
    special event types (`birthday`, `fromGmail`, `workingLocation` and others) that restrict
    changes. Decide whether they fold into the same rule as `is_organizer` and

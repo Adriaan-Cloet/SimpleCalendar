@@ -9,6 +9,7 @@ use super::store::{self, LocalCalendar};
 use super::{SyncState, SyncStatus, default_interval};
 use crate::CoreEvent;
 use crate::db::{Db, DbError};
+use crate::model::SourceKind;
 use crate::provider::{
     CalendarProvider, ChangeSet, Next, PageToken, ProviderError, Providers, SourceContext,
     SyncCursor,
@@ -65,7 +66,22 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
         }
     };
     let Some(provider) = ctx.providers.get(source.kind) else {
-        log::warn!("source {source_id}: no provider for {:?}", source.kind);
+        // The local source is never synced. A remote one without a provider, such as a Google
+        // account before the Google provider exists, says so: a UI that asked for a sync would
+        // otherwise wait for a status forever.
+        if source.kind != SourceKind::Local {
+            log::warn!("source {source_id}: no provider for {:?}", source.kind);
+            let message = format!("{} calendars cannot be synced yet.", kind_name(source.kind));
+            let (id, stored) = (source_id.to_owned(), message.clone());
+            if let Err(e) = ctx
+                .db
+                .write(move |c| store::set_status(c, &id, "error", Some(&stored)))
+                .await
+            {
+                log::error!("source {source_id}: cannot store its status: {e}");
+            }
+            ctx.emit_status(source_id, SyncState::Error, Some(message));
+        }
         return None;
     };
     // Rust note: `try_from` refuses a negative number instead of wrapping it around, and `?`
@@ -246,4 +262,14 @@ async fn pull_pages(
 /// The current time in epoch seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// The name of a kind of source in a message to the user.
+fn kind_name(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Local => "Local",
+        SourceKind::Ics => "Subscribed",
+        SourceKind::Google => "Google",
+        SourceKind::Caldav => "CalDAV",
+    }
 }

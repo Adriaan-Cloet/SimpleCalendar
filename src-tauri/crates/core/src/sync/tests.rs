@@ -1107,6 +1107,21 @@ async fn sync_all_syncs_every_remote_source_and_skips_local_ones() {
 }
 
 #[tokio::test]
+async fn a_remote_source_without_a_provider_says_so_instead_of_staying_silent() {
+    // The fake provides `ics` only, as the app provides no `google` provider before #14.
+    let mut h = Harness::new().await;
+    h.add_source("g", "google", None).await;
+
+    h.handle.sync_now(Some("g".into()));
+    let status = h.finished("g").await;
+
+    assert_eq!(status.state, SyncState::Error);
+    let message = status.last_error.expect("a message");
+    assert!(message.contains("Google"), "{message}");
+    assert_eq!(h.source_status("g").await, ("error".into(), Some(message)));
+}
+
+#[tokio::test]
 async fn sync_all_skips_sources_that_need_sign_in_but_sync_now_tries() {
     let mut h = Harness::new().await;
     h.add_source("src-2", "ics", None).await;
