@@ -982,6 +982,11 @@ Implementation notes (#14):
 - Reminders: `useDefault` and `overrides` (`popup` and `email`) go to
   `events.use_default_reminders` and `event_reminders`, replaced as a whole on every update.
 - The sidebar shows one group per Google account, named after it (`groupCalendars`).
+- Descriptions are stored as Google sends them. Notes formatted in Google's web interface are
+  HTML (`<br>`, `<b>`, links); the rest is plain text. `get_event` (#16) must turn them into
+  plain text in Rust and the popover must never render them as HTML: a shared calendar could
+  otherwise inject markup. Until then occurrences carry no description and the popover shows
+  no notes.
 
 Writing:
 
