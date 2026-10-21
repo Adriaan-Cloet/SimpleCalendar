@@ -35,3 +35,19 @@ export function isoDate(date: Date): string {
 	const pad = (n: number) => String(n).padStart(2, '0');
 	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
+
+/**
+ * The weeks that cover month `month` (0-based) of `year`, Monday first, each as seven local
+ * dates. With `rows`, always that many weeks, continuing into the next month.
+ */
+export function monthWeeks(year: number, month: number, rows?: number): Date[][] {
+	const weeks: Date[][] = [];
+	let cursor = startOfWeek(new Date(year, month, 1));
+	while (
+		rows === undefined ? weeks.length === 0 || cursor.getMonth() === month : weeks.length < rows
+	) {
+		weeks.push(Array.from({ length: 7 }, (_, i) => addDays(cursor, i)));
+		cursor = addDays(cursor, 7);
+	}
+	return weeks;
+}

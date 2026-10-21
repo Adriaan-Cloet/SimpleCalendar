@@ -3,8 +3,9 @@
 	import { calendarColor } from '#lib/calendar-color.js';
 	import { groupCalendars } from '#lib/calendar-groups.js';
 	import CalendarColorMenu from '#lib/components/CalendarColorMenu.svelte';
+	import { displayLocale } from '#lib/display-format.js';
 	import { serviceError } from '#lib/sources.js';
-	import { addDays, isSameDay, startOfWeek } from '#lib/week-dates.js';
+	import { isSameDay, monthWeeks } from '#lib/week-dates.js';
 
 	interface Props {
 		today: Date;
@@ -32,24 +33,15 @@
 	}: Props = $props();
 
 	const monthTitle = $derived(
-		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today)
+		new Intl.DateTimeFormat(displayLocale, { month: 'long', year: 'numeric' }).format(today)
 	);
 
 	// Whole weeks covering the current month, Monday first
-	const weeks = $derived.by(() => {
-		const first = new Date(today.getFullYear(), today.getMonth(), 1);
-		const rows: Date[][] = [];
-		let cursor = startOfWeek(first);
-		while (rows.length === 0 || cursor.getMonth() === today.getMonth()) {
-			rows.push(Array.from({ length: 7 }, (_, i) => addDays(cursor, i)));
-			cursor = addDays(cursor, 7);
-		}
-		return rows;
-	});
+	const weeks = $derived(monthWeeks(today.getFullYear(), today.getMonth()));
 
-	const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
+	const weekdayFormat = new Intl.DateTimeFormat(displayLocale, { weekday: 'narrow' });
 	const weekdays = $derived(weeks[0].map((day) => weekdayFormat.format(day)));
-	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });
+	const dayLabel = new Intl.DateTimeFormat(displayLocale, { dateStyle: 'full' });
 
 	const groups = $derived(groupCalendars(calendars));
 

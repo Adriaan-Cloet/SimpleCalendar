@@ -114,9 +114,10 @@ export function formProblem(form: EventForm): string | null {
 	const start = minutes(form.startDate, form.allDay ? '00:00' : form.startTime);
 	const end = minutes(form.endDate, form.allDay ? '00:00' : form.endTime);
 	if (!validDate(form.startDate) || !validDate(form.endDate)) {
-		return 'Enter dates as year-month-day, such as 2026-10-20.';
+		return 'Enter dates as day/month/year, such as 20/10/2026.';
 	}
-	if (start === null || end === null) return 'Enter times as hours and minutes, such as 09:30.';
+	if (start === null || end === null)
+		return 'Enter times on a 24-hour clock, such as 09:30 or 21:30.';
 	if (end < start) return 'The event ends before it starts.';
 	return null;
 }
