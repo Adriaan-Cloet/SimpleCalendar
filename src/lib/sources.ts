@@ -49,6 +49,7 @@ export type ServiceError =
 				| 'google_client_missing'
 				| 'sign_in'
 				| 'cancelled'
+				| 'not_editable'
 				| 'unknown';
 			message: string;
 	  };

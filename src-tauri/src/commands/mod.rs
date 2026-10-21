@@ -7,7 +7,8 @@
 use simplecalendar_core::CalendarService;
 use simplecalendar_core::model::Occurrence;
 use simplecalendar_core::service::{
-    CalendarInfo, CalendarUpdate, GoogleClientInfo, ServiceError, SourceInfo, Status,
+    CalendarInfo, CalendarUpdate, EventDetail, EventDraft, GoogleClientInfo, OccurrenceRef, Scope,
+    ServiceError, SourceInfo, Status,
 };
 use tauri::State;
 
@@ -99,6 +100,47 @@ pub async fn remove_calendar(
     calendar: i64,
 ) -> Result<(), ServiceError> {
     service.remove_calendar(calendar).await
+}
+
+/// One event in full, for the editor and the popover.
+#[tauri::command]
+pub async fn get_event(
+    service: State<'_, CalendarService>,
+    event: i64,
+) -> Result<EventDetail, ServiceError> {
+    service.get_event(event).await
+}
+
+/// Creates an event and returns its occurrence, with times in the IANA zone `tz`.
+#[tauri::command]
+pub async fn create_event(
+    service: State<'_, CalendarService>,
+    draft: EventDraft,
+    tz: String,
+) -> Result<Occurrence, ServiceError> {
+    service.create_event(draft, &tz).await
+}
+
+/// Replaces an event with `draft` and returns its occurrence, with times in the zone `tz`.
+#[tauri::command]
+pub async fn update_event(
+    service: State<'_, CalendarService>,
+    target: OccurrenceRef,
+    scope: Scope,
+    draft: EventDraft,
+    tz: String,
+) -> Result<Occurrence, ServiceError> {
+    service.update_event(target, scope, draft, &tz).await
+}
+
+/// Deletes an event.
+#[tauri::command]
+pub async fn delete_event(
+    service: State<'_, CalendarService>,
+    target: OccurrenceRef,
+    scope: Scope,
+) -> Result<(), ServiceError> {
+    service.delete_event(target, scope).await
 }
 
 /// Signs in to a Google account in the system browser. Resolves when the browser step

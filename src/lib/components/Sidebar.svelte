@@ -3,6 +3,7 @@
 	import { calendarColor } from '#lib/calendar-color.js';
 	import { groupCalendars } from '#lib/calendar-groups.js';
 	import CalendarColorMenu from '#lib/components/CalendarColorMenu.svelte';
+	import { serviceError } from '#lib/sources.js';
 	import { addDays, isSameDay, startOfWeek } from '#lib/week-dates.js';
 
 	interface Props {
@@ -14,9 +15,21 @@
 		onupdate: (id: number, update: CalendarUpdate) => void;
 		/** Opens the subscriptions dialog */
 		onsubscriptions: () => void;
+		/** A new calendar on this computer; rejects with a `ServiceError` */
+		oncreatecalendar: (name: string) => Promise<void>;
+		/** Deletes a local calendar with its events; rejects with a `ServiceError` */
+		onremovecalendar: (id: number) => Promise<void>;
 	}
 
-	let { today, weekStart, calendars, onupdate, onsubscriptions }: Props = $props();
+	let {
+		today,
+		weekStart,
+		calendars,
+		onupdate,
+		onsubscriptions,
+		oncreatecalendar,
+		onremovecalendar
+	}: Props = $props();
 
 	const monthTitle = $derived(
 		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today)
@@ -53,6 +66,50 @@
 			e.button !== 2
 				? { id, x: rect.left, y: rect.bottom, row }
 				: { id, x: e.clientX, y: e.clientY, row };
+	}
+
+	// Local calendars (#15): the one being renamed, a new one being named, and the one whose
+	// deletion waits for confirmation
+	let renaming = $state<number | null>(null);
+	let adding = $state(false);
+	let deleting = $state<number | null>(null);
+	let calendarError = $state<string | null>(null);
+
+	function rename(calendar: CalendarInfo, name: string) {
+		renaming = null;
+		if (name.trim() && name.trim() !== calendar.name) onupdate(calendar.id, { name });
+	}
+
+	async function add(name: string) {
+		adding = false;
+		if (!name.trim()) return;
+		try {
+			await oncreatecalendar(name);
+			calendarError = null;
+		} catch (e) {
+			calendarError = serviceError(e).message;
+		}
+	}
+
+	async function remove(id: number) {
+		deleting = null;
+		try {
+			await onremovecalendar(id);
+			calendarError = null;
+		} catch (e) {
+			calendarError = serviceError(e).message;
+		}
+	}
+
+	/** Enter commits the name, Escape gives up; leaving the field commits as well. `done`
+	 * marks the field, so a blur while it is removed does not commit a second time. */
+	function nameKeys(e: KeyboardEvent, commit: (name: string) => void, cancel: () => void) {
+		const input = e.currentTarget as HTMLInputElement;
+		if (e.key !== 'Enter' && e.key !== 'Escape') return;
+		e.stopPropagation();
+		input.dataset.done = 'true';
+		if (e.key === 'Enter') commit(input.value);
+		else cancel();
 	}
 
 	function closeColorMenu(restoreFocus: boolean) {
@@ -108,39 +165,113 @@
 	<nav class="calendars" aria-label="Calendars">
 		{#each groups as group (group.key)}
 			<section class="group">
-				<h2 class="group-title">{group.label}</h2>
+				<div class="group-header">
+					<h2 class="group-title">{group.label}</h2>
+					{#if group.key === 'local'}
+						<button
+							type="button"
+							class="group-add"
+							aria-label="New calendar"
+							title="New calendar"
+							onclick={() => (adding = true)}
+						>
+							<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+								<path d="M8 3.5v9M3.5 8h9" />
+							</svg>
+						</button>
+					{/if}
+				</div>
 				<ul>
 					{#each group.calendars as calendar (calendar.id)}
 						<li>
-							<label
-								class={{ calendar: true, 'menu-open': colorMenu?.id === calendar.id }}
-								style:--cal={calendarColor(calendar.color, calendar.id)}
-								title="Right-click to change the colour"
-								oncontextmenu={(e) => oncontextmenu(e, calendar.id)}
-							>
-								<input
-									type="checkbox"
-									checked={calendar.visible}
-									onchange={(e) => onupdate(calendar.id, { visible: e.currentTarget.checked })}
-								/>
-								<span class="calendar-name">{calendar.name}</span>
-								{#if !calendar.editable}
-									<svg
-										class="lock"
-										viewBox="0 0 16 16"
-										width="12"
-										height="12"
-										aria-label="Read-only"
-										role="img"
-									>
-										<rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
-										<path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
-									</svg>
-								{/if}
-							</label>
+							{#if renaming === calendar.id}
+								<div
+									class="calendar editing"
+									style:--cal={calendarColor(calendar.color, calendar.id)}
+								>
+									<span class="swatch" aria-hidden="true"></span>
+									<input
+										class="name-input"
+										type="text"
+										value={calendar.name}
+										aria-label="Name of {calendar.name}"
+										{@attach (input) => input.select()}
+										onkeydown={(e) =>
+											nameKeys(
+												e,
+												(name) => rename(calendar, name),
+												() => (renaming = null)
+											)}
+										onblur={(e) => {
+											if (!e.currentTarget.dataset.done) rename(calendar, e.currentTarget.value);
+										}}
+									/>
+								</div>
+							{:else}
+								<label
+									class={{ calendar: true, 'menu-open': colorMenu?.id === calendar.id }}
+									style:--cal={calendarColor(calendar.color, calendar.id)}
+									title="Right-click to change the colour"
+									oncontextmenu={(e) => oncontextmenu(e, calendar.id)}
+								>
+									<input
+										type="checkbox"
+										checked={calendar.visible}
+										onchange={(e) => onupdate(calendar.id, { visible: e.currentTarget.checked })}
+									/>
+									<span class="calendar-name">{calendar.name}</span>
+									{#if !calendar.editable}
+										<svg
+											class="lock"
+											viewBox="0 0 16 16"
+											width="12"
+											height="12"
+											aria-label="Read-only"
+											role="img"
+										>
+											<rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+											<path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+										</svg>
+									{/if}
+								</label>
+							{/if}
+							{#if deleting === calendar.id}
+								<div class="confirm" role="alert">
+									<p>Delete “{calendar.name}” and all its events?</p>
+									<div class="confirm-actions">
+										<button type="button" class="small quiet" onclick={() => (deleting = null)}>
+											Cancel
+										</button>
+										<button type="button" class="small danger" onclick={() => remove(calendar.id)}>
+											Delete
+										</button>
+									</div>
+								</div>
+							{/if}
 						</li>
 					{/each}
+					{#if adding && group.key === 'local'}
+						<li>
+							<div class="calendar editing">
+								<span class="swatch empty" aria-hidden="true"></span>
+								<input
+									class="name-input"
+									type="text"
+									placeholder="Calendar name"
+									aria-label="Name of the new calendar"
+									{@attach (input) => input.focus()}
+									onkeydown={(e) => nameKeys(e, add, () => (adding = false))}
+									onblur={(e) => {
+										if (!e.currentTarget.dataset.done) add(e.currentTarget.value);
+									}}
+								/>
+							</div>
+						</li>
+					{/if}
 				</ul>
+				{#if calendarError && group.key === 'local'}
+					<p class="calendar-error" role="alert">{calendarError}</p>
+				{/if}
 			</section>
 		{/each}
 	</nav>
@@ -191,6 +322,12 @@
 		y={colorMenu.y}
 		onpick={(color) => onupdate(colorMenuCalendar.id, { color_override: color })}
 		onclose={closeColorMenu}
+		onrename={colorMenuCalendar.source_kind === 'local'
+			? () => (renaming = colorMenuCalendar.id)
+			: undefined}
+		ondelete={colorMenuCalendar.source_kind === 'local'
+			? () => (deleting = colorMenuCalendar.id)
+			: undefined}
 	/>
 {/if}
 
@@ -275,8 +412,125 @@
 		flex: 1;
 	}
 
-	.group-title {
+	.group-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
 		margin: 0 0 var(--space-xs);
+	}
+
+	.group-add {
+		display: grid;
+		place-items: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.group-add:hover {
+		color: var(--text);
+		background: var(--fill-hover);
+	}
+
+	.group-add svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.6;
+		stroke-linecap: round;
+	}
+
+	/* Naming a local calendar: the row keeps its height, the name becomes a field */
+	.calendar.editing {
+		background: var(--fill-hover);
+	}
+
+	.swatch {
+		flex: none;
+		width: 14px;
+		height: 14px;
+		border-radius: var(--radius-sm);
+		background: var(--cal);
+	}
+
+	.swatch.empty {
+		background: transparent;
+		border: 1.5px dashed var(--text-tertiary);
+	}
+
+	.name-input {
+		flex: 1;
+		min-width: 0;
+		height: 22px;
+		padding: 0 var(--space-xs);
+		border: 1px solid var(--separator);
+		border-radius: var(--radius-sm);
+		background: var(--surface);
+		-webkit-user-select: text;
+		user-select: text;
+	}
+
+	.name-input:focus-visible {
+		outline-offset: 0;
+	}
+
+	.confirm {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
+		margin: var(--space-2xs) 0 var(--space-xs);
+		padding: var(--space-sm);
+		border-radius: var(--radius-md);
+		background: var(--fill-hover);
+	}
+
+	.confirm p,
+	.calendar-error {
+		margin: 0;
+		font-size: var(--text-footnote);
+		line-height: var(--leading-footnote);
+	}
+
+	.calendar-error {
+		padding: var(--space-xs);
+		color: var(--danger);
+	}
+
+	.confirm-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-xs);
+	}
+
+	.small {
+		height: 24px;
+		padding: 0 var(--space-sm);
+		border: 0;
+		border-radius: var(--radius-md);
+		background: transparent;
+		font-size: var(--text-footnote);
+		font-weight: var(--weight-medium);
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.small.quiet {
+		color: var(--text-secondary);
+	}
+
+	.small.danger {
+		color: var(--danger);
+	}
+
+	.small:hover {
+		background: var(--fill-pressed);
+	}
+
+	.group-title {
+		margin: 0;
 		padding: 0 var(--space-xs);
 		font-size: var(--text-footnote);
 		line-height: var(--leading-footnote);

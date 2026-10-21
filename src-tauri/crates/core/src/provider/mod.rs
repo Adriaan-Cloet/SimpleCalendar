@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{Access, EventStatus, SourceKind};
 use crate::secrets::Secret;
@@ -132,6 +132,9 @@ impl Default for Reminders {
     }
 }
 
+/// The longest reminder Google allows, and `event_reminders` accepts: four weeks.
+pub const MAX_REMINDER_MINUTES: u32 = 40320;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reminder {
     pub method: ReminderMethod,
@@ -141,7 +144,8 @@ pub struct Reminder {
 
 /// How a reminder reaches the user. Only `Popup` produces a notification; `Email` is kept so it
 /// survives an edit (§6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReminderMethod {
     Popup,
     Email,
@@ -154,6 +158,13 @@ impl ReminderMethod {
             ReminderMethod::Popup => "popup",
             ReminderMethod::Email => "email",
         }
+    }
+
+    /// Reads an `event_reminders.method` value. The column's `CHECK` allows no others.
+    pub fn parse(value: &str) -> Option<ReminderMethod> {
+        [ReminderMethod::Popup, ReminderMethod::Email]
+            .into_iter()
+            .find(|method| method.as_str() == value)
     }
 }
 

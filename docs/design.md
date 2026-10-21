@@ -1,7 +1,7 @@
 # Design system
 
 Status: first version. The week view runs on real data since #11.
-Last updated: 2026-10-20.
+Last updated: 2026-10-21 (event editor, §11, §13).
 
 This document describes how SimpleCalendar looks and moves. The tokens live in
 `src/lib/styles/tokens.css`, the global base styles in `src/lib/styles/base.css`. The prototype in
@@ -284,6 +284,8 @@ the Windows build from CI.
 | Selected event      | Stronger fill and a ring; a popover opens beside it                                                            |
 | Read-only event     | Looks like any other event in the grid. The popover says why it cannot be edited, the sidebar shows a lock     |
 | Popover             | Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right, accent)          |
+| Delete              | Asks again in the popover footer: "Delete this event?" with "Cancel" and a red "Delete"                        |
+| Double click        | On an empty spot: a new event at that half hour; on the all-day row an all-day event                           |
 
 ### Overlapping events
 
@@ -334,7 +336,48 @@ Opened from "Subscriptions" in the sidebar footer, next to the appearance contro
 
 The host is shown, never the address: a private feed address is a secret.
 
-## 13. Open points
+## 13. Event editor
+
+Opened by "New event" in the toolbar, a double click on the grid, or "Edit" in the popover
+(#16). A modal `<dialog>` like the Accounts dialog.
+
+```
+┌ Edit event ─────────────────────────────┐
+│ Dentist                     (headline)  │
+│ Ghent                       (secondary) │
+├─────────────────────────────────────────┤
+│ All-day     ( ○)                        │
+│ Starts      [2026-10-20 ▾] [09:00]      │
+│ Ends        [2026-10-20 ▾] [10:00]      │
+│ Time zone   [Europe/Brussels       ▾]   │
+├─────────────────────────────────────────┤
+│ Calendar    ● [Personal            ▾]   │
+│ Reminders   [30 minutes before ▾]  ×    │
+│             Add reminder                │
+├─────────────────────────────────────────┤
+│ Notes…                                  │
+│                         Cancel   Save   │
+└─────────────────────────────────────────┘
+```
+
+| Element         | Look                                                                                                       |
+| --------------- | ---------------------------------------------------------------------------------------------------------- |
+| Dialog          | 440px wide, otherwise as the Accounts dialog (§12)                                                         |
+| Title, location | Borderless text on the dialog, headline and secondary grey, so the event reads like a note, not a form     |
+| Rows            | An 88px label column in secondary grey, controls on the right. Groups separated by hairlines               |
+| All-day         | A switch: `--fill-control` track, `--accent` when on, the knob moves with `transform`                      |
+| Dates and times | Native `date` and `time` inputs. Without a picker (older WebKitGTK) they are text fields with a hint       |
+| Time zone       | Only for timed events. The zones the webview knows, plus the event's and the viewer's                      |
+| Calendar        | Writable calendars only, with the calendar's colour as a dot                                               |
+| Reminders       | One menu per reminder with a remove button; "Add reminder" below. Google email reminders say "by email"    |
+| Problems        | An end before the start disables "Save" and says so in `--danger`; errors from Rust show in the same place |
+| Footer          | Quiet "Cancel", primary "Add" for a new event or "Save"                                                    |
+
+The sidebar's "On this computer" group has a "+" that adds a local calendar by name, in place.
+The calendar menu (right click) adds "Rename…" and a red "Delete calendar…" for local
+calendars; deleting asks again below the row, because it takes the events with it.
+
+## 14. Open points
 
 1. **Locale.** The gutter always shows a 24-hour clock ("08:00"). Event times, dates and the
    popover follow the system locale through `Intl.DateTimeFormat`, so on an English system

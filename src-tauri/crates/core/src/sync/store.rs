@@ -9,10 +9,9 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::SourceKind;
-use crate::provider::{CalendarRef, RemoteCalendar, RemoteEvent, SeriesRole, SyncCursor};
-
-/// The longest reminder Google allows, and `event_reminders` accepts: four weeks.
-const MAX_REMINDER_MINUTES: u32 = 40320;
+use crate::provider::{
+    CalendarRef, MAX_REMINDER_MINUTES, RemoteCalendar, RemoteEvent, SeriesRole, SyncCursor,
+};
 
 /// A source, as far as a cycle needs it.
 pub(super) struct SourceRow {

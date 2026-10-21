@@ -7,23 +7,47 @@
 		/** The event's own colour, else its calendar's */
 		color: string | null;
 		editable: boolean;
+		/** A series or one of its occurrences: not changeable yet (#17) */
+		recurring: boolean;
 		/** One line per entry, e.g. the date and the time range */
 		when: string[];
 		location?: string;
+		/** Plain text from `get_event`; shown as text, never as HTML */
 		notes?: string;
 	}
 </script>
 
 <script lang="ts">
 	import { calendarColor } from '#lib/calendar-color.js';
+	import { serviceError } from '#lib/sources.js';
 
 	interface Props {
 		details: EventDetails;
 		anchor: HTMLElement;
 		onclose: () => void;
+		onedit: () => void;
+		/** Deletes the event; rejects with a `ServiceError` */
+		ondelete: () => Promise<void>;
 	}
 
-	let { details, anchor, onclose }: Props = $props();
+	let { details, anchor, onclose, onedit, ondelete }: Props = $props();
+
+	/** "Delete" was pressed once and waits for confirmation */
+	let confirming = $state(false);
+	let deleting = $state(false);
+	let error = $state<string | null>(null);
+
+	async function remove() {
+		if (deleting) return;
+		deleting = true;
+		error = null;
+		try {
+			await ondelete();
+		} catch (e) {
+			error = serviceError(e).message;
+			deleting = false;
+		}
+	}
 
 	let popover: HTMLElement | undefined = $state();
 	let position = $state({ left: 0, top: 0, side: 'right' as 'left' | 'right', ready: false });
@@ -51,8 +75,10 @@
 
 	function onkeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
+			// Closing unmounts this popover, after which `anchor` can no longer be read
+			const event = anchor;
 			onclose();
-			anchor.focus();
+			event.focus();
 		}
 	}
 
@@ -63,11 +89,12 @@
 		onclose();
 	}
 
-	const readOnlyReason = $derived(
-		details.calendar.source_kind === 'ics'
-			? 'Subscribed calendars can’t be edited.'
-			: 'You can view this calendar but not change it.'
-	);
+	const readOnlyReason = $derived.by(() => {
+		if (details.editable && details.recurring) return 'Repeating events can’t be changed yet.';
+		if (details.calendar.source_kind === 'ics') return 'Subscribed calendars can’t be edited.';
+		if (details.calendar.editable) return 'Only the organiser can change this event.';
+		return 'You can view this calendar but not change it.';
+	});
 </script>
 
 <svelte:window {onkeydown} {onpointerdown} onresize={onclose} />
@@ -101,10 +128,24 @@
 		<p class="notes">{details.notes}</p>
 	{/if}
 
+	{#if error}
+		<p class="error" role="alert">{error}</p>
+	{/if}
+
 	<footer>
-		{#if details.editable}
-			<button type="button" class="button danger">Delete</button>
-			<button type="button" class="button primary">Edit</button>
+		{#if details.editable && !details.recurring && confirming}
+			<p class="confirm">Delete this event?</p>
+			<button type="button" class="button quiet" onclick={() => (confirming = false)}>
+				Cancel
+			</button>
+			<button type="button" class="button danger-strong" disabled={deleting} onclick={remove}>
+				Delete
+			</button>
+		{:else if details.editable && !details.recurring}
+			<button type="button" class="button danger" onclick={() => (confirming = true)}>
+				Delete
+			</button>
+			<button type="button" class="button primary" onclick={onedit}>Edit</button>
 		{:else}
 			<p class="read-only">{readOnlyReason}</p>
 		{/if}
@@ -184,9 +225,23 @@
 	}
 
 	.notes {
+		max-height: 160px;
 		margin-top: var(--space-md);
 		padding-top: var(--space-md);
 		border-top: 1px solid var(--separator);
+		overflow-y: auto;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	.error {
+		margin-top: var(--space-md);
+		color: var(--danger);
+	}
+
+	.confirm {
+		flex: 1;
+		align-self: center;
 	}
 
 	footer {
@@ -220,8 +275,29 @@
 		color: var(--danger);
 	}
 
-	.danger:hover {
+	.danger:hover,
+	.quiet:hover {
 		background: var(--fill-hover);
+	}
+
+	.quiet {
+		background: transparent;
+		color: var(--text-secondary);
+	}
+
+	/* The confirmed delete: red text on a faint fill, so it reads as the answer */
+	.danger-strong {
+		background: var(--fill-hover);
+		color: var(--danger);
+	}
+
+	.danger-strong:hover {
+		background: var(--fill-pressed);
+	}
+
+	.button:disabled {
+		opacity: 0.4;
+		pointer-events: none;
 	}
 
 	.primary {

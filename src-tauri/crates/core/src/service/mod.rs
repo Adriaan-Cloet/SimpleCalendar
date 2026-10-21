@@ -3,10 +3,13 @@
 //! Tauri commands are thin wrappers around these methods. Reads go straight to SQLite, sync
 //! requests go to the engine, and secrets go to the keychain only.
 
+mod events;
 mod google;
 #[cfg(test)]
 mod tests;
+mod text;
 
+pub use events::{EventDetail, EventDraft, EventReminder, OccurrenceRef, Scope};
 pub use google::GoogleClientInfo;
 
 use std::collections::BTreeSet;
@@ -131,6 +134,10 @@ pub enum ServiceError {
     /// The user cancelled the sign-in, or started another one.
     #[error("Sign-in was cancelled.")]
     Cancelled,
+    /// The event or calendar cannot be changed: the calendar is read-only, or the event is
+    /// organised by someone else who does not let guests change it (§4).
+    #[error("This event can’t be changed: its calendar is read-only or someone else organises it.")]
+    NotEditable,
 }
 
 impl From<SecretError> for ServiceError {
@@ -162,6 +169,7 @@ impl Serialize for ServiceError {
             ServiceError::GoogleClientMissing => "google_client_missing",
             ServiceError::SignIn(_) => "sign_in",
             ServiceError::Cancelled => "cancelled",
+            ServiceError::NotEditable => "not_editable",
         };
         let mut s = serializer.serialize_struct("ServiceError", 2)?;
         s.serialize_field("kind", kind)?;
@@ -221,9 +229,7 @@ impl CalendarService {
         to: &str,
         tz: &str,
     ) -> Result<Vec<Occurrence>, ServiceError> {
-        let viewer: Tz = tz
-            .parse()
-            .map_err(|_| ServiceError::InvalidInput(format!("Unknown time zone {tz:?}.")))?;
+        let viewer = parse_zone(tz)?;
         let (from, to) = (parse_date(from)?, parse_date(to)?);
         if !(1..=MAX_RANGE_DAYS).contains(&(to - from).num_days()) {
             return Err(ServiceError::InvalidInput(format!(
@@ -513,6 +519,12 @@ fn feed_host(url: &str) -> Option<String> {
         .host_str()
         .filter(|host| !host.is_empty())
         .map(str::to_owned)
+}
+
+/// An IANA zone name from the frontend.
+fn parse_zone(name: &str) -> Result<Tz, ServiceError> {
+    name.parse()
+        .map_err(|_| ServiceError::InvalidInput(format!("Unknown time zone {name:?}.")))
 }
 
 /// A `YYYY-MM-DD` date from the frontend.
