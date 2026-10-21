@@ -72,8 +72,8 @@ pub async fn list_calendars(
     service.list_calendars().await
 }
 
-/// Shows or hides a calendar, or sets its colour (`null` goes back to the provider's). Fields
-/// left out of `update` stay as they are.
+/// Shows or hides a calendar, sets its colour (`null` goes back to the provider's) or renames
+/// a local calendar. Fields left out of `update` stay as they are.
 #[tauri::command]
 pub async fn update_calendar(
     service: State<'_, CalendarService>,
@@ -81,6 +81,24 @@ pub async fn update_calendar(
     update: CalendarUpdate,
 ) -> Result<CalendarInfo, ServiceError> {
     service.update_calendar(calendar, update).await
+}
+
+/// Creates a calendar on this computer.
+#[tauri::command]
+pub async fn create_local_calendar(
+    service: State<'_, CalendarService>,
+    name: String,
+) -> Result<CalendarInfo, ServiceError> {
+    service.create_local_calendar(&name).await
+}
+
+/// Deletes a calendar on this computer with its events.
+#[tauri::command]
+pub async fn remove_calendar(
+    service: State<'_, CalendarService>,
+    calendar: i64,
+) -> Result<(), ServiceError> {
+    service.remove_calendar(calendar).await
 }
 
 /// Signs in to a Google account in the system browser. Resolves when the browser step

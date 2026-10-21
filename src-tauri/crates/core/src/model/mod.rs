@@ -7,6 +7,10 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::{Serialize, Serializer};
 
+/// The id of the built-in local source, which migration 4 creates. It is not a UUID like the
+/// others: it never has a keychain entry (§4).
+pub const LOCAL_SOURCE_ID: &str = "local";
+
 /// The kind of a source, stored in `sources.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]

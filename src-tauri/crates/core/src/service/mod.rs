@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::CoreEvent;
 use crate::db::{Db, DbError, occurrences};
 use crate::google::GoogleAuth;
-use crate::model::{Occurrence, SourceKind};
+use crate::model::{LOCAL_SOURCE_ID, Occurrence, SourceKind};
 use crate::provider::ics::feed_url;
 use crate::recurrence::resolve_local;
 use crate::secrets::{Secret, SecretError, Secrets, SecretsUnavailable};
@@ -74,10 +74,12 @@ pub struct CalendarInfo {
     pub visible: bool,
 }
 
-/// The user's preferences for a calendar, as `update_calendar` receives them. A field that is
-/// left out stays as it is. Both are local and never synced (§4).
+/// The user's changes to a calendar, as `update_calendar` receives them. A field that is left
+/// out stays as it is. `visible` and `color_override` are local preferences and never synced
+/// (§4); `name` can only change on a local calendar, because a sync rewrites remote names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct CalendarUpdate {
+    pub name: Option<String>,
     pub visible: Option<bool>,
     /// `Some(Some("#rrggbb"))` sets the colour, `Some(None)` (JSON `null`) goes back to the
     /// provider's.
@@ -94,6 +96,9 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 
 const SOURCE_GONE: &str = "This subscription no longer exists.";
 const CALENDAR_GONE: &str = "This calendar no longer exists.";
+const NOT_LOCAL_RENAME: &str = "Only calendars on this computer can be renamed.";
+const NOT_LOCAL_REMOVE: &str =
+    "Only calendars on this computer can be deleted. Remove the account or subscription instead.";
 
 /// The longest range `list_occurrences` accepts. A month view needs six weeks; this leaves room
 /// for a year view or an agenda without letting a typo expand a series for centuries.
@@ -248,10 +253,11 @@ impl CalendarService {
             .await?)
     }
 
-    /// Changes a calendar's visibility or colour and returns it as `list_calendars` would.
+    /// Changes a calendar's visibility, colour or, for a local calendar, its name, and returns
+    /// it as `list_calendars` would.
     ///
-    /// A sync never touches these columns, so the choice survives it. `calendar:changed` names
-    /// the calendar, so every view reads its occurrences again.
+    /// A sync never touches visibility and colour, so the choice survives it. `calendar:changed`
+    /// names the calendar, so every view reads its occurrences again.
     pub async fn update_calendar(
         &self,
         calendar_id: i64,
@@ -261,44 +267,110 @@ impl CalendarService {
             Some(Some(color)) => Some(Some(parse_color(&color)?)),
             other => other,
         };
+        let name = update.name.as_deref().map(parse_name).transpose()?;
+        // Rust note: the closure must return a `rusqlite::Result`, so a refusal decided inside
+        // the transaction travels as the inner `Result` of `Ok(Err(..))`. Returning early drops
+        // `tx`, which rolls it back. After `.await`, the first `?` handles the database error,
+        // the second the refusal.
         let calendar = self
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
-                // A left-out `visible` binds `NULL`, so `coalesce` keeps the column. The colour
-                // needs a separate flag (?3), because `NULL` is also a value to store there.
-                let updated = tx.execute(
+                let Some(kind) = calendar_kind(&tx, calendar_id)? else {
+                    return Ok(Err(ServiceError::NotFound(CALENDAR_GONE)));
+                };
+                if name.is_some() && kind != SourceKind::Local {
+                    return Ok(Err(ServiceError::InvalidInput(NOT_LOCAL_RENAME.into())));
+                }
+                // A left-out `name` or `visible` binds `NULL`, so `coalesce` keeps the column.
+                // The colour needs a separate flag (?4), because `NULL` is also a value to store
+                // there.
+                tx.execute(
                     "UPDATE calendars
-                     SET visible = coalesce(?2, visible),
-                         color_override = CASE WHEN ?3 THEN ?4 ELSE color_override END
+                     SET name = coalesce(?2, name),
+                         visible = coalesce(?3, visible),
+                         color_override = CASE WHEN ?4 THEN ?5 ELSE color_override END
                      WHERE id = ?1",
                     params![
                         calendar_id,
+                        name,
                         update.visible,
                         color_override.is_some(),
                         color_override.flatten()
                     ],
                 )?;
-                if updated == 0 {
-                    return Ok(None);
-                }
-                let calendar = tx
-                    .query_row(
-                        &format!("{CALENDAR_INFO} WHERE c.id = ?1"),
-                        [calendar_id],
-                        calendar_info,
-                    )
-                    .optional()?;
+                let calendar = tx.query_row(
+                    &format!("{CALENDAR_INFO} WHERE c.id = ?1"),
+                    [calendar_id],
+                    calendar_info,
+                )?;
                 tx.commit()?;
-                Ok(calendar)
+                Ok(Ok(calendar))
             })
-            .await?
-            .ok_or(ServiceError::NotFound(CALENDAR_GONE))?;
+            .await??;
         // Only fails when the shell stopped listening, which happens when the app exits.
         let _ = self.events.send(CoreEvent::CalendarChanged {
             calendar_ids: vec![calendar_id],
         });
         Ok(calendar)
+    }
+
+    /// Creates a calendar in the local source and returns it as `list_calendars` would. `name`
+    /// is trimmed and must not be empty.
+    ///
+    /// A local calendar has no provider: it is never synced, and writes to it create no outbox
+    /// rows (§5). Its `remote_id` is a fresh UUID, which only keeps `(source_id, remote_id)`
+    /// unique.
+    pub async fn create_local_calendar(&self, name: &str) -> Result<CalendarInfo, ServiceError> {
+        let name = parse_name(name)?;
+        let remote_id = uuid::Uuid::new_v4().to_string();
+        let calendar = self
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                tx.execute(
+                    "INSERT INTO calendars (source_id, remote_id, name, access)
+                     VALUES (?1, ?2, ?3, 'write')",
+                    params![LOCAL_SOURCE_ID, remote_id, name],
+                )?;
+                let calendar = tx.query_row(
+                    &format!("{CALENDAR_INFO} WHERE c.id = ?1"),
+                    [tx.last_insert_rowid()],
+                    calendar_info,
+                )?;
+                tx.commit()?;
+                Ok(calendar)
+            })
+            .await?;
+        // Only fails when the shell stopped listening, which happens when the app exits.
+        let _ = self.events.send(CoreEvent::CalendarChanged {
+            calendar_ids: vec![calendar.id],
+        });
+        Ok(calendar)
+    }
+
+    /// Deletes a local calendar with its events. A remote calendar goes only with its source
+    /// (`remove_source`): the next sync would bring it back.
+    pub async fn remove_calendar(&self, calendar_id: i64) -> Result<(), ServiceError> {
+        self.db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                match calendar_kind(&tx, calendar_id)? {
+                    None => return Ok(Err(ServiceError::NotFound(CALENDAR_GONE))),
+                    Some(SourceKind::Local) => {}
+                    Some(_) => return Ok(Err(ServiceError::InvalidInput(NOT_LOCAL_REMOVE.into()))),
+                }
+                // Its events go with it, through `ON DELETE CASCADE`.
+                tx.execute("DELETE FROM calendars WHERE id = ?1", [calendar_id])?;
+                tx.commit()?;
+                Ok(Ok(()))
+            })
+            .await??;
+        // Only fails when the shell stopped listening, which happens when the app exits.
+        let _ = self.events.send(CoreEvent::CalendarChanged {
+            calendar_ids: vec![calendar_id],
+        });
+        Ok(())
     }
 
     /// Syncs one source now, or every remote source for `None`. Returns at once; progress
@@ -467,6 +539,26 @@ fn calendar_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<CalendarInfo> {
         visible: r.get(6)?,
         source_name: r.get(7)?,
     })
+}
+
+/// A calendar name from the frontend, trimmed. An empty one is refused.
+fn parse_name(value: &str) -> Result<String, ServiceError> {
+    match value.trim() {
+        "" => Err(ServiceError::InvalidInput(
+            "Enter a name for the calendar.".into(),
+        )),
+        name => Ok(name.to_owned()),
+    }
+}
+
+/// The kind of the source a calendar belongs to, or `None` if there is no such calendar.
+fn calendar_kind(c: &Connection, calendar_id: i64) -> rusqlite::Result<Option<SourceKind>> {
+    c.query_row(
+        "SELECT s.kind FROM calendars c JOIN sources s ON s.id = c.source_id WHERE c.id = ?1",
+        [calendar_id],
+        |r| parse_kind(0, &r.get::<_, String>(0)?),
+    )
+    .optional()
 }
 
 /// A `#rrggbb` colour from the frontend, in lower case as the database stores colours.

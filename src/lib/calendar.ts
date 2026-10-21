@@ -37,6 +37,8 @@ export interface Occurrence {
 
 /** Fields left out stay as they are */
 export interface CalendarUpdate {
+	/** Only for a local calendar; trimmed, must not be empty */
+	name?: string;
 	visible?: boolean;
 	/** A `#rrggbb` value, or `null` for the provider's colour */
 	color_override?: string | null;
@@ -57,6 +59,12 @@ export const listCalendars = () => invoke<CalendarInfo[]>('list_calendars');
 /** Returns the calendar as it is now; `calendar:changed` follows */
 export const updateCalendar = (calendar: number, update: CalendarUpdate) =>
 	invoke<CalendarInfo>('update_calendar', { calendar, update });
+
+/** A new calendar on this computer; `calendar:changed` follows */
+export const createLocalCalendar = (name: string) =>
+	invoke<CalendarInfo>('create_local_calendar', { name });
+/** Deletes a local calendar with its events; `calendar:changed` follows */
+export const removeCalendar = (calendar: number) => invoke<void>('remove_calendar', { calendar });
 
 export const onCalendarChanged = (
 	handler: (changed: CalendarChanged) => void

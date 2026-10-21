@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::db::occurrences::list_occurrences;
-use crate::model::{Access, EventStatus};
+use crate::model::{Access, EventStatus, LOCAL_SOURCE_ID};
 use crate::provider::{
     CalendarProvider, ChangeSet, Next, PageToken, ProviderError, Reminder, ReminderMethod,
     Reminders, RemoteEvent, SeriesRole, SyncCursor,
@@ -68,6 +68,20 @@ impl Harness {
         };
         h.add_source("src-1", "ics", None).await;
         h
+    }
+
+    /// A calendar in the built-in local source, which migration 4 created.
+    async fn local_calendar(&self) {
+        self.db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO calendars (source_id, remote_id, name, access)
+                     VALUES (?1, 'home', 'Home', 'write')",
+                    [LOCAL_SOURCE_ID],
+                )
+            })
+            .await
+            .unwrap();
     }
 
     async fn add_source(&self, id: &str, kind: &str, interval_s: Option<i64>) {
@@ -1199,7 +1213,7 @@ async fn without_a_keychain_the_source_reports_an_error_and_is_not_pulled() {
 async fn sync_all_syncs_every_remote_source_and_skips_local_ones() {
     let mut h = Harness::new().await;
     h.add_source("src-2", "ics", None).await;
-    h.add_source("local", "local", None).await;
+    h.local_calendar().await;
 
     h.handle.sync_all();
     h.finished("src-1").await;
@@ -1208,7 +1222,22 @@ async fn sync_all_syncs_every_remote_source_and_skips_local_ones() {
     let mut sources: Vec<_> = h.pulls_so_far().into_iter().map(|p| p.source_id).collect();
     sources.sort();
     assert_eq!(sources, vec!["src-1", "src-2"]);
-    assert!(h.statuses.iter().all(|s| s.source_id != "local"));
+    assert!(h.statuses.iter().all(|s| s.source_id != LOCAL_SOURCE_ID));
+}
+
+#[tokio::test]
+async fn a_manual_sync_of_the_local_source_does_nothing() {
+    let mut h = Harness::new().await;
+    h.local_calendar().await;
+
+    h.handle.sync_now(Some(LOCAL_SOURCE_ID.into()));
+    h.handle.sync_now(Some("src-1".into()));
+    h.finished("src-1").await;
+
+    let sources: Vec<_> = h.pulls_so_far().into_iter().map(|p| p.source_id).collect();
+    assert_eq!(sources, vec!["src-1"]);
+    assert!(h.statuses.iter().all(|s| s.source_id != LOCAL_SOURCE_ID));
+    assert_eq!(h.source_status(LOCAL_SOURCE_ID).await, ("ok".into(), None));
 }
 
 #[tokio::test]
