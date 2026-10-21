@@ -4,6 +4,8 @@
 		listOccurrences,
 		occurrenceKey,
 		onCalendarChanged,
+		updateCalendar,
+		type CalendarUpdate,
 		type CalendarInfo,
 		type Occurrence
 	} from '#lib/calendar.js';
@@ -12,6 +14,7 @@
 	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import WeekView from '#lib/components/WeekView.svelte';
+	import { keepHidden } from '#lib/keep-hidden.js';
 	import { describeWhen } from '#lib/occurrence-text.js';
 	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
 
@@ -35,11 +38,10 @@
 	let occurrences = $state<Occurrence[]>([]);
 	const calendarsById = $derived(new Map(calendars.map((c) => [c.id, c])));
 
-	// Shown or hidden in the sidebar. Kept for this session only; #12 stores it.
-	let visible = $state<Record<number, boolean>>({});
-
 	// Answers can arrive out of order when the week changes quickly: only the latest counts
 	let request = 0;
+	// The week `occurrences` belong to
+	let loaded: Date | null = null;
 
 	async function load(week: Date) {
 		const mine = ++request;
@@ -49,12 +51,35 @@
 				listOccurrences(isoDate(week), isoDate(addDays(week, 7)))
 			]);
 			if (mine !== request) return;
-			for (const c of cals) visible[c.id] ??= c.visible;
 			calendars = cals;
-			occurrences = found;
+			// In the same week, a calendar hidden meanwhile keeps its events in place, faded
+			const hidden = new Set(cals.filter((c) => !c.visible).map((c) => c.id));
+			occurrences = loaded === week ? keepHidden(occurrences, found, hidden) : found;
+			loaded = week;
 		} catch (e) {
 			// Outside Tauri (`npm run dev` in a browser) there is no backend: show an empty week
 			console.error('cannot load the week', e);
+		}
+	}
+
+	// Shows the change at once; `calendar:changed` then reads the week again
+	async function update(id: number, change: CalendarUpdate) {
+		const index = calendars.findIndex((c) => c.id === id);
+		if (index < 0) return;
+		const before = calendars[index];
+		calendars[index] = {
+			...before,
+			visible: change.visible ?? before.visible,
+			// Going back to the provider's colour shows when Rust answers with it
+			color: change.color_override ?? before.color
+		};
+		try {
+			const after = await updateCalendar(id, change);
+			const i = calendars.findIndex((c) => c.id === id);
+			if (i >= 0) calendars[i] = after;
+		} catch (e) {
+			console.error('cannot update the calendar', e);
+			load(weekStart);
 		}
 	}
 
@@ -92,7 +117,7 @@
 	// Hiding the calendar of the open event, or the event going away in a sync, closes the
 	// popover
 	$effect(() => {
-		if (selected && (!details || !visible[details.calendar.id])) selected = null;
+		if (selected && (!details || !details.calendar.visible)) selected = null;
 	});
 
 	function close() {
@@ -110,7 +135,7 @@
 		today={now}
 		{weekStart}
 		{calendars}
-		bind:visible
+		onupdate={update}
 		onsubscriptions={() => (subscriptionsOpen = true)}
 	/>
 	<main>
@@ -125,7 +150,6 @@
 			{now}
 			calendars={calendarsById}
 			{occurrences}
-			{visible}
 			selectedKey={selected?.key ?? null}
 			onselect={(key, anchor) => (selected = { key, anchor })}
 			onscroll={close}

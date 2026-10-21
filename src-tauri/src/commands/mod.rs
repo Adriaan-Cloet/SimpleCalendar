@@ -6,7 +6,9 @@
 
 use simplecalendar_core::CalendarService;
 use simplecalendar_core::model::Occurrence;
-use simplecalendar_core::service::{CalendarInfo, ServiceError, SourceInfo, Status};
+use simplecalendar_core::service::{
+    CalendarInfo, CalendarUpdate, ServiceError, SourceInfo, Status,
+};
 use tauri::State;
 
 /// The app's status. If the keychain was unavailable, it is probed again first, so a "Try
@@ -68,4 +70,15 @@ pub async fn list_calendars(
     service: State<'_, CalendarService>,
 ) -> Result<Vec<CalendarInfo>, ServiceError> {
     service.list_calendars().await
+}
+
+/// Shows or hides a calendar, or sets its colour (`null` goes back to the provider's). Fields
+/// left out of `update` stay as they are.
+#[tauri::command]
+pub async fn update_calendar(
+    service: State<'_, CalendarService>,
+    calendar: i64,
+    update: CalendarUpdate,
+) -> Result<CalendarInfo, ServiceError> {
+    service.update_calendar(calendar, update).await
 }

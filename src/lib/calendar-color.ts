@@ -4,18 +4,24 @@
 // A calendar without a colour, as most ICS feeds are, gets a palette colour picked by its id, so
 // it keeps the same one and two such calendars rarely share one.
 
-const paletteByLightHex: Record<string, string> = {
-	'#ff3b30': 'red',
-	'#ff9500': 'orange',
-	'#ffcc00': 'yellow',
-	'#34c759': 'green',
-	'#30b0c7': 'teal',
-	'#007aff': 'blue',
-	'#5856d6': 'indigo',
-	'#af52de': 'purple',
-	'#ff2d55': 'pink',
-	'#a2845e': 'brown'
-};
+/** The colours the user can pick, in menu order. `hex` is the light value, which is what gets
+ * stored as a calendar's colour. */
+export const palette = [
+	{ name: 'red', hex: '#ff3b30' },
+	{ name: 'orange', hex: '#ff9500' },
+	{ name: 'yellow', hex: '#ffcc00' },
+	{ name: 'green', hex: '#34c759' },
+	{ name: 'teal', hex: '#30b0c7' },
+	{ name: 'blue', hex: '#007aff' },
+	{ name: 'indigo', hex: '#5856d6' },
+	{ name: 'purple', hex: '#af52de' },
+	{ name: 'pink', hex: '#ff2d55' },
+	{ name: 'brown', hex: '#a2845e' }
+] as const;
+
+const paletteByLightHex: Record<string, string> = Object.fromEntries(
+	palette.map(({ name, hex }) => [hex, name])
+);
 
 // Blue first: the colour of calendar 1 is the accent
 const fallbackOrder = [

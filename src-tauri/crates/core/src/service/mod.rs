@@ -12,8 +12,8 @@ use chrono::{NaiveDate, NaiveTime};
 use chrono_tz::Tz;
 use reqwest::Url;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
 use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 
 use crate::CoreEvent;
@@ -67,6 +67,27 @@ pub struct CalendarInfo {
     pub visible: bool,
 }
 
+/// The user's preferences for a calendar, as `update_calendar` receives them. A field that is
+/// left out stays as it is. Both are local and never synced (§4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct CalendarUpdate {
+    pub visible: Option<bool>,
+    /// `Some(Some("#rrggbb"))` sets the colour, `Some(None)` (JSON `null`) goes back to the
+    /// provider's.
+    #[serde(default, deserialize_with = "present")]
+    pub color_override: Option<Option<String>>,
+}
+
+// Rust note: serde reads both a missing field and `null` as `None` for an `Option`. To tell
+// them apart, `#[serde(default)]` handles the missing field (`None`), and this function, which
+// serde only calls when the field is there, wraps whatever it holds (`null` too) in `Some`.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::deserialize(d).map(Some)
+}
+
+const SOURCE_GONE: &str = "This subscription no longer exists.";
+const CALENDAR_GONE: &str = "This calendar no longer exists.";
+
 /// The longest range `list_occurrences` accepts. A month view needs six weeks; this leaves room
 /// for a year view or an agenda without letting a typo expand a series for centuries.
 const MAX_RANGE_DAYS: i64 = 400;
@@ -80,8 +101,9 @@ pub enum ServiceError {
     /// The user's input cannot be used. The message says what to change.
     #[error("{0}")]
     InvalidInput(String),
-    #[error("This subscription no longer exists.")]
-    NotFound,
+    /// The thing the call names is gone, for example removed by a sync. The message says what.
+    #[error("{0}")]
+    NotFound(&'static str),
     #[error(transparent)]
     Secrets(SecretError),
     #[error(transparent)]
@@ -111,7 +133,7 @@ impl Serialize for ServiceError {
         let kind = match self {
             ServiceError::SecretsUnavailable(_) => unreachable!("handled above"),
             ServiceError::InvalidInput(_) => "invalid_input",
-            ServiceError::NotFound => "not_found",
+            ServiceError::NotFound(_) => "not_found",
             ServiceError::Secrets(_) => "keychain",
             ServiceError::Db(_) => "database",
         };
@@ -189,27 +211,66 @@ impl CalendarService {
         Ok(self
             .db
             .read(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT c.id, c.source_id, s.kind, c.name,
-                            coalesce(c.color_override, c.color), c.access = 'write', c.visible
-                     FROM calendars c JOIN sources s ON s.id = c.source_id
-                     ORDER BY s.created_at, s.id, c.is_primary DESC, c.name COLLATE NOCASE, c.id",
-                )?;
-                stmt.query_map([], |r| {
-                    let kind: String = r.get(2)?;
-                    Ok(CalendarInfo {
-                        id: r.get(0)?,
-                        source_id: r.get(1)?,
-                        source_kind: parse_kind(2, &kind)?,
-                        name: r.get(3)?,
-                        color: r.get(4)?,
-                        editable: r.get(5)?,
-                        visible: r.get(6)?,
-                    })
-                })?
-                .collect()
+                let mut stmt = c.prepare(&format!(
+                    "{CALENDAR_INFO}
+                     ORDER BY s.created_at, s.id, c.is_primary DESC, c.name COLLATE NOCASE, c.id"
+                ))?;
+                stmt.query_map([], calendar_info)?.collect()
             })
             .await?)
+    }
+
+    /// Changes a calendar's visibility or colour and returns it as `list_calendars` would.
+    ///
+    /// A sync never touches these columns, so the choice survives it. `calendar:changed` names
+    /// the calendar, so every view reads its occurrences again.
+    pub async fn update_calendar(
+        &self,
+        calendar_id: i64,
+        update: CalendarUpdate,
+    ) -> Result<CalendarInfo, ServiceError> {
+        let color_override = match update.color_override {
+            Some(Some(color)) => Some(Some(parse_color(&color)?)),
+            other => other,
+        };
+        let calendar = self
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                // A left-out `visible` binds `NULL`, so `coalesce` keeps the column. The colour
+                // needs a separate flag (?3), because `NULL` is also a value to store there.
+                let updated = tx.execute(
+                    "UPDATE calendars
+                     SET visible = coalesce(?2, visible),
+                         color_override = CASE WHEN ?3 THEN ?4 ELSE color_override END
+                     WHERE id = ?1",
+                    params![
+                        calendar_id,
+                        update.visible,
+                        color_override.is_some(),
+                        color_override.flatten()
+                    ],
+                )?;
+                if updated == 0 {
+                    return Ok(None);
+                }
+                let calendar = tx
+                    .query_row(
+                        &format!("{CALENDAR_INFO} WHERE c.id = ?1"),
+                        [calendar_id],
+                        calendar_info,
+                    )
+                    .optional()?;
+                tx.commit()?;
+                Ok(calendar)
+            })
+            .await?
+            .ok_or(ServiceError::NotFound(CALENDAR_GONE))?;
+        // Only fails when the shell stopped listening, which happens when the app exits.
+        let _ = self.events.send(CoreEvent::CalendarChanged {
+            calendar_ids: vec![calendar_id],
+        });
+        Ok(calendar)
     }
 
     /// Syncs one source now, or every remote source for `None`. Returns at once; progress
@@ -268,7 +329,7 @@ impl CalendarService {
 
         self.sync.sync_now(Some(id.clone()));
         let source = self.db.read(move |c| source_info(c, &id)).await?;
-        source.ok_or(ServiceError::NotFound)
+        source.ok_or(ServiceError::NotFound(SOURCE_GONE))
     }
 
     /// Every remote source, oldest first. The built-in local source is not listed.
@@ -309,7 +370,7 @@ impl CalendarService {
             })
             .await?;
         if exists.is_none() {
-            return Err(ServiceError::NotFound);
+            return Err(ServiceError::NotFound(SOURCE_GONE));
         }
 
         self.secrets.delete(source_id).await?;
@@ -355,6 +416,37 @@ fn feed_host(url: &str) -> Option<String> {
 fn parse_date(value: &str) -> Result<NaiveDate, ServiceError> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|_| ServiceError::InvalidInput(format!("{value:?} is not a YYYY-MM-DD date.")))
+}
+
+/// The columns `calendar_info` reads, without `WHERE` or `ORDER BY`.
+const CALENDAR_INFO: &str = "SELECT c.id, c.source_id, s.kind, c.name,
+        coalesce(c.color_override, c.color), c.access = 'write', c.visible
+    FROM calendars c JOIN sources s ON s.id = c.source_id";
+
+/// One row of `CALENDAR_INFO`.
+fn calendar_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<CalendarInfo> {
+    let kind: String = r.get(2)?;
+    Ok(CalendarInfo {
+        id: r.get(0)?,
+        source_id: r.get(1)?,
+        source_kind: parse_kind(2, &kind)?,
+        name: r.get(3)?,
+        color: r.get(4)?,
+        editable: r.get(5)?,
+        visible: r.get(6)?,
+    })
+}
+
+/// A `#rrggbb` colour from the frontend, in lower case as the database stores colours.
+fn parse_color(value: &str) -> Result<String, ServiceError> {
+    match value.strip_prefix('#') {
+        Some(hex) if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Ok(value.to_ascii_lowercase())
+        }
+        _ => Err(ServiceError::InvalidInput(format!(
+            "{value:?} is not a #rrggbb colour."
+        ))),
+    }
 }
 
 /// A `sources.kind` value read from column `column`.

@@ -910,6 +910,37 @@ async fn calendars_are_added_updated_and_removed() {
 }
 
 #[tokio::test]
+async fn a_sync_keeps_the_users_colour_and_visibility() {
+    let mut h = Harness::new().await;
+    h.sync().await;
+    h.db.write(|c| {
+        c.execute(
+            "UPDATE calendars SET color_override = '#ff9500', visible = 0",
+            [],
+        )
+    })
+    .await
+    .unwrap();
+
+    let mut recoloured = calendar("cal-1", "One");
+    recoloured.color = Some("#123456".to_owned());
+    h.fake.set_calendars(vec![recoloured]);
+    h.sync().await;
+
+    let row: (Option<String>, Option<String>, bool) =
+        h.db.read(|c| {
+            c.query_row(
+                "SELECT color, color_override, visible FROM calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(row, (Some("#123456".into()), Some("#ff9500".into()), false));
+}
+
+#[tokio::test]
 async fn every_calendar_is_pulled() {
     let mut h = Harness::new().await;
     h.fake

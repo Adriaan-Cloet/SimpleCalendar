@@ -1,6 +1,7 @@
 <script lang="ts">
-	import type { CalendarInfo } from '#lib/calendar.js';
+	import type { CalendarInfo, CalendarUpdate } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
+	import CalendarColorMenu from '#lib/components/CalendarColorMenu.svelte';
 	import type { SourceKind } from '#lib/sources.js';
 	import { addDays, isSameDay, startOfWeek } from '#lib/week-dates.js';
 
@@ -9,12 +10,13 @@
 		/** The Monday of the week on screen; its row in the mini month is marked */
 		weekStart: Date;
 		calendars: CalendarInfo[];
-		visible: Record<number, boolean>;
+		/** Shows or hides a calendar, or changes its colour */
+		onupdate: (id: number, update: CalendarUpdate) => void;
 		/** Opens the subscriptions dialog */
 		onsubscriptions: () => void;
 	}
 
-	let { today, weekStart, calendars, visible = $bindable(), onsubscriptions }: Props = $props();
+	let { today, weekStart, calendars, onupdate, onsubscriptions }: Props = $props();
 
 	// In this order. CalDAV accounts join in v0.4.
 	const sourceLabels: Record<SourceKind, string> = {
@@ -53,6 +55,26 @@
 			}))
 			.filter((group) => group.calendars.length > 0)
 	);
+
+	// The colour menu, opened with a right click or the context menu key on a calendar
+	let colorMenu = $state<{ id: number; x: number; y: number; row: HTMLElement } | null>(null);
+	const colorMenuCalendar = $derived(calendars.find((c) => c.id === colorMenu?.id));
+
+	function oncontextmenu(e: MouseEvent, id: number) {
+		e.preventDefault();
+		const row = e.currentTarget as HTMLElement;
+		// From the keyboard (no right button) there is no pointer position: open below the row
+		const rect = row.getBoundingClientRect();
+		colorMenu =
+			e.button !== 2
+				? { id, x: rect.left, y: rect.bottom, row }
+				: { id, x: e.clientX, y: e.clientY, row };
+	}
+
+	function closeColorMenu(restoreFocus: boolean) {
+		if (restoreFocus) colorMenu?.row.querySelector('input')?.focus();
+		colorMenu = null;
+	}
 
 	// Prototype only: in the app this becomes a setting. No attribute means "follow the system".
 	type Appearance = 'system' | 'light' | 'dark';
@@ -106,8 +128,17 @@
 				<ul>
 					{#each group.calendars as calendar (calendar.id)}
 						<li>
-							<label class="calendar" style:--cal={calendarColor(calendar.color, calendar.id)}>
-								<input type="checkbox" bind:checked={visible[calendar.id]} />
+							<label
+								class={{ calendar: true, 'menu-open': colorMenu?.id === calendar.id }}
+								style:--cal={calendarColor(calendar.color, calendar.id)}
+								title="Right-click to change the colour"
+								oncontextmenu={(e) => oncontextmenu(e, calendar.id)}
+							>
+								<input
+									type="checkbox"
+									checked={calendar.visible}
+									onchange={(e) => onupdate(calendar.id, { visible: e.currentTarget.checked })}
+								/>
 								<span class="calendar-name">{calendar.name}</span>
 								{#if !calendar.editable}
 									<svg
@@ -168,6 +199,16 @@
 		</div>
 	</footer>
 </aside>
+
+{#if colorMenu && colorMenuCalendar}
+	<CalendarColorMenu
+		calendar={colorMenuCalendar}
+		x={colorMenu.x}
+		y={colorMenu.y}
+		onpick={(color) => onupdate(colorMenuCalendar.id, { color_override: color })}
+		onclose={closeColorMenu}
+	/>
+{/if}
 
 <style>
 	.sidebar {
@@ -275,7 +316,8 @@
 		transition: background-color var(--duration-fast) var(--ease-standard);
 	}
 
-	.calendar:hover {
+	.calendar:hover,
+	.calendar.menu-open {
 		background: var(--fill-hover);
 	}
 
