@@ -81,6 +81,8 @@ pub fn run() {
             commands::list_occurrences,
             commands::list_calendars,
             commands::update_calendar,
+            commands::create_local_calendar,
+            commands::remove_calendar,
             commands::begin_google_sign_in,
             commands::cancel_google_sign_in,
             commands::get_google_client,

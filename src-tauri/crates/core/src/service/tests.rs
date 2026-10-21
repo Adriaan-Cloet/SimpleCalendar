@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::google::{ClientConfig, Endpoints};
-use crate::model::{Occurrence, OccurrenceTime};
+use crate::model::{LOCAL_SOURCE_ID, Occurrence, OccurrenceTime};
 use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
@@ -45,13 +45,14 @@ fn setup_with(client: Option<ClientConfig>, endpoints: Endpoints) -> Setup {
 }
 
 impl Setup {
+    /// Every source row except the built-in local one.
     async fn source_rows(&self) -> Vec<Vec<Option<String>>> {
         self.db
             .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, kind, display_name, account_label, status, last_error,
                             CAST(created_at AS TEXT), CAST(sync_interval_s AS TEXT)
-                     FROM sources",
+                     FROM sources WHERE kind <> 'local'",
                 )?;
                 stmt.query_map([], |r| (0..8).map(|i| r.get(i)).collect())?
                     .collect()
@@ -208,11 +209,6 @@ async fn sources_are_listed_oldest_first_with_their_calendars_state() {
                                     created_at = created_at + 1
                  WHERE id = ?1",
             [id],
-        )?;
-        c.execute(
-            "INSERT INTO sources (id, kind, display_name, created_at)
-                 VALUES ('local', 'local', 'On this computer', 0)",
-            [],
         )
     })
     .await
@@ -420,6 +416,226 @@ async fn updating_a_calendar_that_does_not_exist_is_not_found() {
         .unwrap_err();
     assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
     assert!(s.events.try_recv().is_err());
+}
+
+// ---- local calendars (§4, §5) --------------------------------------------------------------
+
+#[tokio::test]
+async fn a_local_calendar_is_created_writable_and_visible() {
+    let mut s = setup();
+
+    let created = s.service.create_local_calendar("  Home  ").await.unwrap();
+
+    assert_eq!(created.name, "Home");
+    assert_eq!(created.source_id, LOCAL_SOURCE_ID);
+    assert_eq!(created.source_kind, SourceKind::Local);
+    assert_eq!(created.source_name, "On this computer");
+    assert_eq!(created.color, None);
+    assert!(created.editable);
+    assert!(created.visible);
+    assert_eq!(
+        s.service.list_calendars().await.unwrap(),
+        vec![created.clone()]
+    );
+    assert_eq!(
+        s.events.try_recv().unwrap(),
+        CoreEvent::CalendarChanged {
+            calendar_ids: vec![created.id]
+        }
+    );
+    assert!(
+        s.requests.manual().is_empty(),
+        "a local calendar is never synced"
+    );
+}
+
+#[tokio::test]
+async fn local_calendars_get_their_own_remote_ids() {
+    let s = setup();
+    s.service.create_local_calendar("Home").await.unwrap();
+    s.service.create_local_calendar("Home").await.unwrap();
+    let ids: Vec<String> =
+        s.db.read(|c| {
+            c.prepare("SELECT remote_id FROM calendars")?
+                .query_map([], |r| r.get(0))?
+                .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert!(
+        ids.iter().all(|id| uuid::Uuid::parse_str(id).is_ok()),
+        "{ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_local_calendar_needs_a_name() {
+    let mut s = setup();
+    for name in ["", "   ", "\t\n"] {
+        let err = s.service.create_local_calendar(name).await.unwrap_err();
+        assert!(
+            matches!(err, ServiceError::InvalidInput(_)),
+            "{name:?}: {err:?}"
+        );
+    }
+    assert_eq!(s.count("calendars").await, 0);
+    assert!(s.events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_local_calendar_can_be_renamed_and_recoloured() {
+    let mut s = setup();
+    let id = s.service.create_local_calendar("Home").await.unwrap().id;
+    while s.events.try_recv().is_ok() {}
+
+    let renamed = s
+        .service
+        .update_calendar(id, update(serde_json::json!({"name": " Family "})))
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "Family");
+    assert!(renamed.visible, "a field that is left out stays as it was");
+    assert_eq!(
+        s.events.try_recv().unwrap(),
+        CoreEvent::CalendarChanged {
+            calendar_ids: vec![id]
+        }
+    );
+
+    let changed = s
+        .service
+        .update_calendar(
+            id,
+            update(serde_json::json!({"color_override": "#34C759", "visible": false})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.name, "Family");
+    assert_eq!(changed.color.as_deref(), Some("#34c759"));
+    assert!(!changed.visible);
+}
+
+#[tokio::test]
+async fn a_blank_name_is_invalid_input_and_changes_nothing() {
+    let s = setup();
+    let id = s.service.create_local_calendar("Home").await.unwrap().id;
+
+    let err = s
+        .service
+        .update_calendar(
+            id,
+            update(serde_json::json!({"name": " ", "visible": false})),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ServiceError::InvalidInput(_)), "{err:?}");
+    let calendar = &s.service.list_calendars().await.unwrap()[0];
+    assert_eq!(calendar.name, "Home");
+    assert!(calendar.visible);
+}
+
+#[tokio::test]
+async fn a_remote_calendar_cannot_be_renamed() {
+    let mut s = setup();
+    timed_events(&s, &[]).await;
+    let id = s.service.list_calendars().await.unwrap()[0].id;
+    while s.events.try_recv().is_ok() {}
+
+    let err = s
+        .service
+        .update_calendar(
+            id,
+            update(serde_json::json!({"name": "Mine", "visible": false})),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ServiceError::InvalidInput(_)), "{err:?}");
+    let calendar = &s.service.list_calendars().await.unwrap()[0];
+    assert_eq!(calendar.name, "Feed");
+    assert!(calendar.visible, "nothing of the update was stored");
+    assert!(s.events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn removing_a_local_calendar_removes_its_events() {
+    let mut s = setup();
+    let keep = s.service.create_local_calendar("Keep").await.unwrap().id;
+    let gone = s.service.create_local_calendar("Gone").await.unwrap().id;
+    s.db.write(move |c| {
+        c.execute(
+            "INSERT INTO events (calendar_id, remote_id, start_utc, end_utc) VALUES (?1, 'e', 0, 0)",
+            [gone],
+        )
+    })
+    .await
+    .unwrap();
+    while s.events.try_recv().is_ok() {}
+
+    s.service.remove_calendar(gone).await.unwrap();
+
+    let left: Vec<_> = s.service.list_calendars().await.unwrap();
+    assert_eq!(left.iter().map(|c| c.id).collect::<Vec<_>>(), vec![keep]);
+    assert_eq!(s.count("events").await, 0);
+    assert_eq!(
+        s.events.try_recv().unwrap(),
+        CoreEvent::CalendarChanged {
+            calendar_ids: vec![gone]
+        }
+    );
+    // The source stays, also without calendars.
+    assert_eq!(s.count("sources").await, 1);
+}
+
+#[tokio::test]
+async fn a_remote_calendar_cannot_be_removed_on_its_own() {
+    let mut s = setup();
+    timed_events(&s, &[]).await;
+    let id = s.service.list_calendars().await.unwrap()[0].id;
+    while s.events.try_recv().is_ok() {}
+
+    let err = s.service.remove_calendar(id).await.unwrap_err();
+
+    assert!(matches!(err, ServiceError::InvalidInput(_)), "{err:?}");
+    assert_eq!(s.service.list_calendars().await.unwrap().len(), 1);
+    assert!(s.events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn removing_a_calendar_that_does_not_exist_is_not_found() {
+    let mut s = setup();
+    let err = s.service.remove_calendar(42).await.unwrap_err();
+    assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
+    assert!(s.events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn events_in_a_local_calendar_are_editable() {
+    let s = setup();
+    let id = s.service.create_local_calendar("Home").await.unwrap().id;
+    let start = instant(chrono_tz::UTC, 2026, 10, 20, 9, 0);
+    // Column defaults only: a local event is the organiser's (§4).
+    s.db.write(move |c| {
+        c.execute(
+            "INSERT INTO events (calendar_id, remote_id, start_utc, end_utc, start_tz)
+             VALUES (?1, 'e', ?2, ?3, 'UTC')",
+            params![id, start, start + 1800],
+        )
+    })
+    .await
+    .unwrap();
+
+    let week = s
+        .service
+        .list_occurrences("2026-10-19", "2026-10-26", "UTC")
+        .await
+        .unwrap();
+
+    assert_eq!(week.len(), 1);
+    assert!(week[0].editable);
 }
 
 // ---- occurrences ---------------------------------------------------------------------------
@@ -749,7 +965,7 @@ mod google_sign_in {
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::SignIn(_)), "{err:?}");
-        assert_eq!(s.count("sources").await, 0);
+        assert!(s.source_rows().await.is_empty());
     }
 
     #[tokio::test]

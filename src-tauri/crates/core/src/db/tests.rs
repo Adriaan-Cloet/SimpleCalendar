@@ -6,6 +6,7 @@ use tokio::sync::oneshot;
 
 use super::migrations::{MIGRATIONS, test_connection};
 use super::*;
+use crate::model::LOCAL_SOURCE_ID;
 
 // ---- helpers -------------------------------------------------------------------------------
 
@@ -54,7 +55,27 @@ fn migrations_are_valid() {
 
 #[test]
 fn user_version_is_latest_migration() {
-    assert_eq!(user_version(&test_connection()), 3);
+    assert_eq!(user_version(&test_connection()), 4);
+}
+
+#[test]
+fn a_new_database_has_the_local_source_and_no_calendars() {
+    let conn = test_connection();
+    let sources: Vec<(String, String)> = conn
+        .prepare("SELECT id, kind FROM sources")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        sources,
+        vec![(LOCAL_SOURCE_ID.to_owned(), "local".to_owned())]
+    );
+    let calendars: i64 = conn
+        .query_row("SELECT count(*) FROM calendars", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(calendars, 0);
 }
 
 #[test]
@@ -265,7 +286,7 @@ async fn open_is_idempotent() {
     let path = dir.path().join("test.db");
     drop(Db::open(&path).unwrap());
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 3);
+    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 4);
 }
 
 #[tokio::test]
@@ -292,13 +313,14 @@ async fn read_sees_committed_state_while_write_is_open() {
     inserted_rx.await.unwrap();
 
     // The write transaction is open now. The read must not wait for it, and must not see "b".
+    // The local source (migration 4) and "a" are there.
     let during = tokio::time::timeout(Duration::from_secs(1), db.read(|c| Ok(count(c, "sources"))))
         .await
         .expect("read blocked by the open write transaction")
         .unwrap();
-    assert_eq!(during, 1);
+    assert_eq!(during, 2);
 
     commit_tx.send(()).unwrap();
     writer.await.unwrap().unwrap();
-    assert_eq!(db.read(|c| Ok(count(c, "sources"))).await.unwrap(), 2);
+    assert_eq!(db.read(|c| Ok(count(c, "sources"))).await.unwrap(), 3);
 }

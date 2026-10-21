@@ -180,7 +180,9 @@ Three persisted entities and one computed value.
 
 - The id is a UUID, not an integer, because it is the key of the keychain entry (§8). Integer
   ids start again at 1 when the database is recreated, and a new source would then silently
-  pick up a stale token left in the keychain by a previous installation.
+  pick up a stale token left in the keychain by a previous installation. The one exception is
+  the built-in local source: it never has a keychain entry, so it has the fixed id `local`.
+  Migration 4 creates it, without calendars, so it exists from the first launch.
 - `kind` is `local`, `ics`, `google` or `caldav`.
 - `status` is `ok`, `auth_required` or `error`. `auth_required` means the refresh token was
   rejected and the user has to sign in again. The engine stops syncing that source until then.
@@ -622,6 +624,7 @@ CREATE TABLE settings (
 | `calendars.sync_cursor`, `events.ical_uid`, index `events_unlinked`              | v0.1, ICS subscriptions              |
 | `events.etag`, `events.is_organizer`, `events.guests_can_modify`                 | v0.2, Google read                    |
 | `event_reminders`, `events.use_default_reminders`, `calendars.default_reminders` | v0.2, Google read (migration 3, #14) |
+| the `local` row in `sources`                                                     | v0.2, local calendars (migration 4)  |
 | `outbox`, `events.pending_delete`                                                | v0.2, Google write                   |
 | `fired_reminders`                                                                | v0.3, reminders                      |
 
@@ -1306,21 +1309,21 @@ _Needed from: v0.1 (ICS subscriptions). Each row says from which version it is n
 
 Commands (all async, all return `Result`):
 
-| Command                                  | Purpose                                                       | Needed from             |
-| ---------------------------------------- | ------------------------------------------------------------- | ----------------------- |
-| `list_calendars`, `update_calendar`      | Visibility and colour override                                | v0.1, ICS subscriptions |
-| `create_local_calendar`                  | New calendar in the local source                              | v0.2, local calendars   |
-| `list_occurrences(from, to, tz)`         | Everything the views render                                   | v0.1, ICS subscriptions |
-| `get_event(event_id)`                    | Full detail for the editor                                    | v0.2, local calendars   |
-| `create_event(draft)`                    | Returns the new occurrence                                    | v0.2, local calendars   |
-| `update_event(target, scope, draft)`     | `scope` is `this` or `all`                                    | v0.2, local calendars   |
-| `delete_event(target, scope)`            |                                                               | v0.2, local calendars   |
-| `get_status`                             | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
-| `list_sources`, `remove_source`          | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
-| `add_ics_source(url, name)`              | Subscribe to a feed                                           | v0.1, ICS subscriptions |
-| `sync_now(source?)`                      | Manual refresh                                                | v0.1, ICS subscriptions |
-| `begin_google_sign_in`                   | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
-| `list_sync_issues`, `dismiss_sync_issue` | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
+| Command                                    | Purpose                                                       | Needed from             |
+| ------------------------------------------ | ------------------------------------------------------------- | ----------------------- |
+| `list_calendars`, `update_calendar`        | Visibility and colour override                                | v0.1, ICS subscriptions |
+| `create_local_calendar`, `remove_calendar` | New calendar in the local source; delete a local one          | v0.2, local calendars   |
+| `list_occurrences(from, to, tz)`           | Everything the views render                                   | v0.1, ICS subscriptions |
+| `get_event(event_id)`                      | Full detail for the editor                                    | v0.2, local calendars   |
+| `create_event(draft)`                      | Returns the new occurrence                                    | v0.2, local calendars   |
+| `update_event(target, scope, draft)`       | `scope` is `this` or `all`                                    | v0.2, local calendars   |
+| `delete_event(target, scope)`              |                                                               | v0.2, local calendars   |
+| `get_status`                               | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
+| `list_sources`, `remove_source`            | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
+| `add_ics_source(url, name)`                | Subscribe to a feed                                           | v0.1, ICS subscriptions |
+| `sync_now(source?)`                        | Manual refresh                                                | v0.1, ICS subscriptions |
+| `begin_google_sign_in`                     | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
+| `list_sync_issues`, `dismiss_sync_issue`   | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
 
 Events from Rust to the webview:
 
@@ -1406,6 +1409,25 @@ Implementation notes (#12):
   because Rust no longer returns them and the others must not move (design.md §8).
 - The colour menu opens with a right click or the context menu key on a calendar row. It
   offers the ten palette colours, stored as their light value, and "Default colour".
+
+Implementation notes (#15):
+
+- `create_local_calendar(name)` adds a calendar to the `local` source with `access = 'write'`,
+  no colour (the palette colour by id applies) and no time zone (new events take the viewer's).
+  Its `remote_id` is a UUID, only to keep `(source_id, remote_id)` unique. The name is trimmed;
+  an empty one is `invalid_input`. It returns the calendar as `list_calendars` would and sends
+  `calendar:changed`.
+- `update_calendar` also takes `name?`, with the same rule. Only a local calendar can be
+  renamed: a sync rewrites the name of a remote one, so that is `invalid_input`, and nothing of
+  the update is stored.
+- `remove_calendar(calendar)` deletes a local calendar with its events and sends
+  `calendar:changed`. A remote calendar is `invalid_input`: it goes with its source, or the
+  next sync brings it back. The local source itself stays, also when it has no calendars.
+- The sync engine already skips the `local` source: `sync_all` never lists it, and a cycle for
+  it (a manual `sync_now("local")`) ends at once without a status. The outbox (#18) must only
+  queue edits to calendars whose source has a provider, and the event editor (#16) writes local
+  events with `is_organizer = 1` (the column default), so they are always editable.
+- There is no UI for this yet; the event editor (#16) adds it.
 
 ### Logic that does live in the frontend
 
