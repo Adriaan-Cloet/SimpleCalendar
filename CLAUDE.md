@@ -49,7 +49,7 @@ npm run format       # prettier --write
 - `scripts/test-keychain.sh` runs the opt-in tests against a real Secret Service, in throwaway D-Bus sessions (Linux; needs `dbus-run-session` and `gnome-keyring-daemon`).
 - `cargo test -p simplecalendar-core real_feed -- --ignored` fetches a real public feed over HTTPS (needs the network). The other ICS tests use a local `wiremock` server over plain HTTP, so they never exercise TLS.
 - `node scripts/windows-zones.mjs [cldr-tag]` regenerates the Windows zone table (`provider/ics/windows_zones.rs`) from Unicode CLDR.
-- Frontend tests are Vitest, on the Vite config, in Node without a DOM. Only pure functions in `src/lib/` are tested (overlap layout, week placement, occurrence text, week dates, calendar colours, the event form); keep logic out of components. A single test file: `npx vitest run src/lib/overlap-layout.test.ts`.
+- Frontend tests are Vitest, on the Vite config, in Node without a DOM. Only pure functions in `src/lib/` are tested (overlap layout, week placement, occurrence text, week dates, calendar colours, the event form, date and time fields); keep logic out of components. A single test file: `npx vitest run src/lib/overlap-layout.test.ts`.
 - Google sign-in needs an OAuth client: `docs/google-cloud.md`. The build reads `SIMPLECALENDAR_GOOGLE_CLIENT_ID` / `_SECRET` from the environment or the untracked root `.env` (`src-tauri/build.rs`); after creating `.env`, `touch src-tauri/build.rs`.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
 - CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.

@@ -19,6 +19,8 @@
 		type EventForm
 	} from '#lib/event-form.js';
 	import { serviceError } from '#lib/sources.js';
+	import DateField from './DateField.svelte';
+	import TimeField from './TimeField.svelte';
 
 	interface Props {
 		/** The form to start from; a copy is edited */
@@ -47,24 +49,24 @@
 
 	const writable = $derived(calendars.filter((c) => c.editable));
 	const calendar = $derived(writable.find((c) => c.id === form.calendarId));
-	const problem = $derived(formProblem(form));
+	/** Fields whose text cannot be read; the form keeps their last readable value */
+	let unreadable = $state({ startDate: false, startTime: false, endDate: false, endTime: false });
+	const problem = $derived.by(() => {
+		if (unreadable.startDate || unreadable.endDate) {
+			return 'Enter dates as day/month/year, such as 20/10/2026.';
+		}
+		// The time fields are hidden while all-day, and their text no longer counts
+		if (!form.allDay && (unreadable.startTime || unreadable.endTime)) {
+			return 'Enter times on a 24-hour clock, such as 09:30 or 21:30.';
+		}
+		return formProblem(form);
+	});
 
 	// Supported zones from the webview; older engines have no list, and get the two that matter
 	const supported =
 		typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
 	// svelte-ignore state_referenced_locally
 	const zones = zoneOptions(supported, form.timeZone, displayZone);
-
-	// An engine without a date or time picker falls back to a text field; then it says what to
-	// type (design.md §10)
-	const pickers = (() => {
-		const probe = (type: string) => {
-			const input = document.createElement('input');
-			input.setAttribute('type', type);
-			return input.type === type;
-		};
-		return { date: probe('date'), time: probe('time') };
-	})();
 
 	$effect(() => {
 		if (!dialog || dialog.open) return;
@@ -158,22 +160,20 @@
 			<div class="row">
 				<span class="label" id="editor-starts">Starts</span>
 				<div class="when">
-					<input
-						type="date"
-						aria-labelledby="editor-starts"
+					<DateField
+						labelledby="editor-starts"
 						class="date tabular"
 						value={form.startDate}
-						placeholder={pickers.date ? undefined : 'YYYY-MM-DD'}
-						oninput={(e) => (form = withStart(form, e.currentTarget.value, form.startTime))}
+						onvalue={(date) => (form = withStart(form, date, form.startTime))}
+						oninvalid={(bad) => (unreadable.startDate = bad)}
 					/>
 					{#if !form.allDay}
-						<input
-							type="time"
-							aria-label="Start time"
+						<TimeField
+							label="Start time"
 							class="time tabular"
 							value={form.startTime}
-							placeholder={pickers.time ? undefined : 'HH:MM'}
-							oninput={(e) => (form = withStart(form, form.startDate, e.currentTarget.value))}
+							onvalue={(time) => (form = withStart(form, form.startDate, time))}
+							oninvalid={(bad) => (unreadable.startTime = bad)}
 						/>
 					{/if}
 				</div>
@@ -182,20 +182,21 @@
 			<div class="row">
 				<span class="label" id="editor-ends">Ends</span>
 				<div class="when">
-					<input
-						type="date"
-						aria-labelledby="editor-ends"
+					<DateField
+						labelledby="editor-ends"
 						class="date tabular"
-						bind:value={form.endDate}
-						placeholder={pickers.date ? undefined : 'YYYY-MM-DD'}
+						value={form.endDate}
+						onvalue={(date) => (form.endDate = date)}
+						oninvalid={(bad) => (unreadable.endDate = bad)}
 					/>
 					{#if !form.allDay}
-						<input
-							type="time"
-							aria-label="End time"
+						<TimeField
+							label="End time"
+							start={form.endDate === form.startDate ? form.startTime : null}
 							class="time tabular"
-							bind:value={form.endTime}
-							placeholder={pickers.time ? undefined : 'HH:MM'}
+							value={form.endTime}
+							onvalue={(time) => (form.endTime = time)}
+							oninvalid={(bad) => (unreadable.endTime = bad)}
 						/>
 					{/if}
 				</div>
@@ -408,8 +409,7 @@
 		gap: var(--space-xs);
 	}
 
-	input[type='date'],
-	input[type='time'],
+	.when :global(input),
 	select {
 		height: var(--control-height);
 		padding: 0 var(--space-sm);
@@ -420,12 +420,17 @@
 		min-width: 0;
 	}
 
-	.date {
-		flex: 1 1 140px;
+	.when :global(.date) {
+		flex: 1 1 120px;
 	}
 
-	.time {
-		flex: 0 0 120px;
+	.when :global(.time) {
+		flex: 0 0 80px;
+	}
+
+	.when :global(input) {
+		-webkit-user-select: text;
+		user-select: text;
 	}
 
 	select {

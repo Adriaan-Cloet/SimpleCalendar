@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { occurrenceKey, type CalendarInfo, type Occurrence } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
+	import { displayLocale } from '#lib/display-format.js';
 	import { wallClock } from '#lib/occurrence-text.js';
 	import { layoutDay } from '#lib/overlap-layout.js';
 	import { addDays, atMinutes, isSameDay, isoDate, minutesSinceMidnight } from '#lib/week-dates.js';
@@ -45,11 +46,11 @@
 	// An occurrence whose calendar is not listed yet, or hidden in the sidebar
 	const isHidden = (o: Occurrence) => !calendars.get(o.calendar_id)?.visible;
 
-	const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
-	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });
-	const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+	const weekdayFormat = new Intl.DateTimeFormat(displayLocale, { weekday: 'short' });
+	const dayLabel = new Intl.DateTimeFormat(displayLocale, { dateStyle: 'full' });
+	const timeFormat = new Intl.DateTimeFormat(displayLocale, { hour: '2-digit', minute: '2-digit' });
 	// The gutter always uses a 24-hour clock ("08:00"), whatever the locale
-	const gutterFormat = new Intl.DateTimeFormat(undefined, {
+	const gutterFormat = new Intl.DateTimeFormat(displayLocale, {
 		hour: '2-digit',
 		minute: '2-digit',
 		hourCycle: 'h23'

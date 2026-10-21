@@ -137,6 +137,29 @@ Rules:
 - Text that can be long (event titles, calendar names) is one line with an ellipsis, unless the
   space is known to be large enough for more.
 
+### Dates and times
+
+Dates are written day first and times on a 24-hour clock, in English, whatever locale the
+system reports: "Tuesday 20 October", "09:00–10:30", "20/10/2026". Every `Intl` formatter takes
+`displayLocale` (`en-GB`, `src/lib/display-format.ts`), never `undefined`, which would follow the
+system: an Ubuntu installed in English is `en_US`, and the webview then writes "9:00 AM" and
+month-first dates. A setting can replace the constant later.
+
+The native `date` and `time` inputs cannot be told a format: they always follow the system
+locale. The editor uses its own fields instead:
+
+- **Date** (`DateField.svelte`): a text field showing `20/10/2026`. Focusing or clicking it
+  opens a small calendar below it, in the mini month's style: Monday first, always six weeks so it
+  keeps its height, today in red, the chosen day in an `--accent` circle, arrows to change month.
+  A date can still be typed (`20-10-26`, `20.10.2026`, `20/10` for this year) and the calendar
+  follows. Up and down move a week through the calendar, Escape or Enter closes it.
+- **Time** (`TimeField.svelte`): a combobox as in Google Calendar. Focusing or clicking it opens
+  a scrollable menu of quarter hours, scrolled to the current time; arrows move through it, Enter
+  or a click chooses. Any other time can still be typed (`9`, `930`, `21h30`). The end time's
+  menu starts at the start time when both are on one day, and shows each option's length
+  ("45 min", "1 h 30 min"). The menu hangs from the field's right edge, so it stays inside the
+  dialog.
+
 ## 5. Spacing and layout metrics
 
 A 4px base:
@@ -366,7 +389,7 @@ Opened by "New event" in the toolbar, a double click on the grid, or "Edit" in t
 | Title, location | Borderless text on the dialog, headline and secondary grey, so the event reads like a note, not a form     |
 | Rows            | An 88px label column in secondary grey, controls on the right. Groups separated by hairlines               |
 | All-day         | A switch: `--fill-control` track, `--accent` when on, the knob moves with `transform`                      |
-| Dates and times | Native `date` and `time` inputs. Without a picker (older WebKitGTK) they are text fields with a hint       |
+| Dates and times | A date field (`20/10/2026`) and a time menu of quarter hours that also takes a typed time (§4)             |
 | Time zone       | Only for timed events. The zones the webview knows, plus the event's and the viewer's                      |
 | Calendar        | Writable calendars only, with the calendar's colour as a dot                                               |
 | Reminders       | One menu per reminder with a remove button; "Add reminder" below. Google email reminders say "by email"    |
@@ -379,10 +402,7 @@ calendars; deleting asks again below the row, because it takes the events with i
 
 ## 14. Open points
 
-1. **Locale.** The gutter always shows a 24-hour clock ("08:00"). Event times, dates and the
-   popover follow the system locale through `Intl.DateTimeFormat`, so on an English system
-   they still show "9:00 AM". Decide whether the 24-hour choice becomes a setting for all times.
-2. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
+1. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
    it. Until then "Subscriptions" in the sidebar footer cannot be reached in a narrow window.
-3. **Dark mode in the real app.** The engine behaviour is verified (§9). Still to confirm by hand:
+2. **Dark mode in the real app.** The engine behaviour is verified (§9). Still to confirm by hand:
    switching Ubuntu's style while the app runs, and Windows app mode in the CI build.

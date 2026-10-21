@@ -2,6 +2,7 @@
 // which is this computer's zone, so a local `Date` built from the written date and time shows
 // them unchanged. Nothing here converts between zones.
 import type { Occurrence } from './calendar.js';
+import { displayLocale } from './display-format.js';
 
 /** A `YYYY-MM-DD` date or a timed value from Rust as a local `Date`, at the time written */
 export function wallClock(value: string): Date {
@@ -13,7 +14,7 @@ export function wallClock(value: string): Date {
 }
 
 /** The popover's date and time lines, e.g. `['Tuesday 20 October', '09:00–10:30']` */
-export function describeWhen(o: Occurrence, locale?: string): string[] {
+export function describeWhen(o: Occurrence, locale = displayLocale): string[] {
 	const date = new Intl.DateTimeFormat(locale, { weekday: 'long', day: 'numeric', month: 'long' });
 	const start = wallClock(o.start);
 	const end = wallClock(o.end);
@@ -22,7 +23,7 @@ export function describeWhen(o: Occurrence, locale?: string): string[] {
 		const last = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 1);
 		return [date.formatRange(start, last), 'All day'];
 	}
-	const time = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' });
+	const time = new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' });
 	const sameDay =
 		o.start.slice(0, 10) === o.end.slice(0, 10) ||
 		(o.end.slice(11, 16) === '00:00' && end.getTime() - start.getTime() < 86_400_000);
@@ -31,7 +32,7 @@ export function describeWhen(o: Occurrence, locale?: string): string[] {
 		weekday: 'long',
 		day: 'numeric',
 		month: 'long',
-		hour: 'numeric',
+		hour: '2-digit',
 		minute: '2-digit'
 	});
 	return [dateTime.format(start) + ' –', dateTime.format(end)];

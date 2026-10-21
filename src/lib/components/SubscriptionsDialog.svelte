@@ -2,6 +2,7 @@
 	// Add, refresh and remove ICS subscriptions (issue #9) and Google accounts (#13). The feed
 	// address and the Google sign-in token go straight to the keychain in Rust; this dialog only
 	// ever shows the host or the account's address.
+	import { displayLocale } from '#lib/display-format.js';
 	import {
 		addIcsSource,
 		beginGoogleSignIn,
@@ -189,7 +190,7 @@
 		}
 	}
 
-	const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+	const relative = new Intl.RelativeTimeFormat(displayLocale, { numeric: 'auto' });
 
 	function updated(seconds: number): string {
 		const minutes = Math.round((seconds * 1000 - Date.now()) / 60_000);

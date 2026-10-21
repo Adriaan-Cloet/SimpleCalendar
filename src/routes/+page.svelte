@@ -24,6 +24,7 @@
 	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import WeekView from '#lib/components/WeekView.svelte';
+	import { displayLocale } from '#lib/display-format.js';
 	import { keepHidden } from '#lib/keep-hidden.js';
 	import {
 		defaultStart,
@@ -45,7 +46,7 @@
 
 	let weekStart = $state(startOfWeek(new Date()));
 	const title = $derived(
-		new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).formatRange(
+		new Intl.DateTimeFormat(displayLocale, { month: 'long', year: 'numeric' }).formatRange(
 			weekStart,
 			addDays(weekStart, 6)
 		)
