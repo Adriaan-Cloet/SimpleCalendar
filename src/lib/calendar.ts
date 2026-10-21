@@ -1,5 +1,6 @@
 // Calendars and occurrences through the Tauri commands of docs/architecture.md §10. The shapes
-// mirror `simplecalendar_core::service::CalendarInfo` and `simplecalendar_core::model::Occurrence`.
+// mirror `simplecalendar_core::service::{CalendarInfo, CalendarUpdate}` and
+// `simplecalendar_core::model::Occurrence`.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SourceKind } from './sources.js';
@@ -32,6 +33,13 @@ export interface Occurrence {
 	editable: boolean;
 }
 
+/** Fields left out stay as they are */
+export interface CalendarUpdate {
+	visible?: boolean;
+	/** A `#rrggbb` value, or `null` for the provider's colour */
+	color_override?: string | null;
+}
+
 /** Payload of `calendar:changed` */
 export interface CalendarChanged {
 	calendar_ids: number[];
@@ -44,6 +52,9 @@ export const displayZone = () => Intl.DateTimeFormat().resolvedOptions().timeZon
 export const listOccurrences = (from: string, to: string) =>
 	invoke<Occurrence[]>('list_occurrences', { from, to, tz: displayZone() });
 export const listCalendars = () => invoke<CalendarInfo[]>('list_calendars');
+/** Returns the calendar as it is now; `calendar:changed` follows */
+export const updateCalendar = (calendar: number, update: CalendarUpdate) =>
+	invoke<CalendarInfo>('update_calendar', { calendar, update });
 
 export const onCalendarChanged = (
 	handler: (changed: CalendarChanged) => void

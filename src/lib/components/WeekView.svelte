@@ -13,14 +13,12 @@
 		calendars: Map<number, CalendarInfo>;
 		/** The week's occurrences from `list_occurrences`, sorted by start */
 		occurrences: Occurrence[];
-		visible: Record<number, boolean>;
 		selectedKey: string | null;
 		onselect: (key: string, anchor: HTMLElement) => void;
 		onscroll: () => void;
 	}
 
-	let { weekStart, now, calendars, occurrences, visible, selectedKey, onselect, onscroll }: Props =
-		$props();
+	let { weekStart, now, calendars, occurrences, selectedKey, onselect, onscroll }: Props = $props();
 
 	const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)));
 	const todayIndex = $derived(days.findIndex((day) => isSameDay(day, now)));
@@ -42,7 +40,7 @@
 	);
 
 	// An occurrence whose calendar is not listed yet, or hidden in the sidebar
-	const isHidden = (o: Occurrence) => !calendars.has(o.calendar_id) || !visible[o.calendar_id];
+	const isHidden = (o: Occurrence) => !calendars.get(o.calendar_id)?.visible;
 
 	const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
 	const dayLabel = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' });

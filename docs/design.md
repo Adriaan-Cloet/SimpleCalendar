@@ -205,7 +205,8 @@ Nothing in the week grid has a shadow. Depth is reserved for things that float a
 - Only `opacity` and `transform` animate. Both are cheap in both engines, also when WebKitGTK
   runs without GPU compositing.
 - A popover grows from 96% to 100% scale while fading in, from the side that faces its event.
-- Hiding a calendar fades its events out. They keep their place, so nothing else jumps.
+- Hiding a calendar fades its events out. They keep their place, so nothing else jumps, until
+  the user moves to another week.
 - `prefers-reduced-motion: reduce` sets all durations to `0ms`, in one place in `tokens.css`.
   WebKitGTK reports it when GNOME animations are off, WebView2 when Windows animations are off.
 

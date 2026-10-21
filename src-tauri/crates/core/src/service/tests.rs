@@ -249,7 +249,7 @@ async fn removing_a_source_removes_its_data_and_its_secret() {
 async fn removing_an_unknown_source_is_not_found() {
     let s = setup();
     let err = s.service.remove_source("nope").await.unwrap_err();
-    assert!(matches!(err, ServiceError::NotFound), "{err:?}");
+    assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -308,6 +308,109 @@ async fn calendars_are_listed_per_source_with_their_resolved_colour() {
     assert_eq!(calendars[1].color, None);
     assert_eq!(calendars[3].color.as_deref(), Some("#111111"));
     assert!(!calendars[3].editable);
+}
+
+fn update(json: serde_json::Value) -> CalendarUpdate {
+    serde_json::from_value(json).unwrap()
+}
+
+#[tokio::test]
+async fn hiding_a_calendar_hides_its_occurrences_and_says_it_changed() {
+    let mut s = setup();
+    timed_events(&s, &[instant(chrono_tz::UTC, 2026, 10, 20, 9, 0)]).await;
+    let id = s.service.list_calendars().await.unwrap()[0].id;
+    let week = || {
+        s.service
+            .list_occurrences("2026-10-19", "2026-10-26", "UTC")
+    };
+    assert_eq!(week().await.unwrap().len(), 1);
+    while s.events.try_recv().is_ok() {}
+
+    let hidden = s
+        .service
+        .update_calendar(id, update(serde_json::json!({"visible": false})))
+        .await
+        .unwrap();
+
+    assert!(!hidden.visible);
+    assert_eq!(week().await.unwrap(), vec![]);
+    assert_eq!(
+        s.events.try_recv().unwrap(),
+        CoreEvent::CalendarChanged {
+            calendar_ids: vec![id]
+        }
+    );
+
+    s.service
+        .update_calendar(id, update(serde_json::json!({"visible": true})))
+        .await
+        .unwrap();
+    assert_eq!(week().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_colour_override_wins_and_null_clears_it() {
+    let s = setup();
+    timed_events(&s, &[instant(chrono_tz::UTC, 2026, 10, 20, 9, 0)]).await;
+    let id = s.service.list_calendars().await.unwrap()[0].id;
+    s.db.write(move |c| c.execute("UPDATE calendars SET color = '#123456' WHERE id = ?1", [id]))
+        .await
+        .unwrap();
+    let colour = || async {
+        let week = s
+            .service
+            .list_occurrences("2026-10-19", "2026-10-26", "UTC")
+            .await
+            .unwrap();
+        week[0].color.clone()
+    };
+
+    let changed = s
+        .service
+        .update_calendar(id, update(serde_json::json!({"color_override": "#FF9500"})))
+        .await
+        .unwrap();
+    assert_eq!(changed.color.as_deref(), Some("#ff9500"));
+    assert!(changed.visible, "a field that is left out stays as it was");
+    assert_eq!(colour().await.as_deref(), Some("#ff9500"));
+
+    let cleared = s
+        .service
+        .update_calendar(id, update(serde_json::json!({"color_override": null})))
+        .await
+        .unwrap();
+    assert_eq!(cleared.color.as_deref(), Some("#123456"));
+    assert_eq!(colour().await.as_deref(), Some("#123456"));
+}
+
+#[tokio::test]
+async fn a_colour_that_is_not_rrggbb_is_invalid_input() {
+    let s = setup();
+    timed_events(&s, &[]).await;
+    let id = s.service.list_calendars().await.unwrap()[0].id;
+    for bad in ["blue", "#fff", "#12345g", "123456", "#1234567", ""] {
+        let err = s
+            .service
+            .update_calendar(id, update(serde_json::json!({"color_override": bad})))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ServiceError::InvalidInput(_)),
+            "{bad}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn updating_a_calendar_that_does_not_exist_is_not_found() {
+    let mut s = setup();
+    let err = s
+        .service
+        .update_calendar(42, update(serde_json::json!({"visible": false})))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
+    assert!(s.events.try_recv().is_err());
 }
 
 // ---- occurrences ---------------------------------------------------------------------------
@@ -468,7 +571,10 @@ fn errors_serialise_with_a_kind_and_a_message() {
         json(ServiceError::InvalidInput("Enter an address.".into())),
         serde_json::json!({"kind": "invalid_input", "message": "Enter an address."})
     );
-    assert_eq!(json(ServiceError::NotFound)["kind"], "not_found");
+    assert_eq!(
+        json(ServiceError::NotFound(SOURCE_GONE))["kind"],
+        "not_found"
+    );
     let locked = json(ServiceError::SecretsUnavailable(SecretsUnavailable {
         reason: UnavailableReason::Locked,
     }));

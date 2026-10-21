@@ -1,7 +1,7 @@
 # Roadmap
 
-Status: in progress. Done: #2, #3, #4, #5, #6, #7, #8, #9, #10.
-Last updated: 2026-10-20.
+Status: in progress. Done: #2, #3, #4, #5, #6, #7, #8, #9, #10, #11, #12.
+Last updated: 2026-10-21.
 
 This document splits v1 into versions. Each version is a GitHub milestone, and each feature in it
 is an issue with acceptance criteria. How the features are built is described in
