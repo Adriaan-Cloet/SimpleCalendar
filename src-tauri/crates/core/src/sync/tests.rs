@@ -1216,8 +1216,14 @@ async fn sync_all_syncs_every_remote_source_and_skips_local_ones() {
     h.local_calendar().await;
 
     h.handle.sync_all();
-    h.finished("src-1").await;
-    h.finished("src-2").await;
+    // Both cycles run at once and can finish in either order. Waiting for one records the
+    // other's end if it comes first, and that one must not be waited for again.
+    for source in ["src-1", "src-2"] {
+        let done = |s: &SyncStatus| s.source_id == source && s.state != SyncState::Syncing;
+        if !h.statuses.iter().any(done) {
+            h.finished(source).await;
+        }
+    }
 
     let mut sources: Vec<_> = h.pulls_so_far().into_iter().map(|p| p.source_id).collect();
     sources.sort();
