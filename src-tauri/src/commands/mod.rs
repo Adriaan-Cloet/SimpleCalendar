@@ -102,13 +102,13 @@ pub async fn remove_calendar(
     service.remove_calendar(calendar).await
 }
 
-/// One event in full, for the editor and the popover.
+/// One event or occurrence in full, for the editor and the popover.
 #[tauri::command]
 pub async fn get_event(
     service: State<'_, CalendarService>,
-    event: i64,
+    target: OccurrenceRef,
 ) -> Result<EventDetail, ServiceError> {
-    service.get_event(event).await
+    service.get_event(target).await
 }
 
 /// Creates an event and returns its occurrence, with times in the IANA zone `tz`.
@@ -121,7 +121,8 @@ pub async fn create_event(
     service.create_event(draft, &tz).await
 }
 
-/// Replaces an event with `draft` and returns its occurrence, with times in the zone `tz`.
+/// Replaces an event, or one or all occurrences of a series, with `draft`. Returns the changed
+/// occurrence with times in the zone `tz`, or `null` if the series no longer has it.
 #[tauri::command]
 pub async fn update_event(
     service: State<'_, CalendarService>,
@@ -129,11 +130,11 @@ pub async fn update_event(
     scope: Scope,
     draft: EventDraft,
     tz: String,
-) -> Result<Occurrence, ServiceError> {
+) -> Result<Option<Occurrence>, ServiceError> {
     service.update_event(target, scope, draft, &tz).await
 }
 
-/// Deletes an event.
+/// Deletes an event, or one or all occurrences of a series.
 #[tauri::command]
 pub async fn delete_event(
     service: State<'_, CalendarService>,

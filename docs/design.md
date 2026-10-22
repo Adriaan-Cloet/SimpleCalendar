@@ -308,6 +308,7 @@ the Windows build from CI.
 | Read-only event     | Looks like any other event in the grid. The popover says why it cannot be edited, the sidebar shows a lock     |
 | Popover             | Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right, accent)          |
 | Delete              | Asks again in the popover footer: "Delete this event?" with "Cancel" and a red "Delete"                        |
+| Repeating event     | A line such as "Every week until 31 December 2026" under the time. Delete asks "This event" or "All events"    |
 | Double click        | On an empty spot: a new event at that half hour; on the all-day row an all-day event                           |
 
 ### Overlapping events
@@ -373,6 +374,8 @@ Opened by "New event" in the toolbar, a double click on the grid, or "Edit" in t
 │ Starts      [2026-10-20 ▾] [09:00]      │
 │ Ends        [2026-10-20 ▾] [10:00]      │
 │ Time zone   [Europe/Brussels       ▾]   │
+│ Repeat      [Every week            ▾]   │
+│ End repeat  [On date ▾] [31/12/2026  ]  │
 ├─────────────────────────────────────────┤
 │ Calendar    ● [Personal            ▾]   │
 │ Reminders   [30 minutes before ▾]  ×    │
@@ -383,18 +386,21 @@ Opened by "New event" in the toolbar, a double click on the grid, or "Edit" in t
 └─────────────────────────────────────────┘
 ```
 
-| Element         | Look                                                                                                       |
-| --------------- | ---------------------------------------------------------------------------------------------------------- |
-| Dialog          | 440px wide, otherwise as the Accounts dialog (§12)                                                         |
-| Title, location | Borderless text on the dialog, headline and secondary grey, so the event reads like a note, not a form     |
-| Rows            | An 88px label column in secondary grey, controls on the right. Groups separated by hairlines               |
-| All-day         | A switch: `--fill-control` track, `--accent` when on, the knob moves with `transform`                      |
-| Dates and times | A date field (`20/10/2026`) and a time menu of quarter hours that also takes a typed time (§4)             |
-| Time zone       | Only for timed events. The zones the webview knows, plus the event's and the viewer's                      |
-| Calendar        | Writable calendars only, with the calendar's colour as a dot                                               |
-| Reminders       | One menu per reminder with a remove button; "Add reminder" below. Google email reminders say "by email"    |
-| Problems        | An end before the start disables "Save" and says so in `--danger`; errors from Rust show in the same place |
-| Footer          | Quiet "Cancel", primary "Add" for a new event or "Save"                                                    |
+| Element         | Look                                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dialog          | 440px wide, otherwise as the Accounts dialog (§12)                                                                                                |
+| Title, location | Borderless text on the dialog, headline and secondary grey, so the event reads like a note, not a form                                            |
+| Rows            | An 88px label column in secondary grey, controls on the right. Groups separated by hairlines                                                      |
+| All-day         | A switch: `--fill-control` track, `--accent` when on, the knob moves with `transform`                                                             |
+| Dates and times | A date field (`20/10/2026`) and a time menu of quarter hours that also takes a typed time (§4)                                                    |
+| Time zone       | Only for timed events. The zones the webview knows, plus the event's and the viewer's                                                             |
+| Repeat          | Never, every day, week, month or year. "Custom" only for a rule from elsewhere, which is kept as it is                                            |
+| End repeat      | Only while it repeats: "Never" or "On date" with a date field, a month after the start by default                                                 |
+| Repeating event | "Save" asks in the footer, on a line above the answers: "This event" or primary "All events"; only the latter when the repeat or calendar changed |
+| Calendar        | Writable calendars only, with the calendar's colour as a dot                                                                                      |
+| Reminders       | One menu per reminder with a remove button; "Add reminder" below. Google email reminders say "by email"                                           |
+| Problems        | An end before the start disables "Save" and says so in `--danger`; errors from Rust show in the same place                                        |
+| Footer          | Quiet "Cancel", primary "Add" for a new event or "Save"                                                                                           |
 
 The sidebar's "On this computer" group has a "+" that adds a local calendar by name, in place.
 The calendar menu (right click) adds "Rename…" and a red "Delete calendar…" for local

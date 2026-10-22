@@ -8,8 +8,10 @@ import {
 	newEventForm,
 	reminderChoices,
 	reminderLabel,
+	saveScopes,
 	shiftDate,
 	withAllDay,
+	withRepeatEnd,
 	withStart,
 	zoneOptions,
 	type EventForm
@@ -28,6 +30,8 @@ const form = (changes: Partial<EventForm> = {}): EventForm => ({
 	timeZone: 'Europe/Brussels',
 	useDefaultReminders: false,
 	reminders: [],
+	repeat: 'never',
+	repeatUntil: null,
 	...changes
 });
 
@@ -44,7 +48,7 @@ const detail = (changes: Partial<EventDetail> = {}): EventDetail => ({
 	use_default_reminders: false,
 	reminders: [{ minutes_before: 10, method: 'popup' }],
 	editable: true,
-	recurring: false,
+	repeat: null,
 	...changes
 });
 
@@ -66,7 +70,9 @@ describe('newEventForm', () => {
 			endTime: '00:30',
 			timeZone: 'Europe/Brussels',
 			useDefaultReminders: false,
-			reminders: []
+			reminders: [],
+			repeat: 'never',
+			repeatUntil: null
 		});
 	});
 
@@ -102,7 +108,9 @@ describe('formFromEvent and draftFromForm', () => {
 			endTime: '13:15',
 			timeZone: 'Asia/Tokyo',
 			useDefaultReminders: false,
-			reminders: [{ minutes_before: 10, method: 'popup' }]
+			reminders: [{ minutes_before: 10, method: 'popup' }],
+			repeat: 'never',
+			repeatUntil: null
 		});
 		expect(draftFromForm(f)).toEqual({
 			calendar_id: 2,
@@ -114,7 +122,8 @@ describe('formFromEvent and draftFromForm', () => {
 			end: '2026-10-21T13:15',
 			time_zone: 'Asia/Tokyo',
 			use_default_reminders: false,
-			reminders: [{ minutes_before: 10, method: 'popup' }]
+			reminders: [{ minutes_before: 10, method: 'popup' }],
+			repeat: null
 		});
 	});
 
@@ -148,6 +157,67 @@ describe('formFromEvent and draftFromForm', () => {
 		const d = draftFromForm(form({ location: '  ', notes: '' }));
 		expect(d.location).toBeNull();
 		expect(d.description).toBeNull();
+	});
+});
+
+describe('repeat', () => {
+	it('reads the rule of a series, and a single event as never', () => {
+		const weekly = detail({ repeat: { frequency: 'weekly', until: '2026-12-31' } });
+		expect(formFromEvent(weekly, 'UTC')).toMatchObject({
+			repeat: 'weekly',
+			repeatUntil: '2026-12-31'
+		});
+		expect(formFromEvent(detail(), 'UTC')).toMatchObject({ repeat: 'never', repeatUntil: null });
+	});
+
+	it('sends the rule, and no end for a custom one', () => {
+		const until = '2027-01-20';
+		expect(draftFromForm(form({ repeat: 'monthly', repeatUntil: until })).repeat).toEqual({
+			frequency: 'monthly',
+			until
+		});
+		expect(draftFromForm(form({ repeat: 'daily' })).repeat).toEqual({
+			frequency: 'daily',
+			until: null
+		});
+		expect(draftFromForm(form({ repeat: 'custom', repeatUntil: until })).repeat).toEqual({
+			frequency: 'custom',
+			until: null
+		});
+		expect(draftFromForm(form({ repeat: 'never', repeatUntil: until })).repeat).toBeNull();
+	});
+
+	it('refuses an end before the first day, and ignores it when nothing repeats', () => {
+		expect(formProblem(form({ repeat: 'daily', repeatUntil: '2026-10-19' }))).toMatch(/repeat/);
+		expect(formProblem(form({ repeat: 'daily', repeatUntil: '2026-10-20' }))).toBeNull();
+		expect(formProblem(form({ repeat: 'never', repeatUntil: '2026-10-19' }))).toBeNull();
+		expect(formProblem(form({ repeat: 'custom', repeatUntil: '2026-10-19' }))).toBeNull();
+	});
+
+	it('ends a month after the start when an end is chosen', () => {
+		expect(withRepeatEnd(form(), true).repeatUntil).toBe('2026-11-20');
+		// There is no 31 February: the last day of that month instead
+		expect(withRepeatEnd(form({ startDate: '2027-01-31' }), true).repeatUntil).toBe('2027-02-28');
+		expect(withRepeatEnd(form({ repeatUntil: '2026-12-01' }), true).repeatUntil).toBe('2026-12-01');
+		expect(withRepeatEnd(form({ repeatUntil: '2026-12-01' }), false).repeatUntil).toBeNull();
+	});
+});
+
+describe('saveScopes', () => {
+	const series = form({ repeat: 'weekly' });
+
+	it('offers this event or all events for a change to one occurrence', () => {
+		expect(saveScopes(series, { ...series, title: 'Retro', startTime: '11:00' })).toEqual([
+			'this',
+			'all'
+		]);
+	});
+
+	it('offers only all events when the repeat or the calendar changes', () => {
+		expect(saveScopes(series, { ...series, repeat: 'daily' })).toEqual(['all']);
+		expect(saveScopes(series, { ...series, repeatUntil: '2026-12-31' })).toEqual(['all']);
+		expect(saveScopes(series, { ...series, repeat: 'never' })).toEqual(['all']);
+		expect(saveScopes(series, { ...series, calendarId: 5 })).toEqual(['all']);
 	});
 });
 

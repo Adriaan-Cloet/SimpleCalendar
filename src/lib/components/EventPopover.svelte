@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import type { CalendarInfo } from '#lib/calendar.js';
+	import type { CalendarInfo, Scope } from '#lib/calendar.js';
 
 	export interface EventDetails {
 		title: string;
@@ -7,9 +7,10 @@
 		/** The event's own colour, else its calendar's */
 		color: string | null;
 		editable: boolean;
-		/** A series or one of its occurrences: not changeable yet (#17) */
-		recurring: boolean;
-		/** One line per entry, e.g. the date and the time range */
+		/** An occurrence of a series: deleting asks whether this event or all. `null` while the
+		 * event is still being read, which keeps "Delete" off: for a single event it deletes all. */
+		recurring: boolean | null;
+		/** One line per entry, e.g. the date, the time range and how it repeats */
 		when: string[];
 		location?: string;
 		/** Plain text from `get_event`; shown as text, never as HTML */
@@ -26,8 +27,8 @@
 		anchor: HTMLElement;
 		onclose: () => void;
 		onedit: () => void;
-		/** Deletes the event; rejects with a `ServiceError` */
-		ondelete: () => Promise<void>;
+		/** Deletes the event, or for a series this occurrence or all; rejects with a `ServiceError` */
+		ondelete: (scope: Scope) => Promise<void>;
 	}
 
 	let { details, anchor, onclose, onedit, ondelete }: Props = $props();
@@ -37,12 +38,12 @@
 	let deleting = $state(false);
 	let error = $state<string | null>(null);
 
-	async function remove() {
+	async function remove(scope: Scope) {
 		if (deleting) return;
 		deleting = true;
 		error = null;
 		try {
-			await ondelete();
+			await ondelete(scope);
 		} catch (e) {
 			error = serviceError(e).message;
 			deleting = false;
@@ -90,7 +91,6 @@
 	}
 
 	const readOnlyReason = $derived.by(() => {
-		if (details.editable && details.recurring) return 'Repeating events can’t be changed yet.';
 		if (details.calendar.source_kind === 'ics') return 'Subscribed calendars can’t be edited.';
 		if (details.calendar.editable) return 'Only the organiser can change this event.';
 		return 'You can view this calendar but not change it.';
@@ -133,16 +133,47 @@
 	{/if}
 
 	<footer>
-		{#if details.editable && !details.recurring && confirming}
+		{#if details.editable && details.recurring && confirming}
+			<p class="confirm own-line">Delete only this event, or all events in the series?</p>
+			<button type="button" class="button quiet" onclick={() => (confirming = false)}>
+				Cancel
+			</button>
+			<button
+				type="button"
+				class="button danger-strong"
+				disabled={deleting}
+				onclick={() => remove('this')}
+			>
+				This event
+			</button>
+			<button
+				type="button"
+				class="button danger-strong"
+				disabled={deleting}
+				onclick={() => remove('all')}
+			>
+				All events
+			</button>
+		{:else if details.editable && confirming}
 			<p class="confirm">Delete this event?</p>
 			<button type="button" class="button quiet" onclick={() => (confirming = false)}>
 				Cancel
 			</button>
-			<button type="button" class="button danger-strong" disabled={deleting} onclick={remove}>
+			<button
+				type="button"
+				class="button danger-strong"
+				disabled={deleting}
+				onclick={() => remove('all')}
+			>
 				Delete
 			</button>
-		{:else if details.editable && !details.recurring}
-			<button type="button" class="button danger" onclick={() => (confirming = true)}>
+		{:else if details.editable}
+			<button
+				type="button"
+				class="button danger"
+				disabled={details.recurring === null}
+				onclick={() => (confirming = true)}
+			>
 				Delete
 			</button>
 			<button type="button" class="button primary" onclick={onedit}>Edit</button>
@@ -244,8 +275,14 @@
 		align-self: center;
 	}
 
+	/* A longer question goes above its answers */
+	.confirm.own-line {
+		flex-basis: 100%;
+	}
+
 	footer {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: flex-end;
 		gap: var(--space-sm);
 		margin-top: var(--space-lg);

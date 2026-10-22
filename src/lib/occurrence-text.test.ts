@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Occurrence } from './calendar.js';
-import { describeWhen, wallClock } from './occurrence-text.js';
+import { describeRepeat, describeWhen, wallClock } from './occurrence-text.js';
 
 function occ(start: string, end: string): Occurrence {
 	return {
@@ -56,5 +56,21 @@ describe('describeWhen', () => {
 	it('gives the days of an all-day occurrence, the end being exclusive', () => {
 		expect(when(occ('2026-10-20', '2026-10-21'))).toEqual(['Tuesday 20 October', 'All day']);
 		expect(when(occ('2026-10-20', '2026-10-23'))[0]).toMatch(/^Tuesday 20 .*Thursday 22 October$/);
+	});
+});
+
+describe('describeRepeat', () => {
+	it('names how often, and the last day if there is one', () => {
+		expect(describeRepeat({ frequency: 'daily', until: null }, 'en-GB')).toBe('Every day');
+		expect(describeRepeat({ frequency: 'yearly', until: null }, 'en-GB')).toBe('Every year');
+		expect(describeRepeat({ frequency: 'weekly', until: '2026-12-31' }, 'en-GB')).toBe(
+			'Every week until 31 December 2026'
+		);
+	});
+
+	it('says a rule it cannot show repeats', () => {
+		expect(describeRepeat({ frequency: 'custom', until: null }, 'en-GB')).toBe(
+			'Repeats on a custom schedule'
+		);
 	});
 });

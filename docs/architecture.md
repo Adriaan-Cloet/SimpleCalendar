@@ -1315,7 +1315,7 @@ Commands (all async, all return `Result`):
 | `list_calendars`, `update_calendar`        | Visibility and colour override                                | v0.1, ICS subscriptions |
 | `create_local_calendar`, `remove_calendar` | New calendar in the local source; delete a local one          | v0.2, local calendars   |
 | `list_occurrences(from, to, tz)`           | Everything the views render                                   | v0.1, ICS subscriptions |
-| `get_event(event_id)`                      | Full detail for the editor                                    | v0.2, local calendars   |
+| `get_event(target)`                        | Full detail of an event or occurrence, for the editor         | v0.2, local calendars   |
 | `create_event(draft, tz)`                  | Returns the new occurrence                                    | v0.2, local calendars   |
 | `update_event(target, scope, draft, tz)`   | `scope` is `this` or `all`                                    | v0.2, local calendars   |
 | `delete_event(target, scope)`              |                                                               | v0.2, local calendars   |
@@ -1455,7 +1455,7 @@ Implementation notes (#16):
   check with the outbox row. An event can move between local calendars by its `calendar_id`.
 - **A series is not written yet.** `scope` is accepted, but a master or an exception is
   `invalid_input` for update and delete until #17. Nothing in v0.2 so far can create one in a
-  writable calendar.
+  writable calendar. (#17 replaced this; see below.)
 - New events get `remote_id` = a v4 UUID in hex (§7.3), `is_organizer = 1` by the column
   default, and no `ical_uid`. `calendar:changed` names the calendar, and on a move both.
 - New error kind: `not_editable`.
@@ -1466,6 +1466,44 @@ Implementation notes (#16):
   click on the grid starts it at that half hour, on the all-day row as an all-day event.
 - Without a writable calendar the editor offers "Personal", and saving creates that local
   calendar first. The sidebar's local group adds, renames and deletes local calendars.
+
+Implementation notes (#17):
+
+- **Repeat.** A draft carries `repeat: {frequency, until} | null`. `frequency` is `daily`,
+  `weekly`, `monthly` or `yearly`, written as `RRULE:FREQ=…` with an optional `UNTIL` in the
+  form RFC 5545 asks for next to the start (a date for all-day, else the last second of that
+  day in the event's zone, in UTC). `until` is the last day, inclusive, and may not lie before
+  the first. `recurrence::rule::SimpleRule` writes and reads these rules. Any other rule (an
+  interval, chosen weekdays, a count, `RDATE`/`EXDATE`) reads as `custom`; a draft with
+  `custom` keeps the series' rule, and a new event cannot have one. A single event becomes a
+  series by saving it with a repeat.
+- `get_event(target)` takes an occurrence. For a series it returns that occurrence's values
+  (the exception's, else the series' at that date) with the series' `repeat`; `id` is the
+  series. A single event ignores `original_start`. An occurrence the rule does not produce, or
+  one that was deleted, is `not_found`. `recurring` is gone: `repeat` is `null` for a single
+  event.
+- **`this`** (`service/series.rs`) creates or updates the exception for `original_start` and
+  writes the draft to it. Deleting makes it `cancelled`, or adds a cancelled exception. The rule
+  and the calendar belong to the series, so a draft that changes either is `invalid_input`;
+  the editor offers only "All events" then. A new exception gets a random `remote_id`: the
+  outbox (#18) can name the Google instance from `recurring_remote_id` and
+  `original_start_utc`, and a name built from the start would collide once the series moves.
+- **`all`** changes the master. The form shows one occurrence (the "base"), so a change is read
+  against it. A field that changed goes to the master and to every exception that still had the
+  master's value; an exception keeps what it changed itself, and the calendar always follows.
+  The start moves by the same wall-clock amount as the base did, in the series' zone, so
+  09:00 → 10:00 stays 10:00 after DST changes; the length changes by as much as the base's.
+  Exceptions move along (start and `original_start_utc`), so they stay linked. A new rule, or a
+  change between all-day and timed or to another zone, drops the exceptions, as Google does.
+  Saving without a repeat makes the series the single event in the form. Deleting with `all`
+  removes the series and its exceptions (`ON DELETE CASCADE`).
+- `update_event` returns the changed occurrence, or `null` when after `all` the rule no longer
+  produces it (weekly to monthly, say); the frontend then stays on the week.
+- Editability is checked on the series for both scopes, as for a single event.
+- The editor (design.md §13) has "Repeat" and "End repeat" rows. Saving a changed occurrence asks
+  "This event" or "All events" in the footer, or only "All events" when the repeat or calendar
+  changed (`saveScopes`, `src/lib/event-form.ts`). The popover adds a line such as "Every week
+  until 31 December 2026" and asks the same when deleting.
 
 ### Logic that does live in the frontend
 

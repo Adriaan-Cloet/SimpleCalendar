@@ -10,7 +10,7 @@ mod tests;
 use std::collections::HashSet;
 
 use chrono_tz::Tz;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
 use crate::model::{Occurrence, TimeKind};
 use crate::recurrence::{self, Series};
@@ -64,12 +64,9 @@ pub fn list_occurrences(
     let mut singles = conn.prepare(&format!("SELECT {COLUMNS} {SINGLES}"))?;
     for row in singles.query_map(params![wide_from, wide_to], EventRow::read)? {
         let row = row?;
-        found.push(Found {
-            event_id: row.recurring_event_id.unwrap_or(row.id),
-            original_start: row.original_start.unwrap_or(row.start),
-            start: row.start,
-            end: row.end,
-            row,
+        found.push(match row.recurring_event_id {
+            Some(_) => Found::exception(row),
+            None => Found::single(row),
         });
     }
 
@@ -118,33 +115,66 @@ pub fn list_occurrences(
         .collect())
 }
 
-/// The occurrence of the single event `event_id` in the `viewer` zone, also when its calendar
-/// is hidden. `None` if there is no such event, or it belongs to a series.
-pub fn single_occurrence(
+/// One occurrence in the `viewer` zone, also when its calendar is hidden: the single event
+/// `event_id` (whatever `original_start` says), or the occurrence of series `event_id` that the
+/// rule produced at `original_start`, as an exception replaced it if one did. `None` if there is
+/// no such event or occurrence, or it was deleted.
+pub fn occurrence(
     conn: &Connection,
     event_id: i64,
+    original_start: i64,
     viewer: Tz,
 ) -> rusqlite::Result<Option<Occurrence>> {
-    let row = conn
-        .query_row(
+    let select = |condition: &str, values: &[i64]| {
+        conn.query_row(
             &format!(
                 "SELECT {COLUMNS} FROM events e JOIN calendars c ON c.id = e.calendar_id
-                 WHERE e.id = ?1 AND e.recurrence IS NULL AND e.recurring_remote_id IS NULL"
+                 WHERE e.status <> 'cancelled' AND {condition}"
             ),
-            [event_id],
+            params_from_iter(values),
             EventRow::read,
         )
+        .optional()
+    };
+    let Some(row) = select("e.id = ?1 AND e.recurring_remote_id IS NULL", &[event_id])? else {
+        return Ok(None);
+    };
+    if row.recurrence.is_none() {
+        return Ok(Some(Found::single(row).into_occurrence(viewer)));
+    }
+
+    let replaced: Option<bool> = conn
+        .query_row(
+            "SELECT status = 'cancelled' FROM events
+             WHERE recurring_event_id = ?1 AND original_start_utc = ?2",
+            [event_id, original_start],
+            |r| r.get(0),
+        )
         .optional()?;
-    Ok(row.map(|row| {
-        Found {
-            event_id: row.id,
-            original_start: row.start,
-            start: row.start,
-            end: row.end,
-            row,
+    let found = match replaced {
+        Some(true) => None,
+        Some(false) => select(
+            "e.recurring_event_id = ?1 AND e.original_start_utc = ?2",
+            &[event_id, original_start],
+        )?
+        .map(Found::exception),
+        None => {
+            let series = Series {
+                start: row.start,
+                duration: row.end - row.start,
+                kind: row.kind,
+                recurrence: row.recurrence.as_deref().unwrap_or_default(),
+            };
+            recurrence::produces(&series, original_start).then(|| Found {
+                event_id,
+                original_start,
+                start: original_start,
+                end: original_start + series.duration,
+                row: row.clone(),
+            })
         }
-        .into_occurrence(viewer)
-    }))
+    };
+    Ok(found.map(|f| f.into_occurrence(viewer)))
 }
 
 /// The stored starts of a series in the range, or only its first one if the recurrence cannot
@@ -211,6 +241,27 @@ struct Found {
 }
 
 impl Found {
+    fn single(row: EventRow) -> Found {
+        Found {
+            event_id: row.id,
+            original_start: row.start,
+            start: row.start,
+            end: row.end,
+            row,
+        }
+    }
+
+    /// A linked exception: the occurrence of its series that it replaces.
+    fn exception(row: EventRow) -> Found {
+        Found {
+            event_id: row.recurring_event_id.unwrap_or(row.id),
+            original_start: row.original_start.unwrap_or(row.start),
+            start: row.start,
+            end: row.end,
+            row,
+        }
+    }
+
     fn into_occurrence(self, viewer: Tz) -> Occurrence {
         let kind = self.row.kind;
         Occurrence {

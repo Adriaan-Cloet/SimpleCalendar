@@ -9,6 +9,7 @@ use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
 mod events;
+mod series;
 
 const FEED: &str = "https://calendar.example.com/private/abc123token/basic.ics";
 

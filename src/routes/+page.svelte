@@ -16,7 +16,8 @@
 		type CalendarInfo,
 		type EventDetail,
 		type Occurrence,
-		type OccurrenceRef
+		type OccurrenceRef,
+		type Scope
 	} from '#lib/calendar.js';
 	import EventEditor, { NEW_LOCAL_CALENDAR } from '#lib/components/EventEditor.svelte';
 	import EventPopover, { type EventDetails } from '#lib/components/EventPopover.svelte';
@@ -33,7 +34,7 @@
 		newEventForm,
 		type EventForm
 	} from '#lib/event-form.js';
-	import { describeWhen, wallClock } from '#lib/occurrence-text.js';
+	import { describeRepeat, describeWhen, wallClock } from '#lib/occurrence-text.js';
 	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
 
 	let now = $state(new Date());
@@ -129,7 +130,7 @@
 		selectedEvent = null;
 		if (!occurrence) return;
 		let current = true;
-		getEvent(occurrence.event_id)
+		getEvent(occurrence)
 			.then((event) => {
 				if (current) selectedEvent = event;
 			})
@@ -148,15 +149,21 @@
 			calendar,
 			color: occurrence.color,
 			editable: occurrence.editable,
-			recurring: selectedEvent?.recurring ?? false,
-			when: describeWhen(occurrence),
+			recurring: selectedEvent ? selectedEvent.repeat !== null : null,
+			when: [
+				...describeWhen(occurrence),
+				...(selectedEvent?.repeat ? [describeRepeat(selectedEvent.repeat)] : [])
+			],
 			location: occurrence.location ?? undefined,
 			notes: selectedEvent?.description ?? undefined
 		};
 	});
 
-	/** The editor, when open: its starting form, and the occurrence it changes */
-	let editing = $state<{ form: EventForm; target: OccurrenceRef | null } | null>(null);
+	/** The editor, when open: its starting form, the occurrence it changes, and whether that is
+	 * one of a series */
+	let editing = $state<{ form: EventForm; target: OccurrenceRef | null; series: boolean } | null>(
+		null
+	);
 	/** The local calendar a save in this editor already created, so a retry does not add another */
 	let createdCalendar: number | null = null;
 
@@ -173,7 +180,8 @@
 				allDay,
 				timeZone: displayZone()
 			}),
-			target: null
+			target: null,
+			series: false
 		};
 	}
 
@@ -181,15 +189,20 @@
 		if (!selectedOccurrence) return;
 		const { event_id, original_start } = selectedOccurrence;
 		try {
-			const event = selectedEvent ?? (await getEvent(event_id));
-			editing = { form: formFromEvent(event, displayZone()), target: { event_id, original_start } };
+			const target = { event_id, original_start };
+			const event = selectedEvent ?? (await getEvent(target));
+			editing = {
+				form: formFromEvent(event, displayZone()),
+				target,
+				series: event.repeat !== null
+			};
 			close();
 		} catch (e) {
 			console.error('cannot read the event', e);
 		}
 	}
 
-	async function save(form: EventForm) {
+	async function save(form: EventForm, scope: Scope) {
 		const target = editing?.target ?? null;
 		let calendarId = form.calendarId;
 		// Without a writable calendar the first event makes one on this computer (#15)
@@ -198,17 +211,19 @@
 			calendarId = createdCalendar;
 		}
 		const draft = draftFromForm({ ...form, calendarId });
-		const saved = target ? await updateEvent(target, draft) : await createEvent(draft);
+		const saved = target ? await updateEvent(target, draft, scope) : await createEvent(draft);
 		editing = null;
-		// Show the week the event is in; `calendar:changed` reads it
+		// Show the week the event is in; `calendar:changed` reads it. A series that no longer
+		// has the occurrence stays on this week.
+		if (!saved) return;
 		const week = startOfWeek(wallClock(saved.start));
 		if (week.getTime() !== weekStart.getTime()) go(week);
 	}
 
-	async function removeSelected() {
+	async function removeSelected(scope: Scope) {
 		if (!selectedOccurrence) return;
 		const { event_id, original_start } = selectedOccurrence;
-		await deleteEvent({ event_id, original_start });
+		await deleteEvent({ event_id, original_start }, scope);
 		close();
 	}
 
@@ -279,6 +294,7 @@
 	<EventEditor
 		initial={editing.form}
 		isNew={editing.target === null}
+		series={editing.series}
 		{calendars}
 		displayZone={displayZone()}
 		onsave={save}
