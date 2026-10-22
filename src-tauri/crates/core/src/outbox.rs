@@ -6,8 +6,10 @@
 //! holds the event as the user wants it (`payload`) and as it was before (`base`); the engine
 //! sends the difference. Writes to local calendars queue nothing.
 //!
-//! v0.2 sends rows in order and stops at the first that cannot be sent yet; retries with
-//! backoff, coalescing and crash recovery are the offline outbox of v0.3.
+//! A row is `pending` until the engine takes it (`claim`), then `in_flight` while it is sent.
+//! A second edit to an event with a pending row merges into it. A row that could not be sent
+//! goes back to `pending` with a later `next_attempt_at`; one the server refused, or that met
+//! a newer version there, stays as `failed` or `conflicted`.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -136,7 +138,12 @@ pub fn remote_source(c: &Connection, calendar_id: i64) -> rusqlite::Result<Optio
 /// Queues `op` for event `id` as it is now, if its calendar is remote. `base` is the event
 /// before the edit (`None` for a create); the payload is read from the row (`None` for a
 /// delete). Call it in the transaction of the edit, after the edit. Returns the source to sync,
-/// or `None` if nothing was queued: a local calendar, or an update that changed nothing.
+/// or `None` if nothing is left to send: a local calendar, an update that changed nothing, or
+/// one that undid the edit still waiting, or the delete of an event the server never had.
+///
+/// An edit to an event that already has a `pending` row is merged into it (§7.3), so the
+/// server only hears the end result. A row that is `in_flight` is being sent and is left
+/// alone: the edit gets a row of its own, sent after it.
 pub fn queue(
     c: &Connection,
     op: Op,
@@ -161,6 +168,57 @@ pub fn queue(
     }
     // Rust note: serialising these plain structs cannot fail, so `expect` never fires.
     let json = |data: &EventData| serde_json::to_string(data).expect("event data serialises");
+
+    let waiting: Option<(i64, String, Option<String>)> = c
+        .query_row(
+            "SELECT id, op, base FROM outbox WHERE event_id = ?1 AND status = 'pending'
+             ORDER BY id DESC LIMIT 1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((row, earlier, earlier_base)) = waiting {
+        // The column's `CHECK` allows only these three.
+        let earlier = Op::parse(&earlier).unwrap_or(Op::Update);
+        let earlier_base: Option<EventData> =
+            earlier_base.and_then(|t| serde_json::from_str(&t).ok());
+        match (earlier, op) {
+            // The server never heard of it, and now never will.
+            (Op::Create, Op::Delete) => {
+                c.execute(
+                    "DELETE FROM outbox WHERE status = 'pending' AND (id = ?1 OR event_id IN
+                         (SELECT id FROM events WHERE recurring_event_id = ?2))",
+                    params![row, id],
+                )?;
+                c.execute("DELETE FROM events WHERE id = ?1", [id])?;
+                return Ok(None);
+            }
+            // Still a create, now of the event as it is.
+            (Op::Create, _) => {
+                c.execute(
+                    "UPDATE outbox SET payload = ?2 WHERE id = ?1",
+                    params![row, payload.as_ref().map(json)],
+                )?;
+                return Ok(Some(source));
+            }
+            // Against the original `base`, which is what the server has.
+            (Op::Update, Op::Update) if payload == earlier_base => {
+                c.execute("DELETE FROM outbox WHERE id = ?1", [row])?;
+                return Ok(None);
+            }
+            (Op::Update, Op::Update | Op::Delete) => {
+                c.execute(
+                    "UPDATE outbox SET op = ?2, payload = ?3 WHERE id = ?1",
+                    params![row, op.as_str(), payload.as_ref().map(json)],
+                )?;
+                return Ok(Some(source));
+            }
+            // A deleted event is hidden, so it cannot be edited again; a create of an id that
+            // already has a row cannot happen. Queue it as it is.
+            (Op::Delete, _) | (Op::Update, Op::Create) => {}
+        }
+    }
+
     c.execute(
         "INSERT INTO outbox (calendar_id, event_id, event_remote_id, op, payload, base,
                              base_etag, created_at)
@@ -192,13 +250,42 @@ pub struct Pending {
     /// The ETag to send as `If-Match`: the event's own, which our earlier rows for it have
     /// kept current, else the one the edit was based on.
     pub if_match: Option<String>,
+    /// The attempts that failed so far.
+    pub attempts: i64,
+    next_attempt_at: i64,
 }
 
-/// The oldest pending row of `source_id`'s calendars, in `id` order (§7.3).
+/// Takes the oldest pending row of `source_id`'s calendars, in `id` order (§7.3), and marks it
+/// `in_flight`. `None` if there is none, or if it is still backing off from a failed attempt
+/// and `ignore_backoff` (a sync the user asked for) is not set: the rows behind it wait too,
+/// so the order holds.
+///
+/// Call it on the write connection: an edit then cannot merge into the row between reading it
+/// and marking it, which would lose that edit when the row is removed after sending.
+pub fn claim(
+    c: &Connection,
+    source_id: &str,
+    now: i64,
+    ignore_backoff: bool,
+) -> rusqlite::Result<Option<Pending>> {
+    let Some(row) = next_pending(c, source_id)? else {
+        return Ok(None);
+    };
+    if row.next_attempt_at > now && !ignore_backoff {
+        return Ok(None);
+    }
+    c.execute(
+        "UPDATE outbox SET status = 'in_flight' WHERE id = ?1",
+        [row.id],
+    )?;
+    Ok(Some(row))
+}
+
+/// The oldest pending row of `source_id`'s calendars, without taking it.
 pub fn next_pending(c: &Connection, source_id: &str) -> rusqlite::Result<Option<Pending>> {
     c.query_row(
         "SELECT o.id, o.calendar_id, o.event_id, o.event_remote_id, o.op, o.payload, o.base,
-                coalesce(e.etag, o.base_etag)
+                coalesce(e.etag, o.base_etag), o.attempts, o.next_attempt_at
          FROM outbox o
          JOIN calendars c ON c.id = o.calendar_id
          LEFT JOIN events e ON e.id = o.event_id
@@ -224,10 +311,53 @@ pub fn next_pending(c: &Connection, source_id: &str) -> rusqlite::Result<Option<
                 payload: data(5)?,
                 base: data(6)?,
                 if_match: r.get(7)?,
+                attempts: r.get(8)?,
+                next_attempt_at: r.get(9)?,
             })
         },
     )
     .optional()
+}
+
+/// Puts a row that could not be sent back in line, to be tried again from `next_attempt_at`
+/// (epoch seconds) on. `error` is why, or `None` when the attempt does not count, as when the
+/// sign-in was rejected.
+pub fn retry_later(
+    c: &Connection,
+    id: i64,
+    next_attempt_at: i64,
+    error: Option<&str>,
+) -> rusqlite::Result<()> {
+    c.execute(
+        "UPDATE outbox
+         SET status = 'pending', next_attempt_at = ?2,
+             attempts = attempts + (?3 IS NOT NULL), last_error = coalesce(?3, last_error)
+         WHERE id = ?1",
+        params![id, next_attempt_at, error],
+    )?;
+    Ok(())
+}
+
+/// When the earliest row of `source_id` that is backing off may be tried again, if one is and
+/// that is after `now`: the engine syncs the source again then.
+pub fn next_retry(c: &Connection, source_id: &str, now: i64) -> rusqlite::Result<Option<i64>> {
+    c.query_row(
+        "SELECT min(o.next_attempt_at) FROM outbox o
+         JOIN calendars c ON c.id = o.calendar_id
+         WHERE c.source_id = ?1 AND o.status = 'pending' AND o.next_attempt_at > ?2",
+        params![source_id, now],
+        |r| r.get(0),
+    )
+}
+
+/// Puts the rows that were being sent when the app stopped back in line (§7.3). Whether the
+/// server got them is unknown; sending again is safe, because a create carries its own id and
+/// an update or delete its `If-Match`. Returns how many there were.
+pub fn recover(c: &Connection) -> rusqlite::Result<usize> {
+    c.execute(
+        "UPDATE outbox SET status = 'pending' WHERE status = 'in_flight'",
+        [],
+    )
 }
 
 /// Marks row `id` `conflicted` or `failed`, keeping its payload so the change is not lost (§7.3).

@@ -25,6 +25,7 @@ use cycle::{Ctx, SyncError};
 use crate::CoreEvent;
 use crate::db::Db;
 use crate::model::SourceKind;
+use crate::outbox;
 use crate::provider::Providers;
 use crate::secrets::Secrets;
 
@@ -225,6 +226,12 @@ impl SyncEngine {
 
     /// Runs until `shutdown` is called or every handle is dropped.
     pub async fn run(mut self) {
+        // Rows that were being sent when the app last stopped go back in line (§7.3).
+        match self.ctx.db.write(|c| outbox::recover(c)).await {
+            Ok(0) => {}
+            Ok(n) => log::info!("outbox: {n} rows were being sent at the last stop; sent again"),
+            Err(e) => log::error!("outbox: cannot put interrupted rows back: {e}"),
+        }
         loop {
             let msg = match self.due.values().min().copied() {
                 // Waits for a message, but no longer than until the next source is due.

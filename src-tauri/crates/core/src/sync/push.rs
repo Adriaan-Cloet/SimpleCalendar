@@ -3,18 +3,22 @@
 //! Rows go out one at a time in `id` order, so edits to one event never overtake each other.
 //! What happens after each attempt:
 //!
-//! | Answer                         | Then                                                      |
-//! | ------------------------------ | --------------------------------------------------------- |
-//! | Success                        | Store what the server sent back (its ETag), drop the row  |
-//! | Nothing changed                | Drop the row without a request                            |
-//! | Network, 5xx, 429, or sign-in  | Stop: the row waits, and the cycle skips its pull         |
-//! | 412, or the event is gone      | Fetch it: if it already has our change, a success; else   |
-//! |                                | the server's copy stays, the row becomes `conflicted`     |
-//! | Refused for good               | Roll the event back, the row becomes `failed`             |
+//! | Answer                         | Then                                                       |
+//! | ------------------------------ | ---------------------------------------------------------- |
+//! | Success                        | Store what the server sent back (its ETag), drop the row   |
+//! | Nothing changed                | Drop the row without a request                             |
+//! | Network, 5xx, 429              | Stop: the row waits with backoff, the cycle skips its pull |
+//! | Sign-in rejected               | Stop: the row waits for a new sign-in, no pull             |
+//! | 412, or the event is gone      | Fetch it: if it already has our change, a success; else    |
+//! |                                | the server's copy stays, the row becomes `conflicted`      |
+//! | Refused for good               | Roll the event back, the row becomes `failed`              |
 //!
-//! Stopping at the first row that cannot be sent keeps the order; retrying it later with
-//! backoff is the offline outbox of v0.3. The server's version is never overwritten: every
-//! update and delete carries `If-Match` when there is an ETag (§7.4).
+//! Stopping at the first row that cannot be sent keeps the order. A row is `in_flight` while
+//! it is sent; if the app stops then, it goes back to `pending` at the next start
+//! (`outbox::recover`). The server's version is never overwritten: every update and delete
+//! carries `If-Match` when there is an ETag (§7.4).
+
+use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 
@@ -50,22 +54,41 @@ enum Outcome {
 }
 
 /// Sends the source's pending rows in order. Returns an error, and leaves the rest waiting,
-/// when one cannot be sent now: the cycle then reports it and does not pull, so a pull never
-/// meets an edit that is still on its way.
+/// when one cannot be sent now: the cycle then reports it and does not pull. A row that is
+/// still backing off from an earlier attempt stops the push without an error, unless
+/// `ignore_backoff` (a sync the user asked for); the pull then still runs, and leaves the
+/// events of waiting rows alone (§7.2).
 pub(super) async fn push(
     ctx: &Ctx,
     cx: &SourceContext,
     provider: &dyn CalendarProvider,
+    ignore_backoff: bool,
 ) -> Result<(), SyncError> {
     loop {
         let source = cx.source_id.clone();
+        let Some(writer) = provider.as_writable() else {
+            // Only a calendar whose provider writes is writable (§4), so rows here need a
+            // provider that stopped writing. They wait rather than being lost.
+            let waiting = ctx
+                .db
+                .read(move |c| outbox::next_pending(c, &source))
+                .await?;
+            if waiting.is_some() {
+                log::warn!(
+                    "source {}: rows wait, but its provider does not write",
+                    cx.source_id
+                );
+            }
+            return Ok(());
+        };
         let next = ctx
             .db
-            .read(move |c| {
-                let Some(row) = outbox::next_pending(c, &source)? else {
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let Some(row) = outbox::claim(&tx, &source, now(), ignore_backoff)? else {
                     return Ok(None);
                 };
-                let calendar = c.query_row(
+                let calendar = tx.query_row(
                     "SELECT remote_id, time_zone FROM calendars WHERE id = ?1",
                     [row.calendar_id],
                     |r| {
@@ -75,37 +98,80 @@ pub(super) async fn push(
                         })
                     },
                 )?;
+                tx.commit()?;
                 Ok(Some((row, calendar)))
             })
             .await?;
         let Some((row, calendar)) = next else {
             return Ok(());
         };
-        let Some(writer) = provider.as_writable() else {
-            // Only a calendar whose provider writes is writable (§4), so this needs a provider
-            // that stopped writing. The rows wait rather than being lost.
-            log::warn!(
-                "source {}: rows wait, but its provider does not write",
-                cx.source_id
-            );
-            return Ok(());
-        };
 
-        let outcome = match send(writer, cx, &calendar, &row).await {
-            Ok(sent) => Outcome::Done(sent),
+        let result = match send(writer, cx, &calendar, &row).await {
+            Err(ProviderError::Conflict) => check(writer, cx, &calendar, &row).await,
+            Err(ProviderError::NotFound) if row.op == Op::Update => {
+                check(writer, cx, &calendar, &row).await
+            }
+            sent => sent.map(Outcome::Done),
+        };
+        let outcome = match result {
+            Ok(outcome) => outcome,
             // Rust note: `e @ pattern` binds the whole value that matched, so the error can be
             // passed on as it is.
-            Err(e @ (ProviderError::Transient { .. } | ProviderError::Auth)) => {
+            Err(e @ ProviderError::Transient { retry_after }) => {
+                let at = now() + backoff(row.attempts + 1, retry_after, jitter()).as_secs() as i64;
+                let (id, why) = (row.id, e.to_string());
+                ctx.db
+                    .write(move |c| outbox::retry_later(c, id, at, Some(&why)))
+                    .await?;
                 return Err(SyncError::Provider(e));
             }
-            Err(ProviderError::Conflict) => check(writer, cx, &calendar, &row).await?,
-            Err(ProviderError::NotFound) if row.op == Op::Update => {
-                check(writer, cx, &calendar, &row).await?
+            // The provider already tried a fresh token once (§7.3). The row waits for the
+            // next sign-in, without counting as an attempt.
+            Err(ProviderError::Auth) => {
+                let id = row.id;
+                ctx.db
+                    .write(move |c| outbox::retry_later(c, id, 0, None))
+                    .await?;
+                return Err(SyncError::Provider(ProviderError::Auth));
             }
             Err(other) => Outcome::Failed(other.to_string()),
         };
         apply(ctx, row, outcome).await?;
     }
+}
+
+/// The shortest wait after a first failed attempt.
+const FIRST_RETRY: Duration = Duration::from_secs(5);
+/// The longest wait between attempts, unless the server asks for more (§7.3).
+const LONGEST_RETRY: Duration = Duration::from_secs(30 * 60);
+
+/// How long to wait before attempt `attempts + 1`, after `attempts` failed ones: twice as long
+/// as the time before, from 5 seconds up to 30 minutes, and never less than the server's
+/// `Retry-After`. `jitter`, from 0 to 1, takes up to half off the wait, so that rows that
+/// failed together do not all come back at the same moment.
+pub(super) fn backoff(attempts: i64, retry_after: Option<Duration>, jitter: f64) -> Duration {
+    // Rust note: `clamp` keeps the shift below 64 bits; past 2^9 the cap applies anyway.
+    let doublings = (attempts - 1).clamp(0, 20) as u32;
+    let wait = FIRST_RETRY
+        .saturating_mul(1 << doublings)
+        .min(LONGEST_RETRY);
+    let wait = wait.mul_f64(1.0 - jitter.clamp(0.0, 1.0) / 2.0);
+    wait.max(retry_after.unwrap_or_default())
+}
+
+/// A random number from 0 to 1.
+fn jitter() -> f64 {
+    let mut bytes = [0u8; 4];
+    // Without a random number generator the wait is simply not spread.
+    if getrandom::fill(&mut bytes).is_err() {
+        return 0.0;
+    }
+    f64::from(u32::from_le_bytes(bytes)) / f64::from(u32::MAX)
+}
+
+/// The current time in epoch seconds.
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 /// Sends one row.
@@ -163,7 +229,7 @@ async fn check(
     cx: &SourceContext,
     calendar: &CalendarRef,
     row: &Pending,
-) -> Result<Outcome, SyncError> {
+) -> Result<Outcome, ProviderError> {
     let remote = writer.get_event(cx, calendar, &row.event_remote_id).await?;
     Ok(match (row.op, remote) {
         (Op::Delete, None) => Outcome::Done(Sent::Deleted),
@@ -289,7 +355,8 @@ fn roll_back(tx: &rusqlite::Transaction, row: &Pending) -> rusqlite::Result<()> 
             tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
         }
         (Op::Update, Some(base)) => outbox::write_data(tx, id, base)?,
-        // A deleted event shows again; a deleted occurrence too, as it was.
+        // A deleted event shows again as the server has it, which is not the local edit when
+        // the delete was merged into one; a deleted occurrence shows again too.
         (Op::Delete, base) => {
             tx.execute("UPDATE events SET pending_delete = 0 WHERE id = ?1", [id])?;
             if let Some(base) = base {
@@ -302,8 +369,8 @@ fn roll_back(tx: &rusqlite::Transaction, row: &Pending) -> rusqlite::Result<()> 
                     .optional()?;
                 if exception == Some(true) {
                     tx.execute("UPDATE events SET status = 'confirmed' WHERE id = ?1", [id])?;
-                    outbox::write_data(tx, id, base)?;
                 }
+                outbox::write_data(tx, id, base)?;
             }
         }
         (Op::Update, None) => {}

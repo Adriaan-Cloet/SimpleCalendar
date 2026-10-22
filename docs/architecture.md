@@ -902,7 +902,7 @@ Implementation notes (#18):
   updates for the next one, else `base_etag`. On success the answer is stored with the pull's
   upsert (only its ETag while more rows for the event wait) and the row is deleted; a confirmed
   delete removes the event row. A transient error or a rejected sign-in stops the cycle before
-  the pull: the rows wait for the next one, so a pull never meets an edit on its way. 412, or
+  the pull: the rows wait for the next one (#19 adds backoff, below). 412, or
   an update of an event the server no longer has, fetches it once: if it already has our
   change it is a success, otherwise the server's copy is stored (or the event removed) and the
   row becomes `conflicted`. Any other refusal rolls the event back to `base` (a create is
@@ -915,8 +915,30 @@ Implementation notes (#18):
   409 on insert means the id exists: the event is fetched and taken as created. 412 is
   `Conflict`; 404 and 410 on delete are success. The provider builds the JSON body itself, so
   reqwest needs no `json` feature.
-- Not yet (v0.3, #19, #20): `in_flight`, retries with backoff, coalescing, and telling the user
-  about `conflicted` and `failed` rows; they are only logged.
+
+Implementation notes (#19):
+
+- **Coalescing** happens in `outbox::queue`, against the event's newest `pending` row: an update
+  replaces its payload and keeps `base` and `base_etag` (and the row is deleted when the payload
+  is back to `base`); an update of a pending create stays a create; a delete of an updated event
+  becomes a delete that keeps the original `base`, which a refused delete restores; a delete of
+  a pending create removes the row, the event and the pending rows of its exceptions.
+- **`in_flight`.** The engine takes a row with `outbox::claim`, on the write connection, which
+  marks it `in_flight` in the same transaction. An edit can therefore never merge into a row
+  that is being sent; it gets a row of its own, sent after it. `SyncEngine::run` first puts
+  `in_flight` rows back to `pending` (`outbox::recover`). Sending them again is safe: a create
+  carries its id, an update or delete its `If-Match`.
+- **Backoff.** A transient error, also on the fetch after a 412, adds one to `attempts` and sets
+  `next_attempt_at`: 5 seconds, doubling per attempt up to 30 minutes, with up to half taken
+  off at random, and never less than `Retry-After`. The cycle stops before the pull. A later
+  automatic cycle does not send a row that is not due (nor the rows behind it, which keeps the
+  order) but does pull; the pull leaves events with waiting rows alone. A sync the user asked
+  for ignores the backoff. The timer comes back at the earliest `next_attempt_at` when that is
+  sooner than the source's interval.
+- **Sign-in.** The provider already retries a 401 once with a refreshed token. If that fails,
+  the row goes back to `pending` without counting as an attempt and the source becomes
+  `auth_required`; the rows are sent after the next sign-in.
+- Telling the user about `conflicted` and `failed` rows comes with #21; they are only logged.
 
 ### 7.4 Conflicts: server wins
 

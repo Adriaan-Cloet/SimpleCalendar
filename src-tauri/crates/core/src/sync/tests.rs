@@ -570,12 +570,19 @@ impl LastTwo for Vec<String> {
 }
 
 #[tokio::test]
-async fn edits_to_one_event_go_in_order_each_on_the_etag_before() {
+async fn an_edit_during_a_send_waits_for_it_and_goes_on_the_etag_it_got() {
     let mut h = Harness::new().await;
     h.writable_with(vec![single("a")]).await;
     h.edit("a", retitled).await;
+    // As if the engine were sending the first edit, and the app then stopped.
+    h.set_outbox_status("in_flight").await;
     h.edit("a", moved_later).await;
+    assert_eq!(
+        h.outbox().await,
+        rows(&[("update", "in_flight"), ("update", "pending")])
+    );
 
+    h.restart().await;
     h.sync().await;
 
     let sent: Vec<_> = h
@@ -596,6 +603,325 @@ async fn edits_to_one_event_go_in_order_each_on_the_etag_before() {
     );
     assert_eq!(h.title("a").await, "Retro");
     assert!(h.outbox().await.is_empty());
+}
+
+// ---- coalescing (§7.3) ---------------------------------------------------------------------
+
+fn untitled(data: &mut EventData) {
+    data.title = "a".into();
+}
+
+#[tokio::test]
+async fn a_second_edit_merges_into_the_waiting_one() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.edit("a", moved_later).await;
+    assert_eq!(h.outbox().await, rows(&[("update", "pending")]));
+
+    h.sync().await;
+
+    let [Write::Update { update, if_match }] = &h.fake.writes()[..] else {
+        panic!("not one update: {:?}", h.fake.writes());
+    };
+    assert_eq!(update.changed, [Field::Title, Field::Times].into());
+    assert_eq!(if_match.as_deref(), Some("\"a-1\""));
+}
+
+#[tokio::test]
+async fn an_edit_undone_before_it_is_sent_sends_nothing() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.edit("a", untitled).await;
+    assert!(h.outbox().await.is_empty());
+
+    h.sync().await;
+
+    assert!(h.fake.writes().is_empty());
+}
+
+#[tokio::test]
+async fn an_edit_to_a_new_event_goes_with_its_create() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![]).await;
+    h.create("abc123").await;
+    h.edit("abc123", retitled).await;
+    assert_eq!(h.outbox().await, rows(&[("create", "pending")]));
+
+    h.sync().await;
+
+    let [Write::Create { event, .. }] = &h.fake.writes()[..] else {
+        panic!("not one create: {:?}", h.fake.writes());
+    };
+    assert_eq!(event.title, "Retro");
+}
+
+#[tokio::test]
+async fn a_new_event_deleted_before_it_is_sent_never_reaches_the_server() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.create("abc123").await;
+    h.edit("abc123", retitled).await;
+    h.delete("abc123").await;
+
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.events().await, ids(&[("a", None)]));
+    h.sync().await;
+    assert!(h.fake.writes().is_empty());
+}
+
+#[tokio::test]
+async fn an_edited_event_that_is_deleted_sends_only_the_delete() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.delete("a").await;
+    assert_eq!(h.outbox().await, rows(&[("delete", "pending")]));
+
+    h.sync().await;
+
+    assert_eq!(
+        h.fake.writes(),
+        vec![Write::Delete {
+            remote_id: "a".into(),
+            if_match: Some("\"a-1\"".into())
+        }]
+    );
+    assert!(h.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_refused_merged_delete_shows_the_event_as_the_server_has_it() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.delete("a").await;
+    h.fake
+        .answer(vec![Err(ProviderError::Permanent("no".into()))]);
+
+    h.sync().await;
+
+    assert_eq!(h.events().await, ids(&[("a", None)]));
+    assert_eq!(h.title("a").await, "a");
+    assert_eq!(h.outbox().await, rows(&[("delete", "failed")]));
+}
+
+// ---- offline (§7.3) ------------------------------------------------------------------------
+
+impl Harness {
+    async fn set_outbox_status(&self, status: &'static str) {
+        self.db
+            .write(move |c| c.execute("UPDATE outbox SET status = ?1", [status]))
+            .await
+            .unwrap();
+    }
+
+    /// `(attempts, seconds until next_attempt_at, last_error)` of the only outbox row.
+    async fn backoff(&self) -> (i64, i64, Option<String>) {
+        let now = chrono::Utc::now().timestamp();
+        self.db
+            .read(move |c| {
+                c.query_row(
+                    "SELECT attempts, next_attempt_at - ?1, last_error FROM outbox",
+                    [now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Stops the engine and starts a new one on the same database, as when the app restarts.
+    async fn restart(&mut self) {
+        self.handle.shutdown();
+        let secrets = Secrets::new(self.store.clone());
+        let providers = Providers::new().with(self.fake.clone());
+        let (tx, events) = mpsc::unbounded_channel();
+        let (engine, handle) = SyncEngine::new(self.db.clone(), secrets, providers, tx);
+        tokio::spawn(engine.run());
+        self.handle = handle;
+        self.events = events;
+    }
+}
+
+#[test]
+fn backoff_doubles_from_5_seconds_up_to_30_minutes() {
+    let secs = |attempts| push::backoff(attempts, None, 0.0).as_secs();
+    assert_eq!(
+        (1..=11).map(secs).collect::<Vec<_>>(),
+        [5, 10, 20, 40, 80, 160, 320, 640, 1280, 1800, 1800]
+    );
+    assert_eq!(secs(1000), 1800);
+}
+
+#[test]
+fn backoff_jitter_takes_up_to_half_off() {
+    assert_eq!(push::backoff(3, None, 1.0), Duration::from_secs(10));
+    assert_eq!(push::backoff(3, None, 0.5), Duration::from_secs(15));
+}
+
+#[test]
+fn backoff_waits_at_least_as_long_as_the_server_asks() {
+    let asked = Some(Duration::from_secs(3600));
+    assert_eq!(push::backoff(1, asked, 0.0), Duration::from_secs(3600));
+    assert_eq!(
+        push::backoff(5, Some(Duration::from_secs(1)), 0.0),
+        Duration::from_secs(80)
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_cannot_be_sent_backs_off_but_a_manual_sync_sends_it() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake
+        .answer(vec![Err(ProviderError::Transient { retry_after: None })]);
+
+    h.sync().await;
+
+    let (attempts, wait, error) = h.backoff().await;
+    assert_eq!(attempts, 1);
+    assert!((1..=5).contains(&wait), "waits {wait} s");
+    assert!(error.is_some());
+
+    // An automatic sync leaves the row waiting, but pulls.
+    h.handle.push("src-1".into());
+    assert_eq!(h.finished("src-1").await.state, SyncState::Ok);
+    assert_eq!(h.fake.writes().len(), 1);
+    assert_eq!(h.pulls_so_far().len(), 1);
+    assert_eq!(h.title("a").await, "Retro");
+
+    // One the user asks for does not wait.
+    h.sync().await;
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.fake.order().last_two(), ["update a", "pull cal-1"]);
+}
+
+#[tokio::test]
+async fn retry_after_is_honoured() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![Err(ProviderError::Transient {
+        retry_after: Some(Duration::from_secs(600)),
+    })]);
+
+    h.sync().await;
+
+    let (_, wait, _) = h.backoff().await;
+    assert!((599..=600).contains(&wait), "waits {wait} s");
+}
+
+#[tokio::test]
+async fn a_failed_check_after_a_conflict_backs_off_too() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![
+        Err(ProviderError::Conflict),
+        Err(ProviderError::Transient { retry_after: None }),
+    ]);
+
+    assert_eq!(h.sync().await.state, SyncState::Error);
+
+    assert_eq!(h.outbox().await, rows(&[("update", "pending")]));
+    assert_eq!(h.backoff().await.0, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_engine_syncs_again_when_a_row_may_be_retried() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![Err(ProviderError::Transient {
+        retry_after: Some(Duration::from_secs(120)),
+    })]);
+
+    let start = tokio::time::Instant::now();
+    h.sync().await;
+    // The failed push skipped the pull, so the next pull is the cycle that comes back for the
+    // row: after about two minutes, not after the ICS interval of an hour. (The paused clock
+    // does not move the wall clock, so to the outbox the row is not due yet there.)
+    let next = h.next_pull_eventually().await;
+
+    let waited = next.at - start;
+    assert!(
+        (Duration::from_secs(118)..=Duration::from_secs(121)).contains(&waited),
+        "came back after {waited:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_sign_in_keeps_the_rows_pending() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![Err(ProviderError::Auth)]);
+
+    assert_eq!(h.sync().await.state, SyncState::AuthRequired);
+
+    assert_eq!(h.source_status("src-1").await.0, "auth_required");
+    assert_eq!(h.outbox().await, rows(&[("update", "pending")]));
+    // Not an attempt: it is tried as soon as the user signs in again.
+    let (attempts, wait, _) = h.backoff().await;
+    assert_eq!(attempts, 0);
+    assert!(wait <= 0);
+    assert!(h.pulls_so_far().is_empty());
+    assert_eq!(h.title("a").await, "Retro");
+}
+
+#[tokio::test]
+async fn rows_left_in_flight_are_sent_again_after_a_restart() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.set_outbox_status("in_flight").await;
+
+    // Nothing sends an `in_flight` row while the engine that took it runs.
+    h.sync().await;
+    assert!(h.fake.writes().is_empty());
+
+    h.restart().await;
+    h.sync().await;
+
+    assert_eq!(h.fake.writes().len(), 1);
+    assert!(h.outbox().await.is_empty());
+}
+
+#[tokio::test]
+async fn edits_made_offline_reach_the_server_in_order_once_online() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a"), single("b")]).await;
+    let offline = || Err(ProviderError::Transient { retry_after: None });
+    h.fake.answer(vec![offline()]);
+
+    h.edit("a", retitled).await;
+    h.create("abc123").await;
+    h.handle.push("src-1".into());
+    assert_eq!(h.finished("src-1").await.state, SyncState::Error);
+    h.delete("b").await;
+    h.edit("a", moved_later).await;
+    h.edit("abc123", retitled).await;
+    h.handle.push("src-1".into());
+    // Still backing off: nothing is sent.
+    h.finished("src-1").await;
+    assert_eq!(h.fake.writes().len(), 1);
+
+    // Online again, and the user refreshes.
+    h.sync().await;
+
+    let order = h.fake.order();
+    let sent: Vec<_> = order.iter().filter(|w| !w.starts_with("pull")).collect();
+    assert_eq!(sent, ["update a", "update a", "create abc123", "delete b"]);
+    let Write::Update { update, .. } = &h.fake.writes()[1] else {
+        panic!("not an update");
+    };
+    assert_eq!(update.changed, [Field::Title, Field::Times].into());
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.title("abc123").await, "Retro");
+    assert_eq!(h.events().await, ids(&[("a", None), ("abc123", None)]));
 }
 
 #[tokio::test]

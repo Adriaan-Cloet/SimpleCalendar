@@ -372,3 +372,43 @@ async fn retiming_all_events_of_a_google_series_pulls_it_again() {
         instant(Brussels, 2026, 10, 20, 10, 0)
     );
 }
+
+#[tokio::test]
+async fn a_new_google_series_deleted_before_it_is_sent_leaves_nothing_to_send() {
+    let s = setup();
+    let cal = s.google_calendar().await;
+    let created = s
+        .service
+        .create_event(standup_on(cal, "2026-10-20", "Standup"), "UTC")
+        .await
+        .unwrap();
+    let id = created.event_id;
+    let nov3 = instant(Brussels, 2026, 11, 3, 9, 0);
+    let occurrence = |original_start| OccurrenceRef {
+        event_id: id,
+        original_start,
+    };
+    s.service
+        .update_event(
+            occurrence(nov3),
+            Scope::This,
+            standup_on(cal, "2026-11-03", "Retro"),
+            "UTC",
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.outbox().await.len(), 2);
+
+    s.service
+        .delete_event(occurrence(created.original_start), Scope::All)
+        .await
+        .unwrap();
+
+    // The create and the change of its occurrence go, and the series with its exception.
+    assert!(s.outbox().await.is_empty());
+    let events: i64 =
+        s.db.read(|c| c.query_row("SELECT count(*) FROM events", [], |r| r.get(0)))
+            .await
+            .unwrap();
+    assert_eq!(events, 0);
+}
