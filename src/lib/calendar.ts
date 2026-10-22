@@ -1,6 +1,6 @@
 // Calendars, occurrences and events through the Tauri commands of docs/architecture.md §10. The
 // shapes mirror `simplecalendar_core::service::{CalendarInfo, CalendarUpdate, EventDetail,
-// EventDraft}` and `simplecalendar_core::model::Occurrence`.
+// EventDraft, Repeat}` and `simplecalendar_core::model::Occurrence`.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SourceKind } from './sources.js';
@@ -51,8 +51,19 @@ export interface EventReminder {
 	method: 'popup' | 'email';
 }
 
-/** One event in full, from `getEvent` */
+/** How often an event repeats; `custom` is a rule the editor cannot show, kept as it is */
+export type Frequency = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
+
+export interface Repeat {
+	frequency: Frequency;
+	/** The last day an occurrence may start on, `YYYY-MM-DD`; `null` repeats forever. Always
+	 * `null` for `custom`. */
+	until: string | null;
+}
+
+/** One event in full, or one occurrence of a series, from `getEvent` */
 export interface EventDetail {
+	/** For an occurrence of a series, the series' id */
 	id: number;
 	calendar_id: number;
 	title: string;
@@ -71,8 +82,8 @@ export interface EventDetail {
 	/** Earliest first */
 	reminders: EventReminder[];
 	editable: boolean;
-	/** A series or one of its occurrences: these cannot be changed yet (#17) */
-	recurring: boolean;
+	/** The series' rule, also for one of its occurrences; `null` for a single event */
+	repeat: Repeat | null;
 }
 
 /** A whole event, as `createEvent` and `updateEvent` take it */
@@ -91,6 +102,8 @@ export interface EventDraft {
 	time_zone: string | null;
 	use_default_reminders: boolean;
 	reminders: EventReminder[];
+	/** `null` for an event that does not repeat */
+	repeat: Repeat | null;
 }
 
 /** Names an occurrence: the `event_id` and `original_start` of an `Occurrence` */
@@ -121,13 +134,21 @@ export const createLocalCalendar = (name: string) =>
 /** Deletes a local calendar with its events; `calendar:changed` follows */
 export const removeCalendar = (calendar: number) => invoke<void>('remove_calendar', { calendar });
 
-export const getEvent = (event: number) => invoke<EventDetail>('get_event', { event });
+/** An event, or the occurrence of a series that `target` names, as that occurrence shows */
+export const getEvent = (target: OccurrenceRef) =>
+	invoke<EventDetail>('get_event', {
+		target: { event_id: target.event_id, original_start: target.original_start }
+	});
 /** Returns the new occurrence; `calendar:changed` follows */
 export const createEvent = (draft: EventDraft) =>
 	invoke<Occurrence>('create_event', { draft, tz: displayZone() });
-/** Replaces the event with `draft` and returns its occurrence; `calendar:changed` follows */
+/**
+ * Replaces the event, or one or all occurrences of a series, with `draft`. Returns the changed
+ * occurrence, or `null` when a change to all events leaves none at that time; `calendar:changed`
+ * follows.
+ */
 export const updateEvent = (target: OccurrenceRef, draft: EventDraft, scope: Scope = 'all') =>
-	invoke<Occurrence>('update_event', {
+	invoke<Occurrence | null>('update_event', {
 		target: { event_id: target.event_id, original_start: target.original_start },
 		scope,
 		draft,

@@ -1,7 +1,7 @@
 // The event editor's form (issue #16): what it shows, and how that becomes an `EventDraft`.
 // Everything here works on wall-clock dates and times as written. Turning them into instants,
 // with the event's zone and its DST rules, is Rust's job (architecture §10).
-import type { EventDetail, EventDraft, EventReminder } from './calendar.js';
+import type { EventDetail, EventDraft, EventReminder, Frequency, Scope } from './calendar.js';
 import { isoDate, isSameDay, startOfWeek } from './week-dates.js';
 
 export interface EventForm {
@@ -21,6 +21,10 @@ export interface EventForm {
 	timeZone: string;
 	useDefaultReminders: boolean;
 	reminders: EventReminder[];
+	repeat: 'never' | Frequency;
+	/** The last day it repeats on, inclusive; `null` repeats forever. Kept while `repeat` is
+	 * `never` or `custom`, but not sent. */
+	repeatUntil: string | null;
 }
 
 /** The times an all-day event offers when it is switched to timed */
@@ -49,6 +53,8 @@ export function newEventForm(options: {
 		timeZone,
 		useDefaultReminders: false,
 		reminders: [],
+		repeat: 'never',
+		repeatUntil: null,
 		...times
 	};
 }
@@ -69,7 +75,9 @@ export function formFromEvent(event: EventDetail, displayZone: string): EventFor
 			: DEFAULT_TIMES),
 		timeZone: event.time_zone ?? displayZone,
 		useDefaultReminders: event.use_default_reminders,
-		reminders: event.reminders.map((r) => ({ ...r }))
+		reminders: event.reminders.map((r) => ({ ...r })),
+		repeat: event.repeat?.frequency ?? 'never',
+		repeatUntil: event.repeat?.until ?? null
 	};
 }
 
@@ -85,8 +93,40 @@ export function draftFromForm(form: EventForm): EventDraft {
 		end: form.allDay ? shiftDate(form.endDate, 1) : `${form.endDate}T${form.endTime}`,
 		time_zone: form.allDay ? null : form.timeZone,
 		use_default_reminders: form.useDefaultReminders,
-		reminders: form.reminders
+		reminders: form.reminders,
+		repeat:
+			form.repeat === 'never'
+				? null
+				: { frequency: form.repeat, until: hasRepeatEnd(form) ? form.repeatUntil : null }
 	};
+}
+
+/** Whether the form's repeat has a last day that counts */
+function hasRepeatEnd(form: EventForm): boolean {
+	return form.repeat !== 'never' && form.repeat !== 'custom' && form.repeatUntil !== null;
+}
+
+/** Repeating until a last day, a month after the start unless one was chosen, or forever */
+export function withRepeatEnd(form: EventForm, ends: boolean): EventForm {
+	if (!ends) return { ...form, repeatUntil: null };
+	if (form.repeatUntil !== null) return form;
+	const [y, m, d] = form.startDate.split('-').map(Number);
+	// Day 0 of the month after next is the last day of next month: a shorter month clamps there
+	const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+	const until = new Date(Date.UTC(y, m, Math.min(d, last)));
+	return { ...form, repeatUntil: until.toISOString().slice(0, 10) };
+}
+
+/**
+ * What saving a changed occurrence of a series may apply to. The rule and the calendar belong
+ * to the whole series, so a change to either applies to all events (architecture §10).
+ */
+export function saveScopes(initial: EventForm, form: EventForm): Scope[] {
+	const same =
+		form.repeat === initial.repeat &&
+		form.repeatUntil === initial.repeatUntil &&
+		form.calendarId === initial.calendarId;
+	return same ? ['this', 'all'] : ['all'];
 }
 
 /** A new start that keeps the event's length on the wall clock, as most calendars do */
@@ -119,6 +159,12 @@ export function formProblem(form: EventForm): string | null {
 	if (start === null || end === null)
 		return 'Enter times on a 24-hour clock, such as 09:30 or 21:30.';
 	if (end < start) return 'The event ends before it starts.';
+	if (hasRepeatEnd(form)) {
+		if (!validDate(form.repeatUntil!)) return 'Enter dates as day/month/year, such as 20/10/2026.';
+		if (form.repeatUntil! < form.startDate) {
+			return 'The event must stop repeating on or after the day it starts.';
+		}
+	}
 	return null;
 }
 

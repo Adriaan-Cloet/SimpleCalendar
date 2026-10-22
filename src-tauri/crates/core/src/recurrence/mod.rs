@@ -5,6 +5,7 @@
 //! parsed here, because `rrule` would read a value without `Z` or `TZID` in the machine's
 //! own zone, and the values of one event may each use a different form (§7.7 "Mixed forms").
 
+pub mod rule;
 #[cfg(test)]
 mod tests;
 pub mod vtimezone;
@@ -119,6 +120,15 @@ pub fn expand(series: &Series<'_>, from: i64, to: i64) -> Result<Vec<i64>, Recur
         .collect())
 }
 
+/// Whether `series` has an occurrence that starts at the stored value `start`. A series that
+/// cannot be expanded has only its first one, as `list_occurrences` shows it.
+pub fn produces(series: &Series<'_>, start: i64) -> bool {
+    match expand(series, start, start + 1) {
+        Ok(starts) => starts.contains(&start),
+        Err(_) => start == series.start,
+    }
+}
+
 /// Whether `[start, start + duration)` overlaps `[from, to)`. An event without length counts
 /// when it starts inside the range.
 pub(crate) fn overlaps(start: i64, duration: i64, from: i64, to: i64) -> bool {
@@ -169,6 +179,16 @@ pub fn resolve_local(tz: Tz, local: NaiveDateTime) -> DateTime<Utc> {
             let utc = local - Duration::seconds(i64::from(before.local_minus_utc()));
             DateTime::from_naive_utc_and_offset(utc, Utc)
         }
+    }
+}
+
+/// The wall-clock time a stored value shows in its own zone. The inverse of `from_wall_clock`,
+/// except for a time that falls in a gap.
+pub(crate) fn wall_clock(stored: i64, kind: TimeKind) -> NaiveDateTime {
+    match kind {
+        TimeKind::Zoned(tz) => instant(stored).with_timezone(&tz).naive_local(),
+        TimeKind::Offset(offset) => instant(stored).with_timezone(&offset).naive_local(),
+        TimeKind::Floating | TimeKind::AllDay => as_written(stored),
     }
 }
 
@@ -325,15 +345,16 @@ impl DateValue {
             }
             DateValue::Utc(naive) => naive.and_utc().timestamp(),
             DateValue::Local(naive, Some(tz)) => resolve_local(tz, naive).timestamp(),
-            DateValue::Local(naive, None) => local_in_series(naive, kind),
-            DateValue::Date(date) => local_in_series(date.and_time(NaiveTime::MIN), kind),
+            DateValue::Local(naive, None) => from_wall_clock(naive, kind),
+            DateValue::Date(date) => from_wall_clock(date.and_time(NaiveTime::MIN), kind),
         }
     }
 }
 
-/// A wall-clock time without its own zone, read in the series' zone. For a floating or all-day
-/// series that is the wall clock itself.
-fn local_in_series(naive: NaiveDateTime, kind: TimeKind) -> i64 {
+/// The stored value of a wall-clock time in a series of `kind`: read in its zone, with the RFC
+/// 5545 rules for gaps and repeats. For a floating or all-day series that is the wall clock
+/// itself, written as if it were UTC.
+pub(crate) fn from_wall_clock(naive: NaiveDateTime, kind: TimeKind) -> i64 {
     match kind {
         TimeKind::Zoned(tz) => resolve_local(tz, naive).timestamp(),
         TimeKind::Offset(offset) => {

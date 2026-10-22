@@ -9,18 +9,18 @@ use crate::provider::ReminderMethod;
 // ---- helpers -------------------------------------------------------------------------------
 
 /// A local calendar named `name`, with the event of its creation already drained.
-async fn local(s: &mut Setup, name: &str) -> i64 {
+pub(super) async fn local(s: &mut Setup, name: &str) -> i64 {
     let id = s.service.create_local_calendar(name).await.unwrap().id;
     while s.events.try_recv().is_ok() {}
     id
 }
 
-fn draft(json: serde_json::Value) -> EventDraft {
+pub(super) fn draft(json: serde_json::Value) -> EventDraft {
     serde_json::from_value(json).unwrap()
 }
 
 /// A one-hour meeting in Brussels on 20 October 2026 in `calendar`.
-fn meeting(calendar: i64) -> EventDraft {
+pub(super) fn meeting(calendar: i64) -> EventDraft {
     draft(serde_json::json!({
         "calendar_id": calendar,
         "title": "Meeting",
@@ -104,11 +104,11 @@ impl Setup {
     }
 }
 
-fn is_not_editable(result: Result<impl std::fmt::Debug, ServiceError>) -> bool {
+pub(super) fn is_not_editable(result: Result<impl std::fmt::Debug, ServiceError>) -> bool {
     matches!(result, Err(ServiceError::NotEditable))
 }
 
-fn assert_invalid<T: std::fmt::Debug>(result: Result<T, ServiceError>) {
+pub(super) fn assert_invalid<T: std::fmt::Debug>(result: Result<T, ServiceError>) {
     assert!(
         matches!(result, Err(ServiceError::InvalidInput(_))),
         "{result:?}"
@@ -244,7 +244,7 @@ async fn text_fields_are_trimmed_and_a_blank_title_gets_a_name() {
 
     let id = s.service.create_event(d, "UTC").await.unwrap().event_id;
 
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert_eq!(event.title, "New event");
     assert_eq!(event.location.as_deref(), Some("Ghent"));
     assert_eq!(event.description, None);
@@ -366,7 +366,7 @@ async fn reminders_are_stored_sorted_and_read_back() {
     ];
     let id = s.service.create_event(d, "UTC").await.unwrap().event_id;
 
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert!(!event.use_default_reminders);
     assert_eq!(
         event.reminders,
@@ -409,7 +409,7 @@ async fn default_reminders_read_as_the_calendars() {
     d.reminders = vec![EventReminder::popup(60)];
     let id = s.service.create_event(d, "UTC").await.unwrap().event_id;
 
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert!(event.use_default_reminders);
     assert_eq!(
         event.reminders,
@@ -433,7 +433,7 @@ async fn an_event_reads_back_in_its_own_zone() {
         .unwrap()
         .event_id;
 
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert_eq!(event.id, id);
     assert_eq!(event.calendar_id, cal);
     assert_eq!(event.start, "2026-10-20T09:00");
@@ -441,7 +441,7 @@ async fn an_event_reads_back_in_its_own_zone() {
     assert_eq!(event.time_zone.as_deref(), Some("Europe/Brussels"));
     assert!(!event.all_day);
     assert!(event.editable);
-    assert!(!event.recurring);
+    assert_eq!(event.repeat, None);
     // A local description is plain text as typed, also when it looks like HTML.
     assert_eq!(
         event.description.as_deref(),
@@ -465,7 +465,7 @@ async fn an_all_day_event_reads_back_as_dates() {
         .await
         .unwrap()
         .event_id;
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert!(event.all_day);
     assert_eq!(
         (event.start.as_str(), event.end.as_str()),
@@ -492,7 +492,7 @@ async fn a_google_description_reads_as_plain_text() {
         .await
         .unwrap();
 
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert_eq!(
         event.description.as_deref(),
         Some("Bring snacks\nand a map (https://x.test/)")
@@ -501,25 +501,9 @@ async fn a_google_description_reads_as_plain_text() {
 }
 
 #[tokio::test]
-async fn a_series_reads_as_recurring() {
-    let mut s = setup();
-    let cal = local(&mut s, "Home").await;
-    let id = s.raw_event(cal, true, false).await;
-    s.db.write(move |c| {
-        c.execute(
-            "UPDATE events SET recurrence = 'RRULE:FREQ=DAILY' WHERE id = ?1",
-            [id],
-        )
-    })
-    .await
-    .unwrap();
-    assert!(s.service.get_event(id).await.unwrap().recurring);
-}
-
-#[tokio::test]
 async fn reading_an_event_that_does_not_exist_is_not_found() {
     let s = setup();
-    let err = s.service.get_event(42).await.unwrap_err();
+    let err = s.service.get_event(single(42)).await.unwrap_err();
     assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
 }
 
@@ -551,12 +535,13 @@ async fn an_event_is_updated_as_a_whole() {
             "UTC",
         )
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(changed.event_id, id);
     assert_eq!(changed.title, "Lunch");
     assert_eq!(changed.location, None);
-    let event = s.service.get_event(id).await.unwrap();
+    let event = s.service.get_event(single(id)).await.unwrap();
     assert_eq!(event.start, "2026-10-21T12:00");
     assert_eq!(event.time_zone.as_deref(), Some("Asia/Tokyo"));
     assert!(event.reminders.is_empty());
@@ -613,10 +598,14 @@ async fn an_event_can_move_to_another_local_calendar() {
         .service
         .update_event(single(id), Scope::All, meeting(work), "UTC")
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(moved.calendar_id, work);
-    assert_eq!(s.service.get_event(id).await.unwrap().calendar_id, work);
+    assert_eq!(
+        s.service.get_event(single(id)).await.unwrap().calendar_id,
+        work
+    );
     assert_eq!(
         s.events.try_recv().unwrap(),
         CoreEvent::CalendarChanged {
@@ -642,7 +631,10 @@ async fn an_event_cannot_move_to_a_calendar_it_may_not_write() {
             .update_event(single(id), Scope::All, meeting(feed), "UTC")
             .await
     ));
-    assert_eq!(s.service.get_event(id).await.unwrap().calendar_id, home);
+    assert_eq!(
+        s.service.get_event(single(id)).await.unwrap().calendar_id,
+        home
+    );
 }
 
 #[tokio::test]
@@ -668,7 +660,10 @@ async fn invalid_changes_leave_the_event_as_it_was() {
     );
 
     assert_eq!(s.times(id).await, before);
-    assert_eq!(s.service.get_event(id).await.unwrap().title, "Meeting");
+    assert_eq!(
+        s.service.get_event(single(id)).await.unwrap().title,
+        "Meeting"
+    );
     assert!(s.events.try_recv().is_err());
 }
 
@@ -688,31 +683,6 @@ async fn changing_or_deleting_an_event_that_does_not_exist_is_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, ServiceError::NotFound(_)), "{err:?}");
-}
-
-#[tokio::test]
-async fn a_series_cannot_be_changed_or_deleted_yet() {
-    let mut s = setup();
-    let cal = local(&mut s, "Home").await;
-    let id = s.raw_event(cal, true, false).await;
-    s.db.write(move |c| {
-        c.execute(
-            "UPDATE events SET recurrence = 'RRULE:FREQ=DAILY' WHERE id = ?1",
-            [id],
-        )
-    })
-    .await
-    .unwrap();
-
-    for scope in [Scope::This, Scope::All] {
-        assert_invalid(
-            s.service
-                .update_event(single(id), scope, meeting(cal), "UTC")
-                .await,
-        );
-        assert_invalid(s.service.delete_event(single(id), scope).await);
-    }
-    assert_eq!(s.count("events").await, 1);
 }
 
 // ---- deleting ------------------------------------------------------------------------------
@@ -773,7 +743,7 @@ async fn every_write_follows_the_editability_rule() {
                 let case = format!("access {access}, organizer {organizer}, guests {guests}");
 
                 assert_eq!(
-                    s.service.get_event(id).await.unwrap().editable,
+                    s.service.get_event(single(id)).await.unwrap().editable,
                     editable,
                     "{case}"
                 );

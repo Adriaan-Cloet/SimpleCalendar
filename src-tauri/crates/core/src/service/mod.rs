@@ -5,11 +5,14 @@
 
 mod events;
 mod google;
+mod series;
 #[cfg(test)]
 mod tests;
 mod text;
 
-pub use events::{EventDetail, EventDraft, EventReminder, OccurrenceRef, Scope};
+pub use events::{
+    EventDetail, EventDraft, EventReminder, OccurrenceRef, Repeat, RepeatFrequency, Scope,
+};
 pub use google::GoogleClientInfo;
 
 use std::collections::BTreeSet;

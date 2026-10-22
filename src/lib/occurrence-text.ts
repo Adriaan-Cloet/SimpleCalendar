@@ -1,7 +1,7 @@
 // How an occurrence's times read in the views. Rust sends wall-clock times in the display zone,
 // which is this computer's zone, so a local `Date` built from the written date and time shows
 // them unchanged. Nothing here converts between zones.
-import type { Occurrence } from './calendar.js';
+import type { Occurrence, Repeat } from './calendar.js';
 import { displayLocale } from './display-format.js';
 
 /** A `YYYY-MM-DD` date or a timed value from Rust as a local `Date`, at the time written */
@@ -36,4 +36,15 @@ export function describeWhen(o: Occurrence, locale = displayLocale): string[] {
 		minute: '2-digit'
 	});
 	return [dateTime.format(start) + ' –', dateTime.format(end)];
+}
+
+const every = { daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' };
+
+/** The popover's line for a series: `Every week until 31 December 2026` */
+export function describeRepeat(repeat: Repeat, locale = displayLocale): string {
+	if (repeat.frequency === 'custom') return 'Repeats on a custom schedule';
+	const often = `Every ${every[repeat.frequency]}`;
+	if (repeat.until === null) return often;
+	const date = new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'long', year: 'numeric' });
+	return `${often} until ${date.format(wallClock(repeat.until))}`;
 }

@@ -8,12 +8,14 @@
 	// browser handles focus, Escape and the backdrop in both webviews. The form's rules live in
 	// `event-form.ts`; Rust checks everything again when saving.
 	import { calendarColor } from '#lib/calendar-color.js';
-	import type { CalendarInfo } from '#lib/calendar.js';
+	import type { CalendarInfo, Scope } from '#lib/calendar.js';
 	import {
 		formProblem,
 		reminderChoices,
 		reminderLabel,
+		saveScopes,
 		withAllDay,
+		withRepeatEnd,
 		withStart,
 		zoneOptions,
 		type EventForm
@@ -27,15 +29,17 @@
 		initial: EventForm;
 		/** Whether this creates an event, or changes one */
 		isNew: boolean;
+		/** It changes an occurrence of a series: saving asks whether for this event or all */
+		series: boolean;
 		calendars: CalendarInfo[];
 		/** The viewer's zone, always offered */
 		displayZone: string;
-		/** Saves the form; rejects with a `ServiceError` */
-		onsave: (form: EventForm) => Promise<void>;
+		/** Saves the form for `scope`; rejects with a `ServiceError` */
+		onsave: (form: EventForm, scope: Scope) => Promise<void>;
 		onclose: () => void;
 	}
 
-	let { initial, isNew, calendars, displayZone, onsave, onclose }: Props = $props();
+	let { initial, isNew, series, calendars, displayZone, onsave, onclose }: Props = $props();
 
 	// A copy, taken once: editing never changes the caller's form. The page shows a new editor
 	// for every event it opens.
@@ -43,6 +47,8 @@
 	let form = $state<EventForm>($state.snapshot(initial));
 	let saving = $state(false);
 	let error = $state<string | null>(null);
+	/** What "Save" may apply to while the footer asks; `null` while it does not */
+	let asking = $state<Scope[] | null>(null);
 
 	let dialog: HTMLDialogElement | undefined = $state();
 	let titleInput: HTMLInputElement | undefined = $state();
@@ -50,9 +56,20 @@
 	const writable = $derived(calendars.filter((c) => c.editable));
 	const calendar = $derived(writable.find((c) => c.id === form.calendarId));
 	/** Fields whose text cannot be read; the form keeps their last readable value */
-	let unreadable = $state({ startDate: false, startTime: false, endDate: false, endTime: false });
+	let unreadable = $state({
+		startDate: false,
+		startTime: false,
+		endDate: false,
+		endTime: false,
+		repeatUntil: false
+	});
+	const repeats = $derived(form.repeat !== 'never' && form.repeat !== 'custom');
 	const problem = $derived.by(() => {
-		if (unreadable.startDate || unreadable.endDate) {
+		if (
+			unreadable.startDate ||
+			unreadable.endDate ||
+			(repeats && form.repeatUntil !== null && unreadable.repeatUntil)
+		) {
 			return 'Enter dates as day/month/year, such as 20/10/2026.';
 		}
 		// The time fields are hidden while all-day, and their text no longer counts
@@ -74,15 +91,21 @@
 		titleInput?.focus();
 	});
 
-	async function submit(event: SubmitEvent) {
+	function submit(event: SubmitEvent) {
 		event.preventDefault();
 		if (saving || problem) return;
+		if (series) asking = saveScopes(initial, form);
+		else save('all');
+	}
+
+	async function save(scope: Scope) {
 		saving = true;
 		error = null;
 		try {
-			await onsave($state.snapshot(form));
+			await onsave($state.snapshot(form), scope);
 		} catch (e) {
 			error = serviceError(e).message;
+			asking = null;
 		} finally {
 			saving = false;
 		}
@@ -212,6 +235,46 @@
 					</select>
 				</label>
 			{/if}
+
+			<label class="row">
+				<span class="label">Repeat</span>
+				<select bind:value={form.repeat}>
+					<option value="never">Never</option>
+					<option value="daily">Every day</option>
+					<option value="weekly">Every week</option>
+					<option value="monthly">Every month</option>
+					<option value="yearly">Every year</option>
+					{#if initial.repeat === 'custom'}
+						<option value="custom">Custom</option>
+					{/if}
+				</select>
+			</label>
+
+			{#if repeats}
+				<div class="row">
+					<span class="label" id="editor-end-repeat">End repeat</span>
+					<div class="when">
+						<select
+							class="end-choice"
+							aria-labelledby="editor-end-repeat"
+							value={form.repeatUntil === null ? 'never' : 'on'}
+							onchange={(e) => (form = withRepeatEnd(form, e.currentTarget.value === 'on'))}
+						>
+							<option value="never">Never</option>
+							<option value="on">On date</option>
+						</select>
+						{#if form.repeatUntil !== null}
+							<DateField
+								labelledby="editor-end-repeat"
+								class="date tabular"
+								value={form.repeatUntil}
+								onvalue={(date) => (form.repeatUntil = date)}
+								oninvalid={(bad) => (unreadable.repeatUntil = bad)}
+							/>
+						{/if}
+					</div>
+				</div>
+			{/if}
 		</div>
 
 		<div class="rows">
@@ -280,12 +343,31 @@
 			<p class="error" role="alert">{error ?? problem}</p>
 		{/if}
 
-		<footer>
-			<button type="button" class="button quiet" onclick={() => dialog?.close()}>Cancel</button>
-			<button type="submit" class="button primary" disabled={saving || problem !== null}>
-				{saving ? 'Saving…' : isNew ? 'Add' : 'Save'}
-			</button>
-		</footer>
+		{#if asking}
+			<footer class="asking" role="group" aria-labelledby="editor-scope">
+				<p id="editor-scope" class="question">
+					{asking.includes('this')
+						? 'This is a repeating event. Save it for this event only, or for all events?'
+						: 'This change applies to all events in the series.'}
+				</p>
+				<button type="button" class="button quiet" onclick={() => (asking = null)}>Cancel</button>
+				{#if asking.includes('this')}
+					<button type="button" class="button" disabled={saving} onclick={() => save('this')}>
+						This event
+					</button>
+				{/if}
+				<button type="button" class="button primary" disabled={saving} onclick={() => save('all')}>
+					All events
+				</button>
+			</footer>
+		{:else}
+			<footer>
+				<button type="button" class="button quiet" onclick={() => dialog?.close()}>Cancel</button>
+				<button type="submit" class="button primary" disabled={saving || problem !== null}>
+					{saving ? 'Saving…' : isNew ? 'Add' : 'Save'}
+				</button>
+			</footer>
+		{/if}
 	</form>
 </dialog>
 
@@ -428,6 +510,11 @@
 		flex: 0 0 80px;
 	}
 
+	.when .end-choice {
+		flex: 1 1 100px;
+		width: auto;
+	}
+
 	.when :global(input) {
 		-webkit-user-select: text;
 		user-select: text;
@@ -541,9 +628,17 @@
 
 	footer {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: flex-end;
 		gap: var(--space-xs);
 		margin-top: var(--space-lg);
+	}
+
+	/* The question takes its own line above the answers */
+	.question {
+		flex-basis: 100%;
+		margin-bottom: var(--space-xs);
+		color: var(--text-secondary);
 	}
 
 	/* Buttons, as in the Accounts dialog */
