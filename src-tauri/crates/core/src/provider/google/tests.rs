@@ -5,14 +5,16 @@ use chrono::TimeZone;
 use reqwest::Url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::db::Db;
 use crate::google::{ClientConfig, Endpoints};
 use crate::model::{Access, EventStatus};
-use crate::provider::{Reminder, ReminderMethod, Reminders, RemoteEvent, SeriesRole};
+use crate::provider::{
+    EventData, Field, Reminder, ReminderMethod, Reminders, RemoteEvent, SeriesRole,
+};
 use crate::secrets::{MemoryStore, Secret, Secrets};
 
 const EVENTS: &str = "/calendar/v3/calendars/primary@example.com/events";
@@ -163,8 +165,8 @@ async fn calendars_come_from_every_page_of_the_calendar_list() {
                 name: "me@example.com".into(),
                 color: Some("#9fe1e7".into()),
                 time_zone: Some("Europe/Brussels".into()),
-                // An owner may write, but this provider does not yet (#18).
-                access: Access::Read,
+                // An owner may write, and since #18 this provider does.
+                access: Access::Write,
                 is_primary: true,
                 default_reminders: vec![10],
             },
@@ -621,6 +623,290 @@ async fn an_event_that_cannot_be_read_is_skipped_with_a_warning() {
         changes.warnings[0].contains("yesterday"),
         "{:?}",
         changes.warnings
+    );
+}
+
+// ---- writing (§7.5) ------------------------------------------------------------------------
+
+/// The standup on 20 October 2026, 09:00 to 09:15 in Brussels, as the app stores it.
+fn standup() -> EventData {
+    EventData {
+        title: "Standup".into(),
+        description: Some("Daily".into()),
+        location: None,
+        all_day: false,
+        start_utc: brussels(2026, 10, 20, 9),
+        end_utc: brussels(2026, 10, 20, 9) + 15 * 60,
+        start_tz: Some("Europe/Brussels".into()),
+        end_tz: Some("Europe/Brussels".into()),
+        recurrence: None,
+        reminders: Reminders {
+            use_default: false,
+            overrides: vec![Reminder {
+                method: ReminderMethod::Popup,
+                minutes_before: 10,
+            }],
+        },
+    }
+}
+
+/// What Google answers to a write: the event with a new ETag.
+fn answer(id: &str, etag: &str, summary: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": id,
+        "status": "confirmed",
+        "etag": etag,
+        "summary": summary,
+        "start": {"dateTime": "2026-10-20T09:00:00+02:00", "timeZone": "Europe/Brussels"},
+        "end": {"dateTime": "2026-10-20T09:15:00+02:00", "timeZone": "Europe/Brussels"},
+        "organizer": {"self": true},
+    }))
+}
+
+/// The body of the only API request with `method` the fake Google received.
+async fn sent_body(server: &MockServer, method: &str) -> Value {
+    let requests = server.received_requests().await.unwrap();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|r| r.method.as_str() == method && r.url.path() != "/token")
+        .collect();
+    assert_eq!(sent.len(), 1, "{method} requests: {}", sent.len());
+    serde_json::from_slice(&sent[0].body).unwrap()
+}
+
+fn update(changed: &[Field], desired: EventData) -> EventUpdate {
+    EventUpdate {
+        remote_id: "e1".into(),
+        desired,
+        changed: changed.iter().copied().collect(),
+    }
+}
+
+#[test]
+fn only_the_fields_that_differ_have_changed() {
+    let base = standup();
+    let mut edited = standup();
+    assert!(edited.changed_from(&base).is_empty());
+    edited.title = "Retro".into();
+    edited.end_utc += 15 * 60;
+    edited.reminders.overrides.clear();
+    assert_eq!(
+        edited.changed_from(&base).into_iter().collect::<Vec<_>>(),
+        vec![Field::Title, Field::Times, Field::Reminders]
+    );
+}
+
+#[tokio::test]
+async fn a_new_event_is_inserted_whole_with_its_own_id_and_no_email() {
+    let s = setup().await;
+    Mock::given(method("POST"))
+        .and(path(EVENTS))
+        .and(query_param("sendUpdates", "none"))
+        .respond_with(answer("abc123", "\"e1\"", "Standup"))
+        .expect(1)
+        .mount(&s.server)
+        .await;
+
+    let created = s
+        .provider
+        .create_event(&cx(), &calendar(), "abc123", &standup())
+        .await
+        .unwrap();
+
+    assert_eq!(created.remote_id, "abc123");
+    assert_eq!(created.etag.as_deref(), Some("\"e1\""));
+    assert_eq!(
+        sent_body(&s.server, "POST").await,
+        json!({
+            "id": "abc123",
+            "summary": "Standup",
+            "description": "Daily",
+            "start": {"date": null, "dateTime": "2026-10-20T09:00:00+02:00",
+                      "timeZone": "Europe/Brussels"},
+            "end": {"date": null, "dateTime": "2026-10-20T09:15:00+02:00",
+                    "timeZone": "Europe/Brussels"},
+            "reminders": {"useDefault": false, "overrides": [{"method": "popup", "minutes": 10}]},
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_insert_whose_answer_was_lost_is_found_on_retry() {
+    let s = setup().await;
+    // The first attempt got through; Google refuses the same id a second time.
+    Mock::given(method("POST"))
+        .and(path(EVENTS))
+        .respond_with(google_error(409, "duplicate"))
+        .mount(&s.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{EVENTS}/abc123")))
+        .respond_with(answer("abc123", "\"e1\"", "Standup"))
+        .expect(1)
+        .mount(&s.server)
+        .await;
+
+    let created = s
+        .provider
+        .create_event(&cx(), &calendar(), "abc123", &standup())
+        .await
+        .unwrap();
+    assert_eq!(created.etag.as_deref(), Some("\"e1\""));
+}
+
+#[tokio::test]
+async fn a_patch_sends_exactly_the_changed_fields_with_if_match_and_no_email() {
+    let s = setup().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{EVENTS}/e1")))
+        .and(query_param("sendUpdates", "none"))
+        .and(header("If-Match", "\"e1\""))
+        .respond_with(answer("e1", "\"e2\"", "Retro"))
+        .expect(1)
+        .mount(&s.server)
+        .await;
+    let mut desired = standup();
+    desired.title = "Retro".into();
+    desired.description = None;
+
+    let updated = s
+        .provider
+        .update_event(
+            &cx(),
+            &calendar(),
+            &update(&[Field::Title, Field::Description], desired),
+            Some(&Etag("\"e1\"".into())),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.etag.as_deref(), Some("\"e2\""));
+    // A cleared text is `null`; nothing the app does not own (attendees, organizer,
+    // guestsCanModify) is ever named, so the patch leaves it alone.
+    assert_eq!(
+        sent_body(&s.server, "PATCH").await,
+        json!({"summary": "Retro", "description": null})
+    );
+}
+
+#[tokio::test]
+async fn a_patch_to_all_day_clears_the_time_and_sends_owned_arrays_whole() {
+    let s = setup().await;
+    Mock::given(method("PATCH"))
+        .respond_with(answer("e1", "\"e2\"", "Standup"))
+        .mount(&s.server)
+        .await;
+    let mut desired = standup();
+    desired.all_day = true;
+    desired.start_utc = midnight_utc(2026, 10, 20);
+    desired.end_utc = midnight_utc(2026, 10, 21);
+    desired.start_tz = None;
+    desired.end_tz = None;
+    desired.recurrence = Some("RRULE:FREQ=WEEKLY".into());
+
+    s.provider
+        .update_event(
+            &cx(),
+            &calendar(),
+            &update(
+                &[Field::Times, Field::Recurrence, Field::Reminders],
+                desired,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let body = sent_body(&s.server, "PATCH").await;
+    assert_eq!(
+        body["start"],
+        json!({"date": "2026-10-20", "dateTime": null, "timeZone": null})
+    );
+    assert_eq!(body["end"]["date"], "2026-10-21");
+    assert_eq!(body["recurrence"], json!(["RRULE:FREQ=WEEKLY"]));
+    assert_eq!(
+        body["reminders"],
+        json!({"useDefault": false, "overrides": [{"method": "popup", "minutes": 10}]})
+    );
+    // Without an ETag, as for an occurrence never changed before, the patch is unconditional.
+    let requests = s.server.received_requests().await.unwrap();
+    let patch = requests
+        .iter()
+        .find(|r| r.method.as_str() == "PATCH")
+        .unwrap();
+    assert!(!patch.headers.contains_key("if-match"));
+}
+
+#[tokio::test]
+async fn a_stale_etag_is_a_conflict_for_patch_and_delete() {
+    let s = setup().await;
+    Mock::given(method("PATCH"))
+        .respond_with(google_error(412, "conditionNotMet"))
+        .mount(&s.server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(google_error(412, "conditionNotMet"))
+        .mount(&s.server)
+        .await;
+    let etag = Etag("\"old\"".into());
+
+    let patched = s
+        .provider
+        .update_event(
+            &cx(),
+            &calendar(),
+            &update(&[Field::Title], standup()),
+            Some(&etag),
+        )
+        .await;
+    let deleted = s
+        .provider
+        .delete_event(&cx(), &calendar(), "e1", Some(&etag))
+        .await;
+    assert_eq!(patched.unwrap_err(), ProviderError::Conflict);
+    assert_eq!(deleted.unwrap_err(), ProviderError::Conflict);
+}
+
+#[tokio::test]
+async fn a_delete_carries_if_match_and_an_event_already_gone_is_deleted() {
+    let s = setup().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{EVENTS}/e1")))
+        .and(query_param("sendUpdates", "none"))
+        .and(header("If-Match", "\"e1\""))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&s.server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{EVENTS}/gone")))
+        .respond_with(google_error(410, "deleted"))
+        .mount(&s.server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{EVENTS}/never")))
+        .respond_with(google_error(404, "notFound"))
+        .mount(&s.server)
+        .await;
+
+    let etag = Etag("\"e1\"".into());
+    for id in ["e1", "gone", "never"] {
+        s.provider
+            .delete_event(&cx(), &calendar(), id, Some(&etag))
+            .await
+            .unwrap();
+    }
+}
+
+#[test]
+fn an_occurrence_is_named_by_its_series_and_original_start() {
+    assert_eq!(
+        instance_id("abc", brussels(2026, 10, 20, 9), false),
+        "abc_20261020T070000Z"
+    );
+    assert_eq!(
+        instance_id("abc", midnight_utc(2026, 12, 25), true),
+        "abc_20261225"
     );
 }
 

@@ -6,6 +6,7 @@
 pub mod db;
 pub mod google;
 pub mod model;
+pub mod outbox;
 pub mod provider;
 pub mod recurrence;
 pub mod secrets;

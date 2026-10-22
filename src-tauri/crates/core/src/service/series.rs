@@ -16,6 +16,11 @@
 //! - A new rule, or a switch between all-day and timed or to another zone, starts the series
 //!   again: its exceptions are dropped, as Google does.
 //! - No rule at all makes the series the single event in the form.
+//!
+//! On a remote calendar (#18) every change also queues an outbox row: for one occurrence an
+//! update or delete of Google's instance, for all events an update of the master. The server
+//! then decides what happens to the exceptions, so when all events move or get a new rule the
+//! local exceptions are dropped and the calendar is pulled again in full, after the push.
 //
 // Rust note: the functions here return `rusqlite::Result<Result<_, ServiceError>>`, as in
 // `events.rs`: the outer error is the database's, the inner one a refusal to report.
@@ -23,8 +28,12 @@
 use chrono::NaiveTime;
 
 use super::ServiceError;
-use super::events::{EVENT_GONE, Fields, Scope, Stored, Valid, load, set_recurrence, write_event};
+use super::events::{
+    EVENT_GONE, Fields, Scope, Stored, Valid, load, now, set_recurrence, write_event,
+};
 use crate::model::TimeKind;
+use crate::outbox::{self, Op};
+use crate::provider::google;
 use crate::recurrence::{from_wall_clock, wall_clock};
 
 const ONLY_ALL_REPEAT: &str = "A change to how an event repeats applies to all events.";
@@ -57,14 +66,15 @@ pub(super) fn find(
 }
 
 /// Changes one or all occurrences of `series` to `valid`. Returns the original start of the
-/// occurrence that was changed, which "all events" may have moved.
+/// occurrence that was changed, which "all events" may have moved, and the source to sync if
+/// an outbox row was queued.
 pub(super) fn change(
     c: &rusqlite::Connection,
     series: &Stored,
     original_start: i64,
     scope: Scope,
     valid: &Valid,
-) -> rusqlite::Result<Result<i64, ServiceError>> {
+) -> rusqlite::Result<Result<(i64, Option<String>), ServiceError>> {
     let Some((exception, base)) = find(c, series, original_start)? else {
         return Ok(Err(ServiceError::NotFound(EVENT_GONE)));
     };
@@ -80,43 +90,57 @@ pub(super) fn change(
                 Some(exception) => exception.id,
                 None => insert_exception(c, series.id, original_start, "confirmed")?,
             };
+            // A new exception starts as the series' occurrence, which is what the server has.
+            let before = outbox::read_data(c, id)?;
             write_event(c, id, &valid.fields)?;
-            Ok(Ok(original_start))
+            let push = outbox::queue(c, Op::Update, id, before.as_ref(), now())?;
+            Ok(Ok((original_start, push)))
         }
         Scope::All => {
             let edited = exception.map(|e| e.id);
-            change_all(c, series, original_start, &base, edited, valid).map(Ok)
+            let before = outbox::read_data(c, series.id)?;
+            let moved = change_all(c, series, original_start, &base, edited, valid)?;
+            let push = outbox::queue(c, Op::Update, series.id, before.as_ref(), now())?;
+            Ok(Ok((moved, push)))
         }
     }
 }
 
-/// Deletes the occurrence of `series` at `original_start`.
+/// Deletes the occurrence of `series` at `original_start`. Returns the source to sync if an
+/// outbox row was queued.
 pub(super) fn cancel(
     c: &rusqlite::Connection,
     series: &Stored,
     original_start: i64,
-) -> rusqlite::Result<Result<(), ServiceError>> {
-    match find(c, series, original_start)? {
+) -> rusqlite::Result<Result<Option<String>, ServiceError>> {
+    let id = match find(c, series, original_start)? {
         None => return Ok(Err(ServiceError::NotFound(EVENT_GONE))),
         Some((Some(exception), _)) => {
             c.execute(
                 "UPDATE events SET status = 'cancelled' WHERE id = ?1",
                 [exception.id],
             )?;
+            exception.id
         }
-        Some((None, _)) => {
-            insert_exception(c, series.id, original_start, "cancelled")?;
-        }
-    }
-    Ok(Ok(()))
+        Some((None, _)) => insert_exception(c, series.id, original_start, "cancelled")?,
+    };
+    // The cancelled row keeps the occurrence's values: what to restore if the server refuses.
+    let before = outbox::read_data(c, id)?;
+    Ok(Ok(outbox::queue(
+        c,
+        Op::Delete,
+        id,
+        before.as_ref(),
+        now(),
+    )?))
 }
 
 /// A new exception to `series` for its occurrence at `original_start`, with the series' values
 /// at that time. Returns its id.
 ///
-/// It gets its own random remote id: Google names an occurrence by the series' id and its
-/// original start, which the outbox (#18) can build from `recurring_remote_id` and
-/// `original_start_utc`, and a name built from the start here would collide once "all events"
+/// On a remote calendar its remote id is Google's id of that occurrence, so the outbox can
+/// address it and a later pull updates this row instead of adding a second one. On a local
+/// calendar it gets a random one: a name built from the start would collide once "all events"
 /// moves the series.
 fn insert_exception(
     c: &rusqlite::Connection,
@@ -124,6 +148,16 @@ fn insert_exception(
     original_start: i64,
     status: &str,
 ) -> rusqlite::Result<i64> {
+    let (calendar_id, master, all_day): (i64, String, bool) = c.query_row(
+        "SELECT calendar_id, remote_id, all_day FROM events WHERE id = ?1",
+        [series],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    // Google is the only remote calendar that can be written so far.
+    let remote_id = match outbox::remote_source(c, calendar_id)? {
+        Some(_) => google::instance_id(&master, original_start, all_day),
+        None => uuid::Uuid::new_v4().simple().to_string(),
+    };
     c.execute(
         "INSERT INTO events (calendar_id, remote_id, ical_uid, status, title, description,
                              location, all_day, start_utc, end_utc, start_tz, end_tz,
@@ -134,12 +168,7 @@ fn insert_exception(
                 remote_id, id, ?3,
                 is_organizer, guests_can_modify, use_default_reminders
          FROM events WHERE id = ?1",
-        rusqlite::params![
-            series,
-            uuid::Uuid::new_v4().simple().to_string(),
-            original_start,
-            status
-        ],
+        rusqlite::params![series, remote_id, original_start, status],
     )?;
     let id = c.last_insert_rowid();
     c.execute(
@@ -212,6 +241,17 @@ fn change_all(
     let moved = shift(original_start, kind_before, kind);
     if reshaped || Some(rule) != series.rule().as_ref() {
         drop_exceptions(c, series.id)?;
+        if outbox::remote_source(c, series.fields.calendar_id)?.is_some() {
+            pull_again(c, series.fields.calendar_id)?;
+        }
+        return Ok(moved);
+    }
+    // The server keeps the exceptions of a remote series under ids built from their original
+    // starts, and decides itself where they go when the series moves. Only it knows.
+    let retimed = delta != chrono::TimeDelta::zero() || length != old.duration();
+    if retimed && outbox::remote_source(c, series.fields.calendar_id)?.is_some() {
+        drop_exceptions(c, series.id)?;
+        pull_again(c, series.fields.calendar_id)?;
         return Ok(moved);
     }
     for exception in load(c, "recurring_event_id = ?1", &[series.id])? {
@@ -280,6 +320,16 @@ fn follow(row: &Fields, series: &Fields, base: &Fields, new: &Fields) -> Fields 
         reminders: reminders.1.clone(),
         ..row.clone()
     }
+}
+
+/// Makes the next pull of `calendar_id` a full one, which brings back what the server has.
+/// The engine pushes before it pulls, so that pull already sees this edit (§7.2).
+fn pull_again(c: &rusqlite::Connection, calendar_id: i64) -> rusqlite::Result<()> {
+    c.execute(
+        "UPDATE calendars SET sync_cursor = NULL WHERE id = ?1",
+        [calendar_id],
+    )?;
+    Ok(())
 }
 
 /// Deletes the exceptions of `series`, cancelled ones included.

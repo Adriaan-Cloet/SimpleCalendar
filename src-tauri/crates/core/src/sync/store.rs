@@ -9,6 +9,7 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::SourceKind;
+use crate::outbox;
 use crate::provider::{
     CalendarRef, MAX_REMINDER_MINUTES, RemoteCalendar, RemoteEvent, SeriesRole, SyncCursor,
 };
@@ -182,11 +183,19 @@ pub(crate) fn apply_page(
     seen: &mut HashSet<String>,
 ) -> rusqlite::Result<bool> {
     for event in upserts {
-        upsert_event(tx, calendar_id, event)?;
         seen.insert(event.remote_id.clone());
+        if waiting(tx, calendar_id, &event.remote_id)? {
+            // An edit is about to be sent; its ETag check decides who wins (§7.4).
+            log::info!("event {}: kept, an edit waits to be sent", event.remote_id);
+            continue;
+        }
+        upsert_event(tx, calendar_id, event)?;
     }
     let mut deleted = 0;
     for remote_id in deletions {
+        if waiting(tx, calendar_id, remote_id)? {
+            continue;
+        }
         // Deleting a master also deletes its linked exceptions, through the cascade on
         // `recurring_event_id`.
         deleted += tx.execute(
@@ -197,8 +206,28 @@ pub(crate) fn apply_page(
     Ok(!upserts.is_empty() || deleted > 0)
 }
 
-/// Inserts or updates one event, then links it to its series (§7.2).
-fn upsert_event(tx: &Transaction, calendar_id: i64, event: &RemoteEvent) -> rusqlite::Result<()> {
+/// Whether the event `remote_id` has an outbox row that was not sent yet.
+fn waiting(tx: &Transaction, calendar_id: i64, remote_id: &str) -> rusqlite::Result<bool> {
+    let id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM events WHERE calendar_id = ?1 AND remote_id = ?2",
+            params![calendar_id, remote_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => outbox::has_pending(tx, id),
+        None => Ok(false),
+    }
+}
+
+/// Inserts or updates one event, then links it to its series (§7.2). The engine also stores
+/// what the server answers to a write with it.
+pub(crate) fn upsert_event(
+    tx: &Transaction,
+    calendar_id: i64,
+    event: &RemoteEvent,
+) -> rusqlite::Result<()> {
     let (recurrence, master_remote_id, original_start) = match &event.series {
         SeriesRole::Single => (None, None, None),
         SeriesRole::Master { recurrence } => (Some(recurrence.as_str()), None, None),
@@ -314,7 +343,8 @@ fn upsert_event(tx: &Transaction, calendar_id: i64, event: &RemoteEvent) -> rusq
     Ok(())
 }
 
-/// After the last page of a full pull: deletes the events that were not seen, then the
+/// After the last page of a full pull: deletes the events that were not seen, except those
+/// with an outbox row still to send (a create the server has not heard of yet), then the
 /// exceptions whose series never arrived. Returns whether anything was deleted.
 pub(super) fn finish_full_pull(
     tx: &Transaction,
@@ -329,6 +359,9 @@ pub(super) fn finish_full_pull(
         .collect::<rusqlite::Result<_>>()?;
     let mut deleted = 0;
     for id in unseen {
+        if outbox::has_pending(tx, id)? {
+            continue;
+        }
         // A master deleted earlier in this loop may already have taken this row with it.
         deleted += tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
     }

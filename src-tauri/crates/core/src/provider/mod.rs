@@ -4,7 +4,7 @@
 //! what it needs in a `SourceContext` and returns plain values. The sync engine is the only
 //! caller, and does all database work (§7).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,7 +115,7 @@ pub struct RemoteEvent {
 }
 
 /// An event's reminders (§7.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reminders {
     /// The calendar's default reminders apply, and `overrides` is empty.
     pub use_default: bool,
@@ -135,7 +135,9 @@ impl Default for Reminders {
 /// The longest reminder Google allows, and `event_reminders` accepts: four weeks.
 pub const MAX_REMINDER_MINUTES: u32 = 40320;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Rust note: `derive(Ord)` compares the fields in the order they are declared, so a sorted
+// list has every popup reminder before the email ones, each earliest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Reminder {
     pub method: ReminderMethod,
     /// 0 to 40320 (four weeks).
@@ -166,6 +168,123 @@ impl ReminderMethod {
             .into_iter()
             .find(|method| method.as_str() == value)
     }
+}
+
+/// An event as the app wants it on the server: the values it owns. The outbox stores two of
+/// these per edit, before and after (§7.3), and a provider writes from them. Times are stored
+/// values as described in §4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventData {
+    pub title: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub all_day: bool,
+    pub start_utc: i64,
+    /// Exclusive.
+    pub end_utc: i64,
+    pub start_tz: Option<String>,
+    pub end_tz: Option<String>,
+    /// A master's `RRULE`, `RDATE` and `EXDATE` lines; `None` for anything else.
+    pub recurrence: Option<String>,
+    /// The overrides sorted, so equal reminders compare equal.
+    pub reminders: Reminders,
+}
+
+/// A part of an event that an edit can change. Google sends a changed part, and only that
+/// (§7.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Field {
+    Title,
+    Description,
+    Location,
+    /// Start, end, their zones and whether it is all-day: they only make sense together.
+    Times,
+    Recurrence,
+    Reminders,
+}
+
+/// The parts that changed. A `BTreeSet`, so it lists them in a fixed order.
+pub type FieldSet = BTreeSet<Field>;
+
+impl EventData {
+    /// The parts in which `self` differs from `base`.
+    pub fn changed_from(&self, base: &EventData) -> FieldSet {
+        Field::ALL
+            .into_iter()
+            .filter(|&field| !self.same(base, field))
+            .collect()
+    }
+
+    /// Whether `other` has the same value as `self` in `field`.
+    pub fn same(&self, other: &EventData, field: Field) -> bool {
+        match field {
+            Field::Title => self.title == other.title,
+            Field::Description => self.description == other.description,
+            Field::Location => self.location == other.location,
+            Field::Times => {
+                (
+                    self.all_day,
+                    self.start_utc,
+                    self.end_utc,
+                    &self.start_tz,
+                    &self.end_tz,
+                ) == (
+                    other.all_day,
+                    other.start_utc,
+                    other.end_utc,
+                    &other.start_tz,
+                    &other.end_tz,
+                )
+            }
+            Field::Recurrence => self.recurrence == other.recurrence,
+            Field::Reminders => self.reminders == other.reminders,
+        }
+    }
+}
+
+impl Field {
+    pub const ALL: [Field; 6] = [
+        Field::Title,
+        Field::Description,
+        Field::Location,
+        Field::Times,
+        Field::Recurrence,
+        Field::Reminders,
+    ];
+}
+
+impl From<&RemoteEvent> for EventData {
+    /// The values of a remote event that the app owns, to compare with what it sent.
+    fn from(event: &RemoteEvent) -> EventData {
+        let mut reminders = event.reminders.clone();
+        reminders.overrides.sort();
+        EventData {
+            title: event.title.clone(),
+            description: event.description.clone(),
+            location: event.location.clone(),
+            all_day: event.all_day,
+            start_utc: event.start_utc,
+            end_utc: event.end_utc,
+            start_tz: event.start_tz.clone(),
+            end_tz: event.end_tz.clone(),
+            recurrence: match &event.series {
+                SeriesRole::Master { recurrence } => Some(recurrence.clone()),
+                SeriesRole::Single | SeriesRole::Exception { .. } => None,
+            },
+            reminders,
+        }
+    }
+}
+
+/// An edit, as the engine hands it to a provider (§5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventUpdate {
+    /// The event, or for one occurrence of a series the provider's id of that occurrence.
+    pub remote_id: String,
+    /// The whole state the user wants. CalDAV will write all of it.
+    pub desired: EventData,
+    /// What differs from the state the edit was based on. Google sends only this.
+    pub changed: FieldSet,
 }
 
 /// A position in the provider's change history. Opaque: the engine stores it and hands it
@@ -264,9 +383,7 @@ pub trait CalendarProvider: Send + Sync {
     }
 }
 
-/// A provider that can also write. Nothing implements it yet: Google write (v0.2) is the
-/// first. `create_event` and `update_event` join it then, together with the draft and update
-/// types they take (§5).
+/// A provider that can also write: Google, from v0.2 (§5, §7.5).
 //
 // Rust note: `WritableProvider: CalendarProvider` is a supertrait. Everything writable is also
 // readable, and a `&dyn WritableProvider` can call the read methods too.
@@ -279,7 +396,30 @@ pub trait WritableProvider: CalendarProvider {
         remote_id: &str,
     ) -> Result<Option<RemoteEvent>, ProviderError>;
 
+    /// Creates `event` under `remote_id`, which the app generated (§7.3). If the id exists
+    /// already, an earlier attempt got through and only its answer was lost: that is a
+    /// success, and the existing event is returned.
+    async fn create_event(
+        &self,
+        cx: &SourceContext,
+        calendar: &CalendarRef,
+        remote_id: &str,
+        event: &EventData,
+    ) -> Result<RemoteEvent, ProviderError>;
+
+    /// Writes `update.changed`. `if_match` is the ETag the edit was based on; a mismatch is
+    /// `ProviderError::Conflict`. Without one the write is unconditional, which only an
+    /// occurrence of a series that was never changed before needs.
+    async fn update_event(
+        &self,
+        cx: &SourceContext,
+        calendar: &CalendarRef,
+        update: &EventUpdate,
+        if_match: Option<&Etag>,
+    ) -> Result<RemoteEvent, ProviderError>;
+
     /// `if_match` is the ETag the delete was based on. A mismatch is `ProviderError::Conflict`.
+    /// An event that is already gone is a success.
     async fn delete_event(
         &self,
         cx: &SourceContext,

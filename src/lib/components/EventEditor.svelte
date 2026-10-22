@@ -10,6 +10,7 @@
 	import { calendarColor } from '#lib/calendar-color.js';
 	import type { CalendarInfo, Scope } from '#lib/calendar.js';
 	import {
+		calendarChoices,
 		formProblem,
 		reminderChoices,
 		reminderLabel,
@@ -53,7 +54,7 @@
 	let dialog: HTMLDialogElement | undefined = $state();
 	let titleInput: HTMLInputElement | undefined = $state();
 
-	const writable = $derived(calendars.filter((c) => c.editable));
+	const writable = $derived(calendarChoices(calendars, isNew ? null : initial.calendarId));
 	const calendar = $derived(writable.find((c) => c.id === form.calendarId));
 	/** Fields whose text cannot be read; the form keeps their last readable value */
 	let unreadable = $state({

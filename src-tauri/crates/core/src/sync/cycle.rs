@@ -25,7 +25,7 @@ pub(super) struct Ctx {
 }
 
 impl Ctx {
-    fn emit(&self, event: CoreEvent) {
+    pub(super) fn emit(&self, event: CoreEvent) {
         // Only fails when the shell stopped listening, which happens when the app exits.
         let _ = self.events.send(event);
     }
@@ -41,7 +41,7 @@ impl Ctx {
 
 /// Why a cycle failed.
 #[derive(Debug, thiserror::Error)]
-enum SyncError {
+pub(super) enum SyncError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
     /// Includes a missing or locked keychain, with the message that says what to do.
@@ -120,8 +120,7 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
     Some(interval)
 }
 
-/// Steps 1 to 4 of §7.2. Step 2, pushing the outbox, comes with writable providers (v0.2), and
-/// step 5, notifying, happens after every commit.
+/// Steps 1 to 4 of §7.2. Step 5, notifying, happens after every commit.
 async fn sync_source(
     ctx: &Ctx,
     source_id: &str,
@@ -134,6 +133,10 @@ async fn sync_source(
         display_name: display_name.to_owned(),
         secret: ctx.secrets.get(source_id).await?,
     };
+
+    // 2. Push, so the pull below already sees our own writes. A row that cannot be sent now
+    // ends the cycle before the pull.
+    super::push::push(ctx, &cx, provider).await?;
 
     // 3. List calendars.
     let remote = provider.list_calendars(&cx).await?;

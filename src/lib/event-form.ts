@@ -1,7 +1,14 @@
 // The event editor's form (issue #16): what it shows, and how that becomes an `EventDraft`.
 // Everything here works on wall-clock dates and times as written. Turning them into instants,
 // with the event's zone and its DST rules, is Rust's job (architecture §10).
-import type { EventDetail, EventDraft, EventReminder, Frequency, Scope } from './calendar.js';
+import type {
+	CalendarInfo,
+	EventDetail,
+	EventDraft,
+	EventReminder,
+	Frequency,
+	Scope
+} from './calendar.js';
 import { isoDate, isSameDay, startOfWeek } from './week-dates.js';
 
 export interface EventForm {
@@ -196,6 +203,19 @@ export function defaultStart(weekStart: Date, now: Date): Date {
 		return new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1);
 	}
 	return new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate(), 9);
+}
+
+/**
+ * The calendars the editor offers: every writable one for a new event (`current` is `null`).
+ * An existing event moves only between calendars on this computer; one of an account stays in
+ * its calendar, as Rust requires (architecture §10).
+ */
+export function calendarChoices(calendars: CalendarInfo[], current: number | null): CalendarInfo[] {
+	const writable = calendars.filter((c) => c.editable);
+	if (current === null) return writable;
+	const own = calendars.find((c) => c.id === current);
+	if (own?.source_kind !== 'local') return writable.filter((c) => c.id === current);
+	return writable.filter((c) => c.source_kind === 'local');
 }
 
 /** The zones the editor offers: what the webview knows, plus the event's and the viewer's */
