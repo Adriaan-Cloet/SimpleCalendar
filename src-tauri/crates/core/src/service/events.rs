@@ -1,9 +1,10 @@
 //! Creating, reading, changing and deleting events (`docs/architecture.md` §4, §10).
 //!
-//! Every write checks editability itself (§4): the UI hiding a button is not enough. Writes go
-//! to local calendars only. A remote calendar needs the outbox (#18) first, or the next sync
-//! would quietly undo the change; Google calendars are stored read-only until then (§7.5).
-//! What "only this event" and "all events" do to a series is in `series.rs` (#17).
+//! Every write checks editability itself (§4): the UI hiding a button is not enough. A write to
+//! a remote calendar also queues an outbox row in the same transaction (§7.3) and wakes the sync
+//! engine, which sends it before its next pull. A deleted remote event stays hidden with
+//! `pending_delete` until the server confirms. What "only this event" and "all events" do to a
+//! series is in `series.rs` (#17).
 //
 // Rust note: like `google.rs`, this child module adds methods to `CalendarService` in its own
 // `impl` block, and can use the private items of `service` (`CALENDAR_GONE`, `parse_date`).
@@ -19,12 +20,13 @@ use super::{CALENDAR_GONE, CalendarService, ServiceError, parse_date, parse_zone
 use crate::CoreEvent;
 use crate::db::occurrences;
 use crate::model::{Occurrence, SourceKind, TimeKind};
+use crate::outbox::{self, Op};
 use crate::provider::{MAX_REMINDER_MINUTES, ReminderMethod};
 use crate::recurrence::rule::{Frequency, SimpleRule};
 use crate::recurrence::{Series, resolve_local, wall_clock};
 
 pub(super) const EVENT_GONE: &str = "This event no longer exists.";
-const NO_OUTBOX: &str = "Changes to this calendar can’t be saved yet.";
+const NO_MOVE: &str = "Only events on this computer can move to another calendar.";
 const NO_RULE: &str = "Choose how often the event repeats.";
 /// What a blank title becomes.
 const UNTITLED: &str = "New event";
@@ -284,9 +286,9 @@ impl CalendarService {
     /// Creates an event, or a series when the draft repeats, and returns its (first)
     /// occurrence with times in the viewer's zone `tz`, as `list_occurrences` would.
     ///
-    /// The calendar must be writable and local. The event gets a fresh remote id in the form
-    /// Google accepts, so it can be sent there once remote calendars are writable (§7.3), and
-    /// is the calendar's own (`is_organizer`, the column default), so it is always editable.
+    /// The calendar must be writable. The event gets a fresh remote id in the form Google
+    /// accepts, sent with the insert so a retry cannot create it twice (§7.3), and is the
+    /// calendar's own (`is_organizer`, the column default), so it is always editable.
     pub async fn create_event(
         &self,
         draft: EventDraft,
@@ -315,12 +317,15 @@ impl CalendarService {
                 let kind = valid.fields.kind();
                 let recurrence = valid.rule.and_then(|r| r.to_recurrence(kind, None));
                 set_recurrence(&tx, id, recurrence.as_deref())?;
+                let push = outbox::queue(&tx, Op::Create, id, None, now())?;
                 let occurrence = occurrences::occurrence(&tx, id, valid.fields.start_utc, viewer)?
                     .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
                 tx.commit()?;
-                Ok(Ok(occurrence))
+                Ok(Ok((occurrence, push)))
             })
             .await??;
+        let (occurrence, push) = occurrence;
+        self.push(push);
         // Only fails when the shell stopped listening, which happens when the app exits.
         let _ = self.events.send(CoreEvent::CalendarChanged {
             calendar_ids: vec![occurrence.calendar_id],
@@ -334,8 +339,9 @@ impl CalendarService {
     /// it.
     ///
     /// The event must be editable (§4), or this is `NotEditable`, whatever `draft` says. A new
-    /// calendar must be writable and local as well. A single event ignores `scope`; a draft
-    /// that repeats turns it into a series.
+    /// calendar must be writable as well, and only an event on this computer can move: another
+    /// account needs its provider's move, which v1 does not use. A single event ignores
+    /// `scope`; a draft that repeats turns it into a series.
     pub async fn update_event(
         &self,
         target: OccurrenceRef,
@@ -346,7 +352,7 @@ impl CalendarService {
         let viewer = parse_zone(tz)?;
         let valid = validate(draft)?;
         let after = valid.fields.calendar_id;
-        let (before, occurrence) = self
+        let (before, occurrence, push) = self
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
@@ -358,26 +364,36 @@ impl CalendarService {
                 if let Err(refused) = check_calendar(&tx, valid.fields.calendar_id)? {
                     return Ok(Err(refused));
                 }
-                let changed = if event.recurrence.is_some() {
+                let (from, to) = (event.fields.calendar_id, valid.fields.calendar_id);
+                if from != to
+                    && (outbox::remote_source(&tx, from)?.is_some()
+                        || outbox::remote_source(&tx, to)?.is_some())
+                {
+                    return Ok(Err(ServiceError::InvalidInput(NO_MOVE.into())));
+                }
+                let (changed, push) = if event.recurrence.is_some() {
                     match series::change(&tx, &event, target.original_start, scope, &valid)? {
-                        Ok(start) => start,
+                        Ok(changed) => changed,
                         Err(refused) => return Ok(Err(refused)),
                     }
                 } else {
                     if valid.rule == Some(Rule::Custom) {
                         return Ok(Err(ServiceError::InvalidInput(NO_RULE.into())));
                     }
+                    let base = outbox::read_data(&tx, event.id)?;
                     write_event(&tx, event.id, &valid.fields)?;
                     let kind = valid.fields.kind();
                     let recurrence = valid.rule.and_then(|r| r.to_recurrence(kind, None));
                     set_recurrence(&tx, event.id, recurrence.as_deref())?;
-                    valid.fields.start_utc
+                    let push = outbox::queue(&tx, Op::Update, event.id, base.as_ref(), now())?;
+                    (valid.fields.start_utc, push)
                 };
                 let occurrence = occurrences::occurrence(&tx, event.id, changed, viewer)?;
                 tx.commit()?;
-                Ok(Ok((event.fields.calendar_id, occurrence)))
+                Ok(Ok((event.fields.calendar_id, occurrence, push)))
             })
             .await??;
+        self.push(push);
         let mut calendar_ids = vec![before];
         if after != before {
             calendar_ids.push(after);
@@ -396,7 +412,7 @@ impl CalendarService {
         target: OccurrenceRef,
         scope: Scope,
     ) -> Result<(), ServiceError> {
-        let calendar_id = self
+        let (calendar_id, push) = self
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
@@ -405,25 +421,50 @@ impl CalendarService {
                     Ok(event) => event,
                     Err(refused) => return Ok(Err(refused)),
                 };
-                if event.recurrence.is_some() && scope == Scope::This {
-                    if let Err(refused) = series::cancel(&tx, &event, target.original_start)? {
-                        return Ok(Err(refused));
+                let push = if event.recurrence.is_some() && scope == Scope::This {
+                    match series::cancel(&tx, &event, target.original_start)? {
+                        Ok(push) => push,
+                        Err(refused) => return Ok(Err(refused)),
                     }
+                } else if outbox::remote_source(&tx, event.fields.calendar_id)?.is_some() {
+                    // Hidden until the server confirms; then the engine deletes the row.
+                    let base = outbox::read_data(&tx, event.id)?;
+                    tx.execute(
+                        "UPDATE events SET pending_delete = 1 WHERE id = ?1",
+                        [event.id],
+                    )?;
+                    outbox::queue(&tx, Op::Delete, event.id, base.as_ref(), now())?
                 } else {
                     // Its reminders and the series' exceptions go with it, through
                     // `ON DELETE CASCADE`.
                     tx.execute("DELETE FROM events WHERE id = ?1", [event.id])?;
-                }
+                    None
+                };
                 tx.commit()?;
-                Ok(Ok(event.fields.calendar_id))
+                Ok(Ok((event.fields.calendar_id, push)))
             })
             .await??;
+        self.push(push);
         // Only fails when the shell stopped listening, which happens when the app exits.
         let _ = self.events.send(CoreEvent::CalendarChanged {
             calendar_ids: vec![calendar_id],
         });
         Ok(())
     }
+}
+
+impl CalendarService {
+    /// Asks the engine to send what a write just queued for `source`, if anything.
+    fn push(&self, source: Option<String>) {
+        if let Some(source) = source {
+            self.sync.push(source);
+        }
+    }
+}
+
+/// The current time in epoch seconds.
+pub(super) fn now() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 /// Checks a draft and turns it into stored values. Nothing here needs the database.
@@ -528,44 +569,37 @@ fn non_blank(value: Option<String>) -> Option<String> {
 
 /// Whether events may be created in, or moved to, `calendar_id`. The outer `Result` is the
 /// database's, the inner one the refusal (see `update_calendar`).
+///
+/// `access` is `write` only where the provider writes too (§4), so a subscription never is.
 fn check_calendar(c: &Connection, calendar_id: i64) -> rusqlite::Result<Result<(), ServiceError>> {
-    let found: Option<(String, bool)> = c
+    let writable: Option<bool> = c
         .query_row(
-            "SELECT s.kind, c.access = 'write'
-             FROM calendars c JOIN sources s ON s.id = c.source_id WHERE c.id = ?1",
+            "SELECT access = 'write' FROM calendars WHERE id = ?1",
             [calendar_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()?;
-    Ok(match found {
+    Ok(match writable {
         None => Err(ServiceError::NotFound(CALENDAR_GONE)),
-        Some((_, false)) => Err(ServiceError::NotEditable),
-        Some((kind, true)) if kind != SourceKind::Local.as_str() => {
-            Err(ServiceError::InvalidInput(NO_OUTBOX.into()))
-        }
-        Some(_) => Ok(()),
+        Some(false) => Err(ServiceError::NotEditable),
+        Some(true) => Ok(()),
     })
 }
 
 /// Event `event_id`, a single event or a series, if it may be changed or deleted.
 fn check_event(c: &Connection, event_id: i64) -> rusqlite::Result<Result<Stored, ServiceError>> {
-    let found: Option<(bool, String)> = c
+    let editable: Option<bool> = c
         .query_row(
-            "SELECT c.access = 'write' AND (e.is_organizer OR e.guests_can_modify), s.kind
-             FROM events e
-             JOIN calendars c ON c.id = e.calendar_id
-             JOIN sources s ON s.id = c.source_id
-             WHERE e.id = ?1",
+            "SELECT c.access = 'write' AND (e.is_organizer OR e.guests_can_modify)
+             FROM events e JOIN calendars c ON c.id = e.calendar_id
+             WHERE e.id = ?1 AND e.pending_delete = 0",
             [event_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()?;
-    Ok(match found {
+    Ok(match editable {
         None => Err(ServiceError::NotFound(EVENT_GONE)),
-        Some((false, _)) => Err(ServiceError::NotEditable),
-        Some((_, kind)) if kind != SourceKind::Local.as_str() => {
-            Err(ServiceError::InvalidInput(NO_OUTBOX.into()))
-        }
+        Some(false) => Err(ServiceError::NotEditable),
         // `resolve` has replaced a linked exception by its series. One without a series is
         // invisible (§7.2), so there is nothing to change.
         Some(_) => match load(c, "id = ?1", &[event_id])?.pop() {
@@ -702,7 +736,7 @@ fn read_event(c: &Connection, target: OccurrenceRef) -> rusqlite::Result<Option<
              FROM events e
              JOIN calendars c ON c.id = e.calendar_id
              JOIN sources s ON s.id = c.source_id
-             WHERE e.id = ?1",
+             WHERE e.id = ?1 AND e.pending_delete = 0",
             [target.event_id],
             |r| {
                 Ok((

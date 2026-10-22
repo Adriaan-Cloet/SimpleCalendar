@@ -1,4 +1,4 @@
-//! The sync engine for read-only sources (`docs/architecture.md` §7.1, §7.2).
+//! The sync engine (`docs/architecture.md` §7.1, §7.2): it sends the outbox, then pulls.
 //!
 //! One long-lived task owns a queue of commands. It runs at most one cycle per source at a
 //! time; a request that arrives during a cycle sets a "run again" flag instead of starting a
@@ -6,6 +6,7 @@
 //! to providers and the only one that applies remote changes to the database.
 
 mod cycle;
+mod push;
 pub(crate) mod store;
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use cycle::Ctx;
+use cycle::{Ctx, SyncError};
 
 use crate::CoreEvent;
 use crate::db::Db;
@@ -84,6 +85,16 @@ impl SyncHandle {
         });
     }
 
+    /// Syncs `source_id` soon because a local edit queued an outbox row for it: the cycle sends
+    /// it before pulling (§7.2). Like the timer, this skips a source that needs a new sign-in;
+    /// the row waits until the user signs in again.
+    pub fn push(&self, source_id: String) {
+        self.send(Msg::Sync {
+            source_id: Some(source_id),
+            manual: false,
+        });
+    }
+
     /// Stops the engine. Cycles that are running are cancelled at their next `.await`; a page
     /// being applied is either committed whole or not at all.
     pub fn shutdown(&self) {
@@ -121,6 +132,21 @@ impl Requests {
             if let Msg::Sync {
                 source_id,
                 manual: true,
+            } = msg
+            {
+                requested.push(source_id);
+            }
+        }
+        requested
+    }
+
+    /// The sources of the `push` requests since the last call, in order.
+    pub(crate) fn pushes(&mut self) -> Vec<String> {
+        let mut requested = Vec::new();
+        while let Ok(msg) = self.0.try_recv() {
+            if let Msg::Sync {
+                source_id: Some(source_id),
+                manual: false,
             } = msg
             {
                 requested.push(source_id);

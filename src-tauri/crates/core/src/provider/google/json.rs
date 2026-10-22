@@ -1,14 +1,20 @@
-//! Google Calendar API v3 resources, and how they become the provider's types (§7.5).
+//! Google Calendar API v3 resources, and how they become the provider's types and back
+//! (§7.5).
 //!
-//! Pure: no HTTP. Only the fields the app stores are read; serde skips the rest.
+//! Pure: no HTTP. Only the fields the app stores are read; serde skips the rest. A request body
+//! names only the fields the app owns, so `attendees`, `organizer`, `guestsCanModify` and the
+//! rest of an event are never sent and never erased.
 
 use chrono::{DateTime, NaiveDate};
 use serde::Deserialize;
+use serde_json::{Map, Value, json};
 
-use crate::model::{Access, EventStatus};
+use crate::model::{Access, EventStatus, TimeKind};
 use crate::provider::{
-    Reminder, ReminderMethod, Reminders, RemoteCalendar, RemoteEvent, SeriesRole,
+    EventData, Field, FieldSet, Reminder, ReminderMethod, Reminders, RemoteCalendar, RemoteEvent,
+    SeriesRole,
 };
+use crate::recurrence::wall_clock;
 
 /// One page of `calendarList.list`.
 //
@@ -316,4 +322,105 @@ fn event_colour(id: &str) -> Option<&'static str> {
 
 fn is_hex_colour(value: &str) -> bool {
     value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The body of `events.insert` (`id` set) or `events.patch` (`id` `None`) for `event`, with the
+/// parts in `fields`.
+///
+/// A patch replaces what it names and keeps everything else (§7.5). So it clears a text with
+/// `null`, and writes both `date` and `dateTime` of a time, one of them `null`, or switching
+/// between all-day and timed would leave the old one behind. `recurrence` and
+/// `reminders.overrides` are arrays the app owns, sent whole.
+pub(super) fn event_body(event: &EventData, fields: &FieldSet, id: Option<&str>) -> Value {
+    let patch = id.is_none();
+    let mut body = Map::new();
+    if let Some(id) = id {
+        body.insert("id".into(), json!(id));
+    }
+    let text = |value: &Option<String>| value.as_deref().map_or(Value::Null, |v| json!(v));
+    for field in fields {
+        match field {
+            Field::Title => {
+                body.insert("summary".into(), json!(event.title));
+            }
+            Field::Description if patch || event.description.is_some() => {
+                body.insert("description".into(), text(&event.description));
+            }
+            Field::Location if patch || event.location.is_some() => {
+                body.insert("location".into(), text(&event.location));
+            }
+            Field::Description | Field::Location => {}
+            Field::Times => {
+                let start = google_time(event.start_utc, event.start_tz.as_deref(), event.all_day);
+                let end = google_time(event.end_utc, event.end_tz.as_deref(), event.all_day);
+                body.insert("start".into(), start);
+                body.insert("end".into(), end);
+            }
+            Field::Recurrence if patch || event.recurrence.is_some() => {
+                let lines: Vec<&str> = event
+                    .recurrence
+                    .as_deref()
+                    .map(|r| r.lines().map(str::trim).filter(|l| !l.is_empty()).collect())
+                    .unwrap_or_default();
+                body.insert("recurrence".into(), json!(lines));
+            }
+            Field::Recurrence => {}
+            Field::Reminders => {
+                let overrides: Vec<Value> = event
+                    .reminders
+                    .overrides
+                    .iter()
+                    .map(|r| json!({ "method": r.method.as_str(), "minutes": r.minutes_before }))
+                    .collect();
+                body.insert(
+                    "reminders".into(),
+                    json!({ "useDefault": event.reminders.use_default, "overrides": overrides }),
+                );
+            }
+        }
+    }
+    Value::Object(body)
+}
+
+/// A stored time as Google's `start` or `end`: a `date`, or a `dateTime` with its offset and
+/// the IANA `timeZone`, which a series needs to keep its wall-clock time across DST.
+fn google_time(stored: i64, tz: Option<&str>, all_day: bool) -> Value {
+    let kind = TimeKind::from_columns(tz, all_day);
+    let at = || DateTime::from_timestamp(stored, 0).unwrap_or_default();
+    match kind {
+        TimeKind::AllDay => json!({
+            "date": wall_clock(stored, kind).date().format("%Y-%m-%d").to_string(),
+            "dateTime": null,
+            "timeZone": null,
+        }),
+        TimeKind::Zoned(zone) => json!({
+            "date": null,
+            "dateTime": at().with_timezone(&zone).to_rfc3339(),
+            "timeZone": zone.name(),
+        }),
+        TimeKind::Offset(offset) => json!({
+            "date": null,
+            "dateTime": at().with_timezone(&offset).to_rfc3339(),
+            "timeZone": null,
+        }),
+        // Google has no floating times. Only an ICS event is floating, and those are never
+        // written; this keeps the wall clock as UTC rather than failing.
+        TimeKind::Floating => json!({
+            "date": null,
+            "dateTime": at().to_rfc3339(),
+            "timeZone": null,
+        }),
+    }
+}
+
+/// Google's id of the occurrence of series `master` that the rule starts at `original_start`
+/// (a stored value): the series' id, `_`, and that start in UTC, or its date for an all-day
+/// series. Google's guides do not spell this out; it is the id `events.instances` returns.
+pub fn instance_id(master: &str, original_start: i64, all_day: bool) -> String {
+    let at = DateTime::from_timestamp(original_start, 0).unwrap_or_default();
+    if all_day {
+        format!("{master}_{}", at.format("%Y%m%d"))
+    } else {
+        format!("{master}_{}", at.format("%Y%m%dT%H%M%SZ"))
+    }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { EventDetail } from './calendar.js';
+import type { CalendarInfo, EventDetail } from './calendar.js';
 import {
+	calendarChoices,
 	defaultStart,
 	draftFromForm,
 	formFromEvent,
@@ -349,5 +350,24 @@ describe('zoneOptions', () => {
 
 	it('always offers UTC', () => {
 		expect(zoneOptions([], 'Europe/Paris', 'Europe/Paris')).toEqual(['Europe/Paris', 'UTC']);
+	});
+});
+
+describe('calendarChoices', () => {
+	const cal = (id: number, source_kind: 'local' | 'google' | 'ics', editable = true) =>
+		({ id, source_kind, editable }) as CalendarInfo;
+	const all = [cal(1, 'local'), cal(2, 'local'), cal(3, 'google'), cal(4, 'ics', false)];
+	const ids = (choices: CalendarInfo[]) => choices.map((c) => c.id);
+
+	it('offers every writable calendar for a new event', () => {
+		expect(ids(calendarChoices(all, null))).toEqual([1, 2, 3]);
+	});
+
+	it('moves an event on this computer only between local calendars', () => {
+		expect(ids(calendarChoices(all, 2))).toEqual([1, 2]);
+	});
+
+	it('keeps an event of an account in its calendar', () => {
+		expect(ids(calendarChoices(all, 3))).toEqual([3]);
 	});
 });

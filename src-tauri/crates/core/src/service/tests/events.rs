@@ -31,7 +31,7 @@ pub(super) fn meeting(calendar: i64) -> EventDraft {
     }))
 }
 
-fn single(event_id: i64) -> OccurrenceRef {
+pub(super) fn single(event_id: i64) -> OccurrenceRef {
     OccurrenceRef {
         event_id,
         original_start: 0,
@@ -84,7 +84,7 @@ impl Setup {
     }
 
     /// A calendar of a new source of `kind` with `access`. Returns its id.
-    async fn remote_calendar(&self, kind: &'static str, access: &'static str) -> i64 {
+    pub(super) async fn remote_calendar(&self, kind: &'static str, access: &'static str) -> i64 {
         self.db
             .write(move |c| {
                 c.execute(
@@ -812,21 +812,6 @@ async fn subscribed_and_google_events_cannot_be_changed() {
 /// Until the outbox (#18) exists, a write to a remote calendar would only change the local
 /// copy, and the next sync would undo it. Google calendars are stored read-only until then
 /// (§7.5), so this only guards against that changing without the outbox.
-#[tokio::test]
-async fn a_writable_remote_calendar_is_refused_until_the_outbox_exists() {
-    let s = setup();
-    let cal = s.remote_calendar("google", "write").await;
-    let id = s.raw_event(cal, true, false).await;
-    assert_invalid(s.service.create_event(meeting(cal), "UTC").await);
-    assert_invalid(
-        s.service
-            .update_event(single(id), Scope::All, meeting(cal), "UTC")
-            .await,
-    );
-    assert_invalid(s.service.delete_event(single(id), Scope::All).await);
-    assert_eq!(s.count("events").await, 1);
-}
-
 #[test]
 fn not_editable_serialises_with_its_kind() {
     let json = serde_json::to_value(ServiceError::NotEditable).unwrap();

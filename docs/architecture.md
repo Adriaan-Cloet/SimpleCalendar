@@ -692,7 +692,7 @@ How `recurrence::expand` treats the recurrence lines:
 - If a series cannot be expanded, the problem is logged and only its first occurrence is shown.
   The rest of the range is unaffected.
 - The function is `simplecalendar_core::db::occurrences::list_occurrences`. The
-  `pending_delete` conditions are left out until that column arrives in v0.2.
+  `pending_delete` conditions are there since migration 5 (#18).
 
 ## 7. Sync engine
 
@@ -875,6 +875,49 @@ Outcome per attempt:
 `conflicted` and `failed` rows are kept so the UI can list them ("your change to X could not be
 saved") and the user can dismiss or redo them. They no longer block later edits to the event.
 
+Implementation notes (#18):
+
+- Migration 5 adds `outbox` and `events.pending_delete` as in §6. `crate::outbox` reads and
+  writes an event's `EventData` (the values the app owns: text, times, recurrence, reminders)
+  and queues rows. `payload` and `base` are that struct as JSON.
+- **The service queues in the transaction of the edit**, for every calendar whose source is
+  not local: a create, an update (with the state before as `base` and the event's ETag as
+  `base_etag`; one that changes nothing queues nothing), or a delete, which sets
+  `pending_delete`. Every read hides `pending_delete` rows. It then asks the engine for a cycle
+  of that source (`SyncHandle::push`, a non-manual sync).
+- **Series on Google.** "Only this event" addresses Google's instance: the exception's
+  `remote_id` is `<series id>_<original start as YYYYMMDDTHHMMSSZ in UTC>`, or
+  `_<YYYYMMDD>` for an all-day series (`provider::google::instance_id`). That is the id
+  `events.instances` returns; Google's guides do not spell it out. A change is a patch of the
+  instance, a deleted occurrence a delete of it. The instance has no ETag until it was pulled
+  once, so the first change to it is sent without `If-Match`. "All events" patches the master
+  and leaves the exceptions to Google: when it moves the times or changes the rule or shape,
+  the local exceptions are dropped and the calendar's cursor is cleared, so the pull right after
+  the push is a full one that brings back what Google kept.
+- **Moving between calendars** is only allowed between local calendars. An event of an account
+  stays in its calendar (Google needs `events.move`, which v1 does not use); the editor offers
+  no other calendar then (`calendarChoices`).
+- **The engine** (`sync/push.rs`) sends the source's `pending` rows in `id` order before the
+  calendar list and the pull. `If-Match` is the event's current ETag, which a successful row
+  updates for the next one, else `base_etag`. On success the answer is stored with the pull's
+  upsert (only its ETag while more rows for the event wait) and the row is deleted; a confirmed
+  delete removes the event row. A transient error or a rejected sign-in stops the cycle before
+  the pull: the rows wait for the next one, so a pull never meets an edit on its way. 412, or
+  an update of an event the server no longer has, fetches it once: if it already has our
+  change it is a success, otherwise the server's copy is stored (or the event removed) and the
+  row becomes `conflicted`. Any other refusal rolls the event back to `base` (a create is
+  removed, a delete shown again) and the row becomes `failed`. Both keep their payload and
+  `last_error` for the sync issues list (#21).
+- A pull leaves an event that has a `pending` row alone, and a full pull does not delete it.
+- Google: `events.insert` with the whole event and our id, `events.patch` with only the changed
+  fields (a cleared text is `null`, a time sends both `date` and `dateTime`, one of them
+  `null`, `recurrence` and `reminders` whole), `events.delete`, all with `sendUpdates=none`.
+  409 on insert means the id exists: the event is fetched and taken as created. 412 is
+  `Conflict`; 404 and 410 on delete are success. The provider builds the JSON body itself, so
+  reqwest needs no `json` feature.
+- Not yet (v0.3, #19, #20): `in_flight`, retries with backoff, coalescing, and telling the user
+  about `conflicted` and `failed` rows; they are only logged.
+
 ### 7.4 Conflicts: server wins
 
 _Needed from: v0.3 (offline sync). Until then the ETag check alone already holds: v0.2 never
@@ -976,8 +1019,9 @@ Implementation notes (#14):
 - The calendar list: the name is `summaryOverride`, else `summary`. Calendars with only
   free/busy access are left out. `primary` sets `is_primary`; `defaultReminders` keeps the
   popup ones. Calendar ids are percent-encoded in the path (`#` becomes `%23`).
-- Until Google write (#18) the provider does not write, so `owner` and `writer` calendars are
-  stored as `read` (§4: writable needs both). #18 flips `WRITES`.
+- Until Google write (#18) the provider did not write, so `owner` and `writer` calendars were
+  stored as `read` (§4: writable needs both). #18 flipped `WRITES`; the next calendar-list sync
+  makes them writable.
 - Event colours: `colorId` 1 to 11 map to the colours Google Calendar shows today (Lavender
   `#7986cb` to Tomato `#d50000`), not the paler palette of the API's `colors` resource.
 - A cancelled occurrence without its own `start` and `end` takes its `originalStartTime` for
@@ -1449,8 +1493,9 @@ Implementation notes (#16):
   else: an event that is not editable is `not_editable` for update and delete, whatever the
   draft says, and so is a target calendar without write access. Tested for all eight
   combinations of access, `is_organizer` and `guests_can_modify`.
-- **Only local calendars are written.** A writable remote calendar is `invalid_input` until
-  the outbox (#18) exists, because the next sync would undo a change written only here.
+- **Only local calendars are written.** (Until #18, see §7.3.) A writable remote calendar is
+  `invalid_input` until the outbox (#18) exists, because the next sync would undo a change
+  written only here.
   Google calendars are stored read-only until then, so this never shows; #18 replaces the
   check with the outbox row. An event can move between local calendars by its `calendar_id`.
 - **A series is not written yet.** `scope` is accepted, but a master or an exception is
@@ -1485,9 +1530,9 @@ Implementation notes (#17):
 - **`this`** (`service/series.rs`) creates or updates the exception for `original_start` and
   writes the draft to it. Deleting makes it `cancelled`, or adds a cancelled exception. The rule
   and the calendar belong to the series, so a draft that changes either is `invalid_input`;
-  the editor offers only "All events" then. A new exception gets a random `remote_id`: the
-  outbox (#18) can name the Google instance from `recurring_remote_id` and
-  `original_start_utc`, and a name built from the start would collide once the series moves.
+  the editor offers only "All events" then. A new exception in a local calendar gets a random
+  `remote_id`, because a name built from the start would collide once the series moves. (In a
+  Google calendar it gets Google's instance id since #18, see §7.3.)
 - **`all`** changes the master. The form shows one occurrence (the "base"), so a change is read
   against it. A field that changed goes to the master and to every exception that still had the
   master's value; an exception keeps what it changed itself, and the calendar always follows.

@@ -12,12 +12,14 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::db::occurrences::list_occurrences;
 use crate::model::{Access, EventStatus, LOCAL_SOURCE_ID};
+use crate::outbox::{self, Op};
 use crate::provider::{
     CalendarProvider, ChangeSet, Next, PageToken, ProviderError, Reminder, ReminderMethod,
     Reminders, RemoteEvent, SeriesRole, SyncCursor,
 };
+use crate::provider::{EventData, Field, RemoteCalendar};
 use crate::secrets::{MemoryStore, Secret, UnavailableReason};
-use fake::{Fake, Pull, calendar};
+use fake::{Fake, Pull, Write, calendar};
 
 const HOUR: i64 = 3600;
 const MINUTE: Duration = Duration::from_secs(60);
@@ -418,6 +420,361 @@ fn ids(names: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
         .iter()
         .map(|(id, master)| ((*id).to_owned(), master.map(str::to_owned)))
         .collect()
+}
+
+// ---- pushing the outbox (§7.3) -------------------------------------------------------------
+
+impl Harness {
+    /// Makes `cal-1` writable and the fake a writer, then syncs `events` in.
+    async fn writable_with(&mut self, events: Vec<RemoteEvent>) {
+        self.fake.set_calendars(vec![RemoteCalendar {
+            access: Access::Write,
+            ..calendar("cal-1", "Calendar")
+        }]);
+        self.fake.set_writable(true);
+        self.fake
+            .script("src-1", vec![Ok(page(events, &[], true, done("c1")))]);
+        assert_eq!(self.sync().await.state, SyncState::Ok);
+        self.pulls_so_far();
+    }
+
+    /// Changes event `remote_id` here and queues the change, as the service does.
+    async fn edit(&self, remote_id: &str, change: fn(&mut EventData)) {
+        let id = self.event_id(remote_id).await.unwrap();
+        self.db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let base = outbox::read_data(&tx, id)?.unwrap();
+                let mut data = base.clone();
+                change(&mut data);
+                outbox::write_data(&tx, id, &data)?;
+                outbox::queue(&tx, Op::Update, id, Some(&base), 0)?;
+                tx.commit()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Deletes event `remote_id` here and queues the delete, as the service does.
+    async fn delete(&self, remote_id: &str) {
+        let id = self.event_id(remote_id).await.unwrap();
+        self.db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let base = outbox::read_data(&tx, id)?;
+                tx.execute("UPDATE events SET pending_delete = 1 WHERE id = ?1", [id])?;
+                outbox::queue(&tx, Op::Delete, id, base.as_ref(), 0)?;
+                tx.commit()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Creates event `remote_id` in `cal-1` here and queues the create.
+    async fn create(&self, remote_id: &'static str) {
+        self.db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                tx.execute(
+                    "INSERT INTO events (calendar_id, remote_id, title, start_utc, end_utc,
+                                         start_tz, end_tz, use_default_reminders)
+                     SELECT id, ?1, 'New', ?2, ?2 + 3600, 'UTC', 'UTC', 1
+                     FROM calendars WHERE remote_id = 'cal-1'",
+                    params![remote_id, june_1()],
+                )?;
+                let id = tx.last_insert_rowid();
+                outbox::queue(&tx, Op::Create, id, None, 0)?;
+                tx.commit()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// `(op, status)` of every outbox row, in order.
+    async fn outbox(&self) -> Vec<(String, String)> {
+        self.db
+            .read(|c| {
+                c.prepare("SELECT op, status FROM outbox ORDER BY id")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn etag(&self, remote_id: &str) -> Option<String> {
+        let remote_id = remote_id.to_owned();
+        self.db
+            .read(move |c| {
+                c.query_row(
+                    "SELECT etag FROM events WHERE remote_id = ?1",
+                    [remote_id],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap()
+    }
+}
+
+fn retitled(data: &mut EventData) {
+    data.title = "Retro".into();
+}
+
+fn moved_later(data: &mut EventData) {
+    data.start_utc += HOUR;
+    data.end_utc += HOUR;
+}
+
+fn rows(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(op, status)| ((*op).to_owned(), (*status).to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_edit_is_sent_before_the_pull_with_only_its_changes_and_etag() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+
+    assert_eq!(h.sync().await.state, SyncState::Ok);
+
+    assert_eq!(h.fake.order().last_two(), ["update a", "pull cal-1"]);
+    let Write::Update { update, if_match } = &h.fake.writes()[0] else {
+        panic!("not an update: {:?}", h.fake.writes());
+    };
+    assert_eq!(
+        update.changed.iter().collect::<Vec<_>>(),
+        vec![&Field::Title]
+    );
+    assert_eq!(update.desired.title, "Retro");
+    assert_eq!(if_match.as_deref(), Some("\"a-1\""));
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.title("a").await, "Retro");
+    assert_eq!(h.etag("a").await.as_deref(), Some("\"w1\""));
+}
+
+/// The last two entries, for the order of the most recent cycle.
+trait LastTwo {
+    fn last_two(&self) -> [&str; 2];
+}
+
+impl LastTwo for Vec<String> {
+    fn last_two(&self) -> [&str; 2] {
+        let n = self.len();
+        assert!(n >= 2, "{self:?}");
+        [&self[n - 2], &self[n - 1]]
+    }
+}
+
+#[tokio::test]
+async fn edits_to_one_event_go_in_order_each_on_the_etag_before() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.edit("a", moved_later).await;
+
+    h.sync().await;
+
+    let sent: Vec<_> = h
+        .fake
+        .writes()
+        .into_iter()
+        .map(|w| match w {
+            Write::Update { update, if_match } => (update.changed, if_match),
+            other => panic!("not an update: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            ([Field::Title].into(), Some("\"a-1\"".to_owned())),
+            ([Field::Times].into(), Some("\"w1\"".to_owned())),
+        ]
+    );
+    assert_eq!(h.title("a").await, "Retro");
+    assert!(h.outbox().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_new_event_is_created_under_its_own_id_and_takes_the_servers_etag() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![]).await;
+    h.create("abc123").await;
+
+    h.sync().await;
+
+    assert!(matches!(
+        &h.fake.writes()[0],
+        Write::Create { remote_id, event } if remote_id == "abc123" && event.title == "New"
+    ));
+    assert_eq!(h.etag("abc123").await.as_deref(), Some("\"w1\""));
+    assert!(h.outbox().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_deleted_event_goes_once_the_server_confirms() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a"), single("b")]).await;
+    h.delete("a").await;
+
+    h.sync().await;
+
+    assert_eq!(
+        h.fake.writes(),
+        vec![Write::Delete {
+            remote_id: "a".into(),
+            if_match: Some("\"a-1\"".into())
+        }]
+    );
+    assert_eq!(h.events().await, ids(&[("b", None)]));
+    assert!(h.outbox().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_stale_etag_keeps_the_servers_version_and_marks_the_row_conflicted() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    let theirs = RemoteEvent {
+        title: "Theirs".into(),
+        etag: Some("\"a-2\"".into()),
+        ..single("a")
+    };
+    h.fake
+        .answer(vec![Err(ProviderError::Conflict), Ok(Some(theirs))]);
+
+    assert_eq!(h.sync().await.state, SyncState::Ok);
+
+    assert_eq!(h.title("a").await, "Theirs");
+    assert_eq!(h.etag("a").await.as_deref(), Some("\"a-2\""));
+    assert_eq!(h.outbox().await, rows(&[("update", "conflicted")]));
+    // Only one write: the server's copy is never overwritten.
+    let updates = h
+        .fake
+        .writes()
+        .iter()
+        .filter(|w| matches!(w, Write::Update { .. }))
+        .count();
+    assert_eq!(updates, 1);
+}
+
+#[tokio::test]
+async fn a_lost_answer_is_a_success_not_a_conflict() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    // An earlier attempt got through: the server already has our title, with a newer ETag.
+    let ours = RemoteEvent {
+        title: "Retro".into(),
+        etag: Some("\"a-2\"".into()),
+        ..single("a")
+    };
+    h.fake
+        .answer(vec![Err(ProviderError::Conflict), Ok(Some(ours))]);
+
+    h.sync().await;
+
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.etag("a").await.as_deref(), Some("\"a-2\""));
+}
+
+#[tokio::test]
+async fn an_event_deleted_on_the_server_while_it_was_edited_goes() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![Err(ProviderError::NotFound), Ok(None)]);
+
+    h.sync().await;
+
+    assert!(h.events().await.is_empty());
+    assert_eq!(h.outbox().await, rows(&[("update", "conflicted")]));
+}
+
+#[tokio::test]
+async fn a_refused_change_is_rolled_back_and_marked_failed() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a"), single("b")]).await;
+    h.edit("a", retitled).await;
+    h.delete("b").await;
+    h.create("c").await;
+    let refused = || Err(ProviderError::Permanent("no".into()));
+    h.fake.answer(vec![refused(), refused(), refused()]);
+
+    assert_eq!(h.sync().await.state, SyncState::Ok);
+
+    assert_eq!(h.title("a").await, "a");
+    // The delete is undone and the create removed.
+    assert_eq!(h.events().await, ids(&[("a", None), ("b", None)]));
+    let pending_delete: i64 =
+        h.db.read(|c| c.query_row("SELECT sum(pending_delete) FROM events", [], |r| r.get(0)))
+            .await
+            .unwrap();
+    assert_eq!(pending_delete, 0);
+    assert_eq!(
+        h.outbox().await,
+        rows(&[
+            ("update", "failed"),
+            ("delete", "failed"),
+            ("create", "failed")
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_cannot_be_sent_now_waits_and_the_pull_is_skipped() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake
+        .answer(vec![Err(ProviderError::Transient { retry_after: None })]);
+
+    let status = h.sync().await;
+
+    assert_eq!(status.state, SyncState::Error);
+    assert!(h.pulls_so_far().is_empty(), "no pull while an edit waits");
+    assert_eq!(h.title("a").await, "Retro");
+    assert_eq!(h.outbox().await, rows(&[("update", "pending")]));
+
+    // The next cycle sends it, then pulls.
+    assert_eq!(h.sync().await.state, SyncState::Ok);
+    assert!(h.outbox().await.is_empty());
+    assert_eq!(h.fake.order().last_two(), ["update a", "pull cal-1"]);
+}
+
+#[tokio::test]
+async fn a_pull_leaves_an_event_with_a_waiting_edit_alone() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a"), single("b")]).await;
+    h.edit("a", retitled).await;
+    h.delete("b").await;
+    h.create("c").await;
+    let changed = RemoteEvent {
+        title: "Theirs".into(),
+        ..single("a")
+    };
+
+    // As if a pull ran before the push: a change to `a`, `b` deleted, and a full pull that has
+    // never heard of `c`.
+    let calendar_id = h.calendar_id("cal-1").await.unwrap();
+    h.db.write(move |c| {
+        let tx = c.transaction()?;
+        let mut seen = HashSet::new();
+        store::apply_page(&tx, calendar_id, &[changed], &["b".into()], &mut seen)?;
+        store::finish_full_pull(&tx, calendar_id, &seen)?;
+        tx.commit()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(h.title("a").await, "Retro");
+    assert_eq!(
+        h.events().await,
+        ids(&[("a", None), ("b", None), ("c", None)])
+    );
 }
 
 // ---- warnings ------------------------------------------------------------------------------

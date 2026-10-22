@@ -34,16 +34,18 @@ const SINGLES: &str = "FROM events e JOIN calendars c ON c.id = e.calendar_id
     WHERE c.visible = 1
       AND e.recurrence IS NULL
       AND e.status <> 'cancelled'
+      AND e.pending_delete = 0
       AND (e.recurring_remote_id IS NULL OR e.recurring_event_id IS NOT NULL)
       AND e.start_utc < ?2
       AND e.end_utc > ?1";
 
 /// Series that can still produce an occurrence in the range. A cancelled master means the
-/// whole series was deleted.
+/// whole series was deleted, and `pending_delete` that it is being deleted (§7.3).
 const SERIES: &str = "FROM events e JOIN calendars c ON c.id = e.calendar_id
     WHERE c.visible = 1
       AND e.recurrence IS NOT NULL
       AND e.status <> 'cancelled'
+      AND e.pending_delete = 0
       AND e.start_utc < ?2
       AND (e.recurrence_end_utc IS NULL OR e.recurrence_end_utc > ?1)";
 
@@ -129,7 +131,7 @@ pub fn occurrence(
         conn.query_row(
             &format!(
                 "SELECT {COLUMNS} FROM events e JOIN calendars c ON c.id = e.calendar_id
-                 WHERE e.status <> 'cancelled' AND {condition}"
+                 WHERE e.status <> 'cancelled' AND e.pending_delete = 0 AND {condition}"
             ),
             params_from_iter(values),
             EventRow::read,
