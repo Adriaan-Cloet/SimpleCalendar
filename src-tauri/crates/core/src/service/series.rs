@@ -324,7 +324,7 @@ fn follow(row: &Fields, series: &Fields, base: &Fields, new: &Fields) -> Fields 
 
 /// Makes the next pull of `calendar_id` a full one, which brings back what the server has.
 /// The engine pushes before it pulls, so that pull already sees this edit (§7.2).
-fn pull_again(c: &rusqlite::Connection, calendar_id: i64) -> rusqlite::Result<()> {
+pub(super) fn pull_again(c: &rusqlite::Connection, calendar_id: i64) -> rusqlite::Result<()> {
     c.execute(
         "UPDATE calendars SET sync_cursor = NULL WHERE id = ?1",
         [calendar_id],
@@ -333,7 +333,7 @@ fn pull_again(c: &rusqlite::Connection, calendar_id: i64) -> rusqlite::Result<()
 }
 
 /// Deletes the exceptions of `series`, cancelled ones included.
-fn drop_exceptions(c: &rusqlite::Connection, series: i64) -> rusqlite::Result<()> {
+pub(super) fn drop_exceptions(c: &rusqlite::Connection, series: i64) -> rusqlite::Result<()> {
     c.execute("DELETE FROM events WHERE recurring_event_id = ?1", [series])?;
     Ok(())
 }

@@ -9,6 +9,7 @@ use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
 mod events;
+mod issues;
 mod outbox;
 mod series;
 

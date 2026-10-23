@@ -5,6 +5,7 @@
 
 mod events;
 mod google;
+mod issues;
 mod series;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ pub use events::{
     EventDetail, EventDraft, EventReminder, OccurrenceRef, Repeat, RepeatFrequency, Scope,
 };
 pub use google::GoogleClientInfo;
+pub use issues::{IssueChange, IssueKind, SyncIssue};
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};

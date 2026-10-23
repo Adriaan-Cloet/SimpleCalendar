@@ -23,6 +23,8 @@
 	import EventPopover, { type EventDetails } from '#lib/components/EventPopover.svelte';
 	import Sidebar from '#lib/components/Sidebar.svelte';
 	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
+	import SyncIssuesDialog from '#lib/components/SyncIssuesDialog.svelte';
+	import SyncNotice from '#lib/components/SyncNotice.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import WeekView from '#lib/components/WeekView.svelte';
 	import { displayLocale } from '#lib/display-format.js';
@@ -35,6 +37,7 @@
 		type EventForm
 	} from '#lib/event-form.js';
 	import { describeRepeat, describeWhen, wallClock } from '#lib/occurrence-text.js';
+	import { listSyncIssues, onSyncConflict, type SyncIssue } from '#lib/sync-issues.js';
 	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
 
 	let now = $state(new Date());
@@ -111,6 +114,53 @@
 	$effect(() => {
 		const unlisten = onCalendarChanged(() => load(weekStart)).catch(() => undefined);
 		return () => {
+			unlisten.then((stop) => stop?.());
+		};
+	});
+
+	// Changes the server did not save (#21). A failed change only shows as `calendar:changed`,
+	// so the list is read again after every one.
+	let issues = $state<SyncIssue[]>([]);
+	let issuesOpen = $state(false);
+	let issueRequest = 0;
+
+	async function loadIssues() {
+		const mine = ++issueRequest;
+		try {
+			const found = await listSyncIssues();
+			if (mine === issueRequest) issues = found;
+		} catch (e) {
+			console.error('cannot list the changes not saved', e);
+		}
+	}
+
+	$effect(() => {
+		loadIssues();
+		const unlisten = onCalendarChanged(loadIssues).catch(() => undefined);
+		return () => {
+			unlisten.then((stop) => stop?.());
+		};
+	});
+
+	/** The titles behind the conflict notice, while it shows */
+	let conflicts = $state<string[]>([]);
+	const NOTICE_MS = 8000;
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function closeNotice() {
+		clearTimeout(noticeTimer);
+		conflicts = [];
+	}
+
+	$effect(() => {
+		const unlisten = onSyncConflict(({ title }) => {
+			conflicts = [...conflicts, title];
+			clearTimeout(noticeTimer);
+			noticeTimer = setTimeout(closeNotice, NOTICE_MS);
+			loadIssues();
+		}).catch(() => undefined);
+		return () => {
+			clearTimeout(noticeTimer);
 			unlisten.then((stop) => stop?.());
 		};
 	});
@@ -250,6 +300,8 @@
 		{calendars}
 		onupdate={update}
 		onsubscriptions={() => (subscriptionsOpen = true)}
+		issueCount={issues.length}
+		onissues={() => (issuesOpen = true)}
 		oncreatecalendar={async (name) => {
 			await createLocalCalendar(name);
 		}}
@@ -277,6 +329,18 @@
 </div>
 
 <SubscriptionsDialog bind:open={subscriptionsOpen} />
+<SyncIssuesDialog bind:open={issuesOpen} {issues} onchanged={loadIssues} />
+
+{#if conflicts.length > 0}
+	<SyncNotice
+		titles={conflicts}
+		onshow={() => {
+			closeNotice();
+			issuesOpen = true;
+		}}
+		onclose={closeNotice}
+	/>
+{/if}
 
 {#if selected && details}
 	{#key selected.key}

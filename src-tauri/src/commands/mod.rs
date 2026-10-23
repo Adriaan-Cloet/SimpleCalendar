@@ -8,7 +8,7 @@ use simplecalendar_core::CalendarService;
 use simplecalendar_core::model::Occurrence;
 use simplecalendar_core::service::{
     CalendarInfo, CalendarUpdate, EventDetail, EventDraft, GoogleClientInfo, OccurrenceRef, Scope,
-    ServiceError, SourceInfo, Status,
+    ServiceError, SourceInfo, Status, SyncIssue,
 };
 use tauri::State;
 
@@ -142,6 +142,32 @@ pub async fn delete_event(
     scope: Scope,
 ) -> Result<(), ServiceError> {
     service.delete_event(target, scope).await
+}
+
+/// The changes the server did not save, newest first.
+#[tauri::command]
+pub async fn list_sync_issues(
+    service: State<'_, CalendarService>,
+) -> Result<Vec<SyncIssue>, ServiceError> {
+    service.list_sync_issues().await
+}
+
+/// Forgets a change the server did not save.
+#[tauri::command]
+pub async fn dismiss_sync_issue(
+    service: State<'_, CalendarService>,
+    id: i64,
+) -> Result<(), ServiceError> {
+    service.dismiss_sync_issue(id).await
+}
+
+/// Makes a change the server did not save again, as a new edit.
+#[tauri::command]
+pub async fn redo_sync_issue(
+    service: State<'_, CalendarService>,
+    id: i64,
+) -> Result<(), ServiceError> {
+    service.redo_sync_issue(id).await
 }
 
 /// Signs in to a Google account in the system browser. Resolves when the browser step
