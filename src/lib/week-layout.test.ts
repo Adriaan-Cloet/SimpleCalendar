@@ -152,3 +152,29 @@ describe('placeWeek, all-day', () => {
 		).toBe(2);
 	});
 });
+
+describe('a single day', () => {
+	const DAY = ['2026-10-21'];
+
+	it('keeps only that day’s piece of an event across midnight', () => {
+		const late = occ(at('2026-10-20', '22:00'), at('2026-10-21', '02:00'), 'late');
+		const { timed } = placeWeek([late], DAY);
+		expect(timed).toEqual([[{ occurrence: late, start: -120, end: 120 }]]);
+	});
+
+	it('shows an all-day event that spans it in the one column', () => {
+		const trip = occ('2026-10-19', '2026-10-24', 'trip');
+		const layout = placeWeek([trip], DAY);
+		expect(layout.allDay).toEqual([{ occurrence: trip, first: 0, last: 0, row: 0 }]);
+		expect(layout.rows).toBe(1);
+	});
+
+	it('leaves out what falls on other days', () => {
+		const layout = placeWeek(
+			[occ(at('2026-10-22', '09:00'), at('2026-10-22', '10:00')), occ('2026-10-20', '2026-10-21')],
+			DAY
+		);
+		expect(layout.timed).toEqual([[]]);
+		expect(layout.allDay).toEqual([]);
+	});
+});

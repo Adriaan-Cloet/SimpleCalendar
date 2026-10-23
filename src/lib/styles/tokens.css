@@ -49,12 +49,12 @@
 	--cal-brown: #a2845e;
 
 	/* How much calendar colour goes into an event (see design.md, "Drawing an event") */
-	--event-fill-mix: 14%;
-	--event-hover-mix: 20%;
-	--event-selected-mix: 28%;
+	--event-fill-mix: 26%;
+	--event-hover-mix: 32%;
+	--event-selected-mix: 42%;
 	/* An event that lies over another one: one step stronger, so same-colour events stay apart */
-	--event-raised-mix: 23%;
-	--event-text-mix: 45%;
+	--event-raised-mix: 36%;
+	--event-text-mix: 40%;
 
 	/* Shadows: soft shadow plus a 1px ring, so edges stay crisp on any background */
 	--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.04);
@@ -153,10 +153,11 @@
 		--cal-pink: #ff375f;
 		--cal-brown: #ac8e68;
 
-		--event-fill-mix: 24%;
-		--event-hover-mix: 32%;
-		--event-selected-mix: 40%;
-		--event-raised-mix: 33%;
+		--event-fill-mix: 30%;
+		--event-hover-mix: 36%;
+		--event-selected-mix: 42%;
+		--event-raised-mix: 39%;
+		--event-text-mix: 30%;
 
 		--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 		--shadow-2:
@@ -204,10 +205,11 @@
 	--cal-pink: #ff375f;
 	--cal-brown: #ac8e68;
 
-	--event-fill-mix: 24%;
-	--event-hover-mix: 32%;
-	--event-selected-mix: 40%;
-	--event-raised-mix: 33%;
+	--event-fill-mix: 30%;
+	--event-hover-mix: 36%;
+	--event-selected-mix: 42%;
+	--event-raised-mix: 39%;
+	--event-text-mix: 30%;
 
 	--shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 	--shadow-2:

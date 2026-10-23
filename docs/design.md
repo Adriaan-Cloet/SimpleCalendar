@@ -85,20 +85,22 @@ colour go through the same rules:
 
 | Part           | CSS                                                                       | Light | Dark |
 | -------------- | ------------------------------------------------------------------------- | ----- | ---- |
-| Fill           | `color-mix(in oklab, var(--cal) var(--event-fill-mix), var(--surface))`   | 14%   | 24%  |
-| Fill, hover    | same with `--event-hover-mix`                                             | 20%   | 32%  |
-| Fill, selected | same with `--event-selected-mix`, plus a 1px ring in `--cal`              | 28%   | 40%  |
-| Fill, raised   | same with `--event-raised-mix`, for an event that lies over another (§11) | 23%   | 33%  |
-| Text           | `color-mix(in oklab, var(--cal) 45%, var(--text))`                        | 45%   | 45%  |
+| Fill           | `color-mix(in oklab, var(--cal) var(--event-fill-mix), var(--surface))`   | 26%   | 30%  |
+| Fill, hover    | same with `--event-hover-mix`                                             | 32%   | 36%  |
+| Fill, selected | same with `--event-selected-mix`, plus a 1px ring in `--cal`              | 42%   | 42%  |
+| Fill, raised   | same with `--event-raised-mix`, for an event that lies over another (§11) | 36%   | 39%  |
+| Text           | `color-mix(in oklab, var(--cal) var(--event-text-mix), var(--text))`      | 40%   | 30%  |
 
 The text mixes towards `--text`, so it gets darker in light mode and lighter in dark mode
 without a second rule. Selected events get a stronger fill and a ring rather than a solid fill
 with white text, because white on yellow or teal is unreadable.
 
-Measured: the text reaches at least 4.86:1 on every fill state of all ten palette colours in
-both modes, including on weekend columns (worst case: yellow, selected). Five common Google
-colours were checked as well and reach at least 5.2:1. A colour change in the palette or in the
-mix percentages needs this check again.
+Measured (since #23, when the fills were made stronger): the text reaches at least 5.29:1 in
+light mode and 4.83:1 in dark mode on every fill state of all ten palette colours and eleven
+common Google colours, including on weekend columns (worst case in both: yellow, selected). A
+stronger dark fill turns yellow light enough that light text on it drops below 4.5:1, which is
+why dark mode stops at 30%. A colour change in the palette or in the mix percentages needs this
+check again.
 
 There is no coloured bar along the edge of an event: the fill and the text colour already say
 which calendar it belongs to. All-day events use the same fill and text.
@@ -124,9 +126,9 @@ The app uses the operating system's UI font. There is no web font to download or
 | ----------------- | ------------------ | -------------------------- | ------------------------------------------------ |
 | `--text-caption`  | 11 / 14            | 400                        | Hour labels, event times, compact event titles   |
 | `--text-footnote` | 12 / 16            | 400, 600                   | Event titles, group headings, segmented controls |
-| `--text-body`     | 13 / 18            | 400, 500                   | Sidebar, popover body, buttons                   |
-| `--text-headline` | 15 / 20            | 600                        | Popover title                                    |
-| `--text-title`    | 22 / 28            | 600, display font, −0.01em | Month heading in the toolbar                     |
+| `--text-body`     | 13 / 18            | 400, 500                   | Sidebar, buttons                                 |
+| `--text-headline` | 15 / 20            | 400, 600                   | Popover body                                     |
+| `--text-title`    | 22 / 28            | 600, display font, −0.01em | Month heading in the toolbar, popover title      |
 
 Rules:
 
@@ -307,7 +309,9 @@ the Windows build from CI.
 | Overlapping events  | Side by side if they start within 20 minutes; a later one stacks on top, indented. See below                   |
 | Selected event      | Stronger fill and a ring; a popover opens beside it                                                            |
 | Read-only event     | Looks like any other event in the grid. The popover says why it cannot be edited, the sidebar shows a lock     |
-| Popover             | Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right, accent)          |
+| Popover             | 360px wide. Title, location, date and time, calendar, notes, then "Delete" (left, red) and "Edit" (right)      |
+| Popover notes       | On a soft `--fill-hover` panel that scrolls, up to 420px tall, less when the window is short                   |
+| Popover placement   | Beside the event; one too wide for that (day view) gets it below, above, or over its right end                 |
 | Delete              | Asks again in the popover footer: "Delete this event?" with "Cancel" and a red "Delete"                        |
 | Repeating event     | A line such as "Every week until 31 December 2026" under the time. Delete asks "This event" or "All events"    |
 | Double click        | On an empty spot: a new event at that half hour; on the all-day row an all-day event                           |
@@ -344,6 +348,20 @@ The channel and the tint together keep events of one colour apart without lines,
 an edge stripe: the channel separates events side by side, the tint marks the one that lies
 on top. The tint sits between the hover and selected fills, which are measured for contrast
 (§3), so the text stays readable. Hovering a raised event shows the selected fill.
+
+### Day view
+
+Since #23. The same grid (`TimeGrid.svelte`) with one column, so the overlap layout, the
+all-day row, the now line and double click work as in the week.
+
+| Element      | Look                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------ |
+| Toolbar      | The full date as heading ("Friday, 23 October 2026"); the arrows move a day                |
+| Day header   | Weekday and date on the left, as the events below read; today in red as in the week        |
+| Grid         | No weekend tint: it only means something next to weekdays                                  |
+| Switching    | Day and Week keep the selected date. A week's day header opens that day                    |
+| Mini month   | Marks the week on screen in the week view, the day in the day view; a click selects a date |
+| Month switch | Shown, disabled, until the month view (#24)                                                |
 
 ## 12. Subscriptions dialog
 

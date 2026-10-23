@@ -1,4 +1,6 @@
 <script lang="ts">
+	// The time grid of the week and day views (issue #23): a column per day, the all-day row on
+	// top, and the overlap layout inside each column.
 	import { occurrenceKey, type CalendarInfo, type Occurrence } from '#lib/calendar.js';
 	import { calendarColor } from '#lib/calendar-color.js';
 	import { displayLocale } from '#lib/display-format.js';
@@ -9,33 +11,49 @@
 	import EventBlock from './EventBlock.svelte';
 
 	interface Props {
-		weekStart: Date;
+		/** The first day shown */
+		start: Date;
+		/** How many days: 7 for the week view, 1 for the day view */
+		dayCount: number;
 		now: Date;
 		calendars: Map<number, CalendarInfo>;
-		/** The week's occurrences from `list_occurrences`, sorted by start */
+		/** The occurrences of those days from `list_occurrences`, sorted by start */
 		occurrences: Occurrence[];
 		selectedKey: string | null;
 		onselect: (key: string, anchor: HTMLElement) => void;
 		onscroll: () => void;
 		/** A double click on an empty spot: a new event there, local wall-clock start */
 		oncreate: (start: Date, allDay: boolean) => void;
+		/** A click on a day's header, to open that day on its own; left out in the day view */
+		onday?: (day: Date) => void;
 	}
 
-	let { weekStart, now, calendars, occurrences, selectedKey, onselect, onscroll, oncreate }: Props =
-		$props();
+	let {
+		start,
+		dayCount,
+		now,
+		calendars,
+		occurrences,
+		selectedKey,
+		onselect,
+		onscroll,
+		oncreate,
+		onday
+	}: Props = $props();
 
-	const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)));
+	const days = $derived(Array.from({ length: dayCount }, (_, i) => addDays(start, i)));
+	const single = $derived(dayCount === 1);
 	const todayIndex = $derived(days.findIndex((day) => isSameDay(day, now)));
 	const nowMinutes = $derived(minutesSinceMidnight(now));
 	const hours = Array.from({ length: 23 }, (_, i) => i + 1);
 
-	const week = $derived(placeWeek(occurrences, days.map(isoDate)));
-	const allDayRows = $derived(Math.max(1, week.rows));
+	const placed = $derived(placeWeek(occurrences, days.map(isoDate)));
+	const allDayRows = $derived(Math.max(1, placed.rows));
 
 	// Each day's timed events with their place, in drawing order. Hidden calendars stay in the
 	// layout, so hiding one fades its events without moving the others (design.md §8).
 	const layouts = $derived(
-		week.timed.map((pieces) => {
+		placed.timed.map((pieces) => {
 			const byKey = new Map(pieces.map((p) => [occurrenceKey(p.occurrence), p.occurrence]));
 			return layoutDay(
 				pieces.map((p) => ({ id: occurrenceKey(p.occurrence), start: p.start, end: p.end }))
@@ -56,8 +74,9 @@
 		hourCycle: 'h23'
 	});
 
+	// Tinting only means something next to weekdays, so not in the day view
 	function isWeekend(day: Date): boolean {
-		return day.getDay() === 0 || day.getDay() === 6;
+		return !single && (day.getDay() === 0 || day.getDay() === 6);
 	}
 
 	// An hour label too close to the now label would overlap it
@@ -83,18 +102,31 @@
 	});
 </script>
 
-<div class="week" bind:this={scroller} {onscroll}>
+<div class={{ grid: true, single }} style:--days={dayCount} bind:this={scroller} {onscroll}>
 	<div class="sticky">
 		<div class="row header">
 			<div></div>
 			{#each days as day, i (i)}
-				<div
-					class={{ 'day-header': true, today: i === todayIndex }}
-					aria-label={dayLabel.format(day)}
-				>
-					<span class="weekday">{weekdayFormat.format(day)}</span>
-					<span class="date tabular">{day.getDate()}</span>
-				</div>
+				{#if onday}
+					<button
+						type="button"
+						class={{ 'day-header': true, today: i === todayIndex }}
+						aria-label="{dayLabel.format(day)}, open as a day"
+						title="Show this day"
+						onclick={() => onday(day)}
+					>
+						<span class="weekday">{weekdayFormat.format(day)}</span>
+						<span class="date tabular">{day.getDate()}</span>
+					</button>
+				{:else}
+					<div
+						class={{ 'day-header': true, today: i === todayIndex }}
+						aria-label={dayLabel.format(day)}
+					>
+						<span class="weekday">{weekdayFormat.format(day)}</span>
+						<span class="date tabular">{day.getDate()}</span>
+					</div>
+				{/if}
 			{/each}
 		</div>
 
@@ -109,7 +141,7 @@
 					ondblclick={() => oncreate(day, true)}
 				></div>
 			{/each}
-			{#each week.allDay as { occurrence, first, last, row } (occurrenceKey(occurrence))}
+			{#each placed.allDay as { occurrence, first, last, row } (occurrenceKey(occurrence))}
 				{@const key = occurrenceKey(occurrence)}
 				{@const hidden = isHidden(occurrence)}
 				<button
@@ -132,7 +164,7 @@
 		<div class="gutter tabular">
 			{#each hours as hour (hour)}
 				<span class="hour-label" style:--hour={hour} class:hidden={hourHidden(hour)}>
-					{gutterFormat.format(atMinutes(weekStart, hour * 60))}
+					{gutterFormat.format(atMinutes(start, hour * 60))}
 				</span>
 			{/each}
 			{#if todayIndex >= 0}
@@ -175,7 +207,7 @@
 </div>
 
 <style>
-	.week {
+	.grid {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
@@ -185,7 +217,7 @@
 
 	.row {
 		display: grid;
-		grid-template-columns: var(--gutter-width) repeat(7, minmax(0, 1fr));
+		grid-template-columns: var(--gutter-width) repeat(var(--days), minmax(0, 1fr));
 	}
 
 	/* Header and all-day row live inside the scroller, so they always line up with the grid
@@ -206,6 +238,30 @@
 		gap: var(--space-xs);
 		height: 36px;
 		padding: 0 var(--space-xs);
+		border: 0;
+		border-radius: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+	}
+
+	/* One wide column: the day reads from the left, as the events below it do */
+	.single .day-header {
+		justify-content: flex-start;
+		padding: 0 var(--space-sm);
+	}
+
+	button.day-header .date {
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	button.day-header:hover .date {
+		background: var(--fill-hover);
+	}
+
+	button.day-header.today:hover .date {
+		background: var(--now);
+		filter: brightness(1.08);
 	}
 
 	.weekday {

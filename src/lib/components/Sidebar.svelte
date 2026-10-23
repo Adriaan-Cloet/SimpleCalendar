@@ -6,12 +6,16 @@
 	import { displayLocale } from '#lib/display-format.js';
 	import { serviceError } from '#lib/sources.js';
 	import { issueCountLabel } from '#lib/sync-issue-text.js';
-	import { isSameDay, monthWeeks } from '#lib/week-dates.js';
+	import type { View } from '#lib/view-range.js';
+	import { isSameDay, monthWeeks, startOfWeek } from '#lib/week-dates.js';
 
 	interface Props {
 		today: Date;
-		/** The Monday of the week on screen; its row in the mini month is marked */
-		weekStart: Date;
+		/** The view on screen and its selected date: the mini month marks that week or day */
+		view: View;
+		date: Date;
+		/** A click on a day in the mini month */
+		onday: (day: Date) => void;
 		calendars: CalendarInfo[];
 		/** Shows or hides a calendar, or changes its colour */
 		onupdate: (id: number, update: CalendarUpdate) => void;
@@ -29,7 +33,9 @@
 
 	let {
 		today,
-		weekStart,
+		view,
+		date,
+		onday,
 		calendars,
 		onupdate,
 		onsubscriptions,
@@ -144,17 +150,28 @@
 				{/each}
 			</div>
 			{#each weeks as week (week[0].getTime())}
-				<div class={{ 'mini-row': true, 'current-week': isSameDay(week[0], weekStart) }} role="row">
+				<div
+					class={{
+						'mini-row': true,
+						'current-week': view === 'week' && isSameDay(week[0], startOfWeek(date))
+					}}
+					role="row"
+				>
 					{#each week as day (day.getTime())}
-						<span
-							role="gridcell"
-							aria-label={dayLabel.format(day)}
-							class={{
-								'mini-day': true,
-								outside: day.getMonth() !== today.getMonth(),
-								today: isSameDay(day, today)
-							}}><span class="num">{day.getDate()}</span></span
-						>
+						{@const shown = view === 'day' && isSameDay(day, date)}
+						<span role="gridcell" aria-selected={shown}>
+							<button
+								type="button"
+								aria-label={dayLabel.format(day)}
+								class={{
+									'mini-day': true,
+									outside: day.getMonth() !== today.getMonth(),
+									today: isSameDay(day, today),
+									shown
+								}}
+								onclick={() => onday(day)}><span class="num">{day.getDate()}</span></button
+							>
+						</span>
 					{/each}
 				</div>
 			{/each}
@@ -394,6 +411,24 @@
 	.mini-weekday {
 		color: var(--text-secondary);
 		font-weight: var(--weight-medium);
+	}
+
+	.mini-day {
+		width: 100%;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+	}
+
+	.mini-day:hover:not(.today) .num {
+		background: var(--fill-hover);
+	}
+
+	/* The day on screen in the day view, as the week's band is in the week view */
+	.mini-day.shown:not(.today) .num {
+		font-weight: var(--weight-semibold);
+		background: var(--fill-pressed);
 	}
 
 	.mini-day.outside {

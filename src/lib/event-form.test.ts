@@ -327,14 +327,24 @@ describe('shiftDate', () => {
 });
 
 describe('defaultStart', () => {
-	it('is the next whole hour in the current week', () => {
-		const now = new Date(2026, 9, 21, 14, 20);
-		expect(defaultStart(new Date(2026, 9, 19), now)).toEqual(new Date(2026, 9, 21, 15, 0));
+	const now = new Date(2026, 9, 21, 14, 20);
+
+	it('is the next whole hour when today is on screen', () => {
+		expect(defaultStart({ start: new Date(2026, 9, 19), days: 7 }, now)).toEqual(
+			new Date(2026, 9, 21, 15, 0)
+		);
+		expect(defaultStart({ start: new Date(2026, 9, 21), days: 1 }, now)).toEqual(
+			new Date(2026, 9, 21, 15, 0)
+		);
 	});
 
-	it('is 09:00 on the first day of another week', () => {
-		const now = new Date(2026, 9, 21, 14, 20);
-		expect(defaultStart(new Date(2026, 9, 26), now)).toEqual(new Date(2026, 9, 26, 9, 0));
+	it('is 09:00 on the first day shown otherwise', () => {
+		expect(defaultStart({ start: new Date(2026, 9, 26), days: 7 }, now)).toEqual(
+			new Date(2026, 9, 26, 9, 0)
+		);
+		expect(defaultStart({ start: new Date(2026, 9, 22), days: 1 }, now)).toEqual(
+			new Date(2026, 9, 22, 9, 0)
+		);
 	});
 });
 

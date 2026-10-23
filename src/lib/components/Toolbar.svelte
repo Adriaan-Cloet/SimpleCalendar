@@ -1,9 +1,12 @@
 <script lang="ts">
 	import SyncIndicator from '#lib/components/SyncIndicator.svelte';
 	import type { SyncSummary } from '#lib/sync-summary.js';
+	import type { View } from '#lib/view-range.js';
 
 	interface Props {
 		title: string;
+		view: View;
+		onview: (view: View) => void;
 		onprevious: () => void;
 		ontoday: () => void;
 		onnext: () => void;
@@ -14,23 +17,30 @@
 		onaccounts: () => void;
 	}
 
-	let { title, onprevious, ontoday, onnext, onnew, sync, onsync, onaccounts }: Props = $props();
+	let { title, view, onview, onprevious, ontoday, onnext, onnew, sync, onsync, onaccounts }: Props =
+		$props();
 
-	// Prototype: the view switcher shows its states but does not switch yet
-	const views = ['Day', 'Week', 'Month'];
-	const currentView = 'Week';
+	// Month comes with #24; until then it shows, disabled, where it will be
+	const views: { value: View | 'month'; label: string }[] = [
+		{ value: 'day', label: 'Day' },
+		{ value: 'week', label: 'Week' },
+		{ value: 'month', label: 'Month' }
+	];
+	const unit = $derived(view === 'day' ? 'day' : 'week');
 </script>
 
 <header class="toolbar">
 	<h1 class="title">{title}</h1>
 
 	<div class="segmented" role="radiogroup" aria-label="View">
-		{#each views as view (view)}
+		{#each views as option (option.value)}
 			<button
 				type="button"
 				role="radio"
-				aria-checked={view === currentView}
-				class={{ segment: true, selected: view === currentView }}>{view}</button
+				aria-checked={option.value === view}
+				class={{ segment: true, selected: option.value === view }}
+				disabled={option.value === 'month'}
+				onclick={() => option.value !== 'month' && onview(option.value)}>{option.label}</button
 			>
 		{/each}
 	</div>
@@ -38,13 +48,13 @@
 	<div class="actions">
 		<SyncIndicator summary={sync} {onsync} {onaccounts} />
 		<div class="nav">
-			<button type="button" class="icon-button" aria-label="Previous week" onclick={onprevious}>
+			<button type="button" class="icon-button" aria-label="Previous {unit}" onclick={onprevious}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M10 3.5 5.5 8l4.5 4.5" />
 				</svg>
 			</button>
 			<button type="button" class="button" onclick={ontoday}>Today</button>
-			<button type="button" class="icon-button" aria-label="Next week" onclick={onnext}>
+			<button type="button" class="icon-button" aria-label="Next {unit}" onclick={onnext}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M6 3.5 10.5 8 6 12.5" />
 				</svg>
@@ -103,6 +113,14 @@
 		font-size: var(--text-footnote);
 		font-weight: var(--weight-medium);
 		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.segment:not(.selected):not(:disabled):hover {
+		background: var(--fill-hover);
+	}
+
+	.segment:disabled {
+		color: var(--text-tertiary);
 	}
 
 	.segment.selected {
