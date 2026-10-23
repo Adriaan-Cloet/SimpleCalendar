@@ -9,7 +9,8 @@ import type {
 	Frequency,
 	Scope
 } from './calendar.js';
-import { isoDate, isSameDay, startOfWeek } from './week-dates.js';
+import { inRange, type ViewRange } from './view-range.js';
+import { isoDate } from './week-dates.js';
 
 export interface EventForm {
 	calendarId: number;
@@ -197,12 +198,14 @@ export function shiftDate(date: string, days: number): string {
 	return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
-/** Where "New event" starts: the next whole hour in the current week, else 09:00 on its first day */
-export function defaultStart(weekStart: Date, now: Date): Date {
-	if (isSameDay(startOfWeek(now), weekStart)) {
+/** Where "New event" starts: the next whole hour if today is on screen, else 09:00 on the first
+ * day shown */
+export function defaultStart(range: ViewRange, now: Date): Date {
+	if (inRange(range, now)) {
 		return new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1);
 	}
-	return new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate(), 9);
+	const { start } = range;
+	return new Date(start.getFullYear(), start.getMonth(), start.getDate(), 9);
 }
 
 /**

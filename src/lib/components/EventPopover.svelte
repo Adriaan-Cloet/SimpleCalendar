@@ -51,27 +51,59 @@
 	}
 
 	let popover: HTMLElement | undefined = $state();
-	let position = $state({ left: 0, top: 0, side: 'right' as 'left' | 'right', ready: false });
+	type Side = 'right' | 'left' | 'below' | 'above';
+	let position = $state({ left: 0, top: 0, side: 'right' as Side, ready: false });
 
-	const MARGIN = 8;
+	/** Between the popover and its event */
+	const GAP = 8;
+	/** At least this far from every edge of the window: `--space-xl` */
+	const EDGE = 24;
+	/** How far in from a wide event's left edge the popover starts when it goes below or above */
+	const INDENT = 16;
 
-	// Place the popover beside the event: right if it fits, otherwise left
-	$effect(() => {
-		if (!popover) return;
+	// Beside the event if it fits: right, else left. An event too wide for that, such as one in
+	// the day view, gets it below, else above, else over its right end, so it never covers the
+	// sidebar.
+	function place(popover: HTMLElement) {
 		const rect = anchor.getBoundingClientRect();
 		const width = popover.offsetWidth;
 		const height = popover.offsetHeight;
-		let left = rect.right + MARGIN;
-		let side: 'left' | 'right' = 'right';
-		if (left + width > window.innerWidth - MARGIN) {
-			left = Math.max(MARGIN, rect.left - MARGIN - width);
-			side = 'left';
+		const right = window.innerWidth - EDGE;
+		const bottom = window.innerHeight - EDGE;
+		const clampTop = (top: number) =>
+			Math.min(Math.max(EDGE, top), Math.max(EDGE, bottom - height));
+		if (rect.right + GAP + width <= right) {
+			position = { left: rect.right + GAP, top: clampTop(rect.top), side: 'right', ready: true };
+			return;
 		}
-		const top = Math.min(
-			Math.max(MARGIN, rect.top),
-			Math.max(MARGIN, window.innerHeight - height - MARGIN)
-		);
-		position = { left, top, side, ready: true };
+		if (rect.left - GAP - width >= EDGE) {
+			const left = rect.left - GAP - width;
+			position = { left, top: clampTop(rect.top), side: 'left', ready: true };
+			return;
+		}
+		const left = Math.max(EDGE, Math.min(rect.left + INDENT, right - width));
+		const below = rect.bottom + GAP;
+		const above = rect.top - GAP - height;
+		if (below + height <= bottom) {
+			position = { left, top: below, side: 'below', ready: true };
+		} else if (above >= EDGE) {
+			position = { left, top: above, side: 'above', ready: true };
+		} else {
+			// No room either way: over the event's right end, level with it, so its title on the
+			// left stays visible
+			const over = Math.max(left, Math.min(rect.right - INDENT, right) - width);
+			position = { left: over, top: clampTop(rect.top), side: 'left', ready: true };
+		}
+	}
+
+	// Placed again whenever it changes size: the notes arrive after it opens, from `get_event`
+	$effect(() => {
+		if (!popover) return;
+		const target = popover;
+		place(target);
+		const observer = new ResizeObserver(() => place(target));
+		observer.observe(target);
+		return () => observer.disconnect();
 	});
 
 	function onkeydown(e: KeyboardEvent) {
@@ -101,7 +133,7 @@
 
 <div
 	bind:this={popover}
-	class={{ popover: true, ready: position.ready, left: position.side === 'left' }}
+	class={{ popover: true, ready: position.ready, [position.side]: true }}
 	style:left="{position.left}px"
 	style:top="{position.top}px"
 	style:--cal={calendarColor(details.color, details.calendar.id)}
@@ -187,8 +219,14 @@
 	.popover {
 		position: fixed;
 		z-index: 10;
-		width: 288px;
-		padding: var(--space-lg);
+		display: flex;
+		flex-direction: column;
+		width: min(360px, calc(100vw - 2 * var(--space-xl)));
+		/* The same distance from the window's edges as `EDGE` in the placement */
+		max-height: calc(100vh - 2 * var(--space-xl));
+		padding: var(--space-lg) var(--space-xl) var(--space-lg);
+		font-size: var(--text-headline);
+		line-height: var(--leading-headline);
 		border-radius: var(--radius-lg);
 		background: var(--surface-elevated);
 		box-shadow: var(--shadow-2);
@@ -200,6 +238,10 @@
 
 	.popover.left {
 		transform-origin: right top;
+	}
+
+	.popover.above {
+		transform-origin: left bottom;
 	}
 
 	.popover.ready {
@@ -223,9 +265,10 @@
 	}
 
 	.title {
+		flex: none;
 		margin: 0;
-		font-size: var(--text-headline);
-		line-height: var(--leading-headline);
+		font-size: var(--text-title);
+		line-height: var(--leading-title);
 		font-weight: var(--weight-semibold);
 		overflow-wrap: anywhere;
 	}
@@ -255,11 +298,16 @@
 		background: var(--cal);
 	}
 
+	/* The notes take what room the window leaves and scroll inside it, on a soft panel so long
+	   text reads apart from the details above */
 	.notes {
-		max-height: 160px;
-		margin-top: var(--space-md);
-		padding-top: var(--space-md);
-		border-top: 1px solid var(--separator);
+		flex: 0 1 auto;
+		min-height: 80px;
+		max-height: 420px;
+		margin-top: var(--space-lg);
+		padding: var(--space-md);
+		border-radius: var(--radius-md);
+		background: var(--fill-hover);
 		overflow-y: auto;
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
@@ -281,6 +329,7 @@
 	}
 
 	footer {
+		flex: none;
 		display: flex;
 		flex-wrap: wrap;
 		justify-content: flex-end;

@@ -1534,6 +1534,15 @@ Implementation notes (#11):
 - A calendar without a colour gets a palette colour by its id (`calendarColor`), so it keeps
   it across restarts.
 
+Implementation notes (#23):
+
+- The week and day views are one component, `TimeGrid.svelte`, with a first day and a number
+  of days. `placeWeek` works on any list of days, so the day view reads its one day with
+  `list_occurrences(day, day + 1)` and lays it out with the same code.
+- The page keeps a selected date and a view (`src/lib/view-range.ts`): the week view shows
+  the Monday-first week around the date, the day view the date. The arrows move the date a
+  week or a day, so switching views keeps it.
+
 Implementation notes (#13):
 
 - `begin_google_sign_in(source?)` opens the browser from Rust with the `open` crate and

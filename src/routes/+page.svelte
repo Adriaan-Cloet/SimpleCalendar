@@ -26,7 +26,7 @@
 	import SyncIssuesDialog from '#lib/components/SyncIssuesDialog.svelte';
 	import SyncNotice from '#lib/components/SyncNotice.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
-	import WeekView from '#lib/components/WeekView.svelte';
+	import TimeGrid from '#lib/components/TimeGrid.svelte';
 	import { displayLocale } from '#lib/display-format.js';
 	import { keepHidden } from '#lib/keep-hidden.js';
 	import {
@@ -40,7 +40,15 @@
 	import { listSources, onSyncStatus, syncNow, type SyncState } from '#lib/sources.js';
 	import { listSyncIssues, onSyncConflict, type SyncIssue } from '#lib/sync-issues.js';
 	import { summarize } from '#lib/sync-summary.js';
-	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
+	import {
+		inRange,
+		step,
+		viewRange,
+		viewTitle,
+		type View,
+		type ViewRange
+	} from '#lib/view-range.js';
+	import { addDays, isoDate } from '#lib/week-dates.js';
 
 	let now = $state(new Date());
 
@@ -50,39 +58,39 @@
 		return () => clearInterval(timer);
 	});
 
-	let weekStart = $state(startOfWeek(new Date()));
-	const title = $derived(
-		new Intl.DateTimeFormat(displayLocale, { month: 'long', year: 'numeric' }).formatRange(
-			weekStart,
-			addDays(weekStart, 6)
-		)
-	);
+	// The selected date and the view around it (#23). Both views keep the date, so switching
+	// shows the same day in its week and back.
+	let view = $state<View>('week');
+	let date = $state(new Date());
+	const range = $derived(viewRange(view, date));
+	const title = $derived(viewTitle(view, date, displayLocale));
 
 	let calendars = $state<CalendarInfo[]>([]);
 	let occurrences = $state<Occurrence[]>([]);
 	const calendarsById = $derived(new Map(calendars.map((c) => [c.id, c])));
 
-	// Answers can arrive out of order when the week changes quickly: only the latest counts
+	// Answers can arrive out of order when the days change quickly: only the latest counts
 	let request = 0;
-	// The week `occurrences` belong to
-	let loaded: Date | null = null;
+	// The days `occurrences` belong to, as `start/days`
+	let loaded: string | null = null;
 
-	async function load(week: Date) {
+	async function load({ start, days }: ViewRange) {
 		const mine = ++request;
+		const key = `${isoDate(start)}/${days}`;
 		try {
 			const [cals, found] = await Promise.all([
 				listCalendars(),
-				listOccurrences(isoDate(week), isoDate(addDays(week, 7)))
+				listOccurrences(isoDate(start), isoDate(addDays(start, days)))
 			]);
 			if (mine !== request) return;
 			calendars = cals;
-			// In the same week, a calendar hidden meanwhile keeps its events in place, faded
+			// On the same days, a calendar hidden meanwhile keeps its events in place, faded
 			const hidden = new Set(cals.filter((c) => !c.visible).map((c) => c.id));
-			occurrences = loaded === week ? keepHidden(occurrences, found, hidden) : found;
-			loaded = week;
+			occurrences = loaded === key ? keepHidden(occurrences, found, hidden) : found;
+			loaded = key;
 		} catch (e) {
 			// Outside Tauri (`npm run dev` in a browser) there is no backend: show an empty week
-			console.error('cannot load the week', e);
+			console.error('cannot load the days', e);
 		}
 	}
 
@@ -104,17 +112,17 @@
 			if (i >= 0) calendars[i] = after;
 		} catch (e) {
 			console.error('cannot update the calendar', e);
-			load(weekStart);
+			load(range);
 		}
 	}
 
 	$effect(() => {
-		load(weekStart);
+		load(range);
 	});
 
-	// After a sync or a removed subscription, read the visible week again (architecture §10)
+	// After a sync or a removed subscription, read the visible days again (architecture §10)
 	$effect(() => {
-		const unlisten = onCalendarChanged(() => load(weekStart)).catch(() => undefined);
+		const unlisten = onCalendarChanged(() => load(range)).catch(() => undefined);
 		return () => {
 			unlisten.then((stop) => stop?.());
 		};
@@ -298,11 +306,11 @@
 		const draft = draftFromForm({ ...form, calendarId });
 		const saved = target ? await updateEvent(target, draft, scope) : await createEvent(draft);
 		editing = null;
-		// Show the week the event is in; `calendar:changed` reads it. A series that no longer
-		// has the occurrence stays on this week.
+		// Show the days the event is on; `calendar:changed` reads them. A series that no longer
+		// has the occurrence stays where it is.
 		if (!saved) return;
-		const week = startOfWeek(wallClock(saved.start));
-		if (week.getTime() !== weekStart.getTime()) go(week);
+		const start = wallClock(saved.start);
+		if (!inRange(range, start)) go(start);
 	}
 
 	async function removeSelected(scope: Scope) {
@@ -322,16 +330,20 @@
 		selected = null;
 	}
 
-	function go(week: Date) {
+	/** Shows `to`, in `next` view or the current one */
+	function go(to: Date, next: View = view) {
 		close();
-		weekStart = week;
+		date = to;
+		view = next;
 	}
 </script>
 
 <div class="app">
 	<Sidebar
 		today={now}
-		{weekStart}
+		{view}
+		{date}
+		onday={(day) => go(day)}
 		{calendars}
 		onupdate={update}
 		onsubscriptions={() => (subscriptionsOpen = true)}
@@ -345,16 +357,19 @@
 	<main>
 		<Toolbar
 			{title}
-			onprevious={() => go(addDays(weekStart, -7))}
-			ontoday={() => go(startOfWeek(new Date()))}
-			onnext={() => go(addDays(weekStart, 7))}
-			onnew={() => newEvent(defaultStart(weekStart, new Date()), false)}
+			{view}
+			onview={(next) => go(date, next)}
+			onprevious={() => go(step(view, date, -1))}
+			ontoday={() => go(new Date())}
+			onnext={() => go(step(view, date, 1))}
+			onnew={() => newEvent(defaultStart(range, new Date()), false)}
 			sync={syncSummary}
 			onsync={() => syncNow().catch((e) => console.error('cannot sync', e))}
 			onaccounts={() => (subscriptionsOpen = true)}
 		/>
-		<WeekView
-			{weekStart}
+		<TimeGrid
+			start={range.start}
+			dayCount={range.days}
 			{now}
 			calendars={calendarsById}
 			{occurrences}
@@ -362,6 +377,7 @@
 			onselect={(key, anchor) => (selected = { key, anchor })}
 			onscroll={close}
 			oncreate={newEvent}
+			onday={view === 'week' ? (day) => go(day, 'day') : undefined}
 		/>
 	</main>
 </div>

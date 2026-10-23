@@ -137,6 +137,19 @@ impl Harness {
             .expect("sync cycle did not finish")
     }
 
+    /// Waits for the end of the next cycle of every source in `source_ids`, up to a day each.
+    /// Cycles that run at once can end in either order: waiting for one records the other's
+    /// end if it comes first, and that one must not be waited for again.
+    async fn all_finished_eventually(&mut self, source_ids: &[&str]) {
+        let from = self.statuses.len();
+        for &id in source_ids {
+            let done = |s: &SyncStatus| s.source_id == id && s.state != SyncState::Syncing;
+            if !self.statuses[from..].iter().any(done) {
+                self.finished_eventually(id).await;
+            }
+        }
+    }
+
     async fn finished_unbounded(&mut self, source_id: &str) -> SyncStatus {
         loop {
             match self.events.recv().await.expect("engine stopped") {
@@ -2237,8 +2250,7 @@ async fn the_timer_skips_sources_that_need_sign_in() {
     h.add_source("src-2", "ics", Some(3 * 3600)).await;
 
     h.handle.sync_all();
-    h.finished_eventually("src-1").await;
-    h.finished_eventually("src-2").await;
+    h.all_finished_eventually(&["src-1", "src-2"]).await;
     // src-2 syncs again after three hours. src-1 would have synced at one and two hours.
     h.finished_eventually("src-2").await;
 
@@ -2293,8 +2305,7 @@ async fn focus_syncs_every_source_at_most_once_a_minute() {
     h.add_source("src-2", "ics", None).await;
 
     h.handle.window_focused();
-    h.finished_eventually("src-1").await;
-    h.finished_eventually("src-2").await;
+    h.all_finished_eventually(&["src-1", "src-2"]).await;
     assert_eq!(h.pulls_so_far().len(), 2);
 
     // Focused again within the minute: nothing.
@@ -2306,8 +2317,7 @@ async fn focus_syncs_every_source_at_most_once_a_minute() {
     // A minute after those cycles: both again.
     tokio::time::sleep(Duration::from_secs(1)).await;
     h.handle.window_focused();
-    h.finished_eventually("src-1").await;
-    h.finished_eventually("src-2").await;
+    h.all_finished_eventually(&["src-1", "src-2"]).await;
     assert_eq!(h.pulls_so_far().len(), 2);
 }
 

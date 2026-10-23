@@ -1,4 +1,4 @@
-// Where the occurrences from `list_occurrences` go in the week view (docs/design.md §11). Pure:
+// Where the occurrences from `list_occurrences` go in the week and day views (docs/design.md §11). Pure:
 // no DOM, no Svelte state, and no zone arithmetic. Rust already returned every time as a
 // wall-clock time in the display zone, so a timed value's date and time are read as written.
 import type { Occurrence } from './calendar.js';
@@ -12,7 +12,7 @@ export interface TimedPiece {
 	end: number;
 }
 
-/** An occurrence in the all-day row, over days `first` to `last` of the week (0 is Monday) */
+/** An occurrence in the all-day row, over days `first` to `last` of those shown (0 is the first) */
 export interface AllDayBar {
 	occurrence: Occurrence;
 	first: number;
@@ -21,7 +21,7 @@ export interface AllDayBar {
 }
 
 export interface WeekLayout {
-	/** Per day of the week, its timed pieces in the order Rust sorted them */
+	/** Per day shown, its timed pieces in the order Rust sorted them */
 	timed: TimedPiece[][];
 	/** In drawing order */
 	allDay: AllDayBar[];
@@ -45,7 +45,8 @@ function wallClock(value: string): { day: number; minutes: number } {
 	};
 }
 
-/** Places a week's occurrences. `days` are the week's seven dates, `YYYY-MM-DD`.
+/** Places the occurrences of the days shown. `days` are their dates, `YYYY-MM-DD`: seven for a
+ * week, one for a day.
  *
  * All-day occurrences go to the all-day row, and so do timed ones of 24 hours or more, which
  * would otherwise fill whole columns. A shorter timed occurrence is drawn on every day it
