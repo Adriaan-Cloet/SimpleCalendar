@@ -53,6 +53,17 @@ pub fn sync_now(service: State<'_, CalendarService>, source: Option<String>) {
     service.sync_now(source);
 }
 
+/// Sets how often a source syncs, in seconds from 5 minutes to a day, or its default for
+/// `None`. The source syncs at once.
+#[tauri::command]
+pub async fn set_sync_interval(
+    service: State<'_, CalendarService>,
+    source: String,
+    seconds: Option<u32>,
+) -> Result<SourceInfo, ServiceError> {
+    service.set_sync_interval(&source, seconds).await
+}
+
 /// Every occurrence on a visible calendar from date `from` up to date `to` (`YYYY-MM-DD`, end
 /// exclusive), in the IANA zone `tz`.
 #[tauri::command]

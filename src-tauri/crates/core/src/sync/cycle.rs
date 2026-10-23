@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::store::{self, LocalCalendar};
-use super::{SyncState, SyncStatus, default_interval};
+use super::{SyncState, SyncStatus};
 use crate::CoreEvent;
 use crate::db::{Db, DbError};
 use crate::model::SourceKind;
@@ -76,7 +76,7 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
             let (id, stored) = (source_id.to_owned(), message.clone());
             if let Err(e) = ctx
                 .db
-                .write(move |c| store::set_status(c, &id, "error", Some(&stored)))
+                .write(move |c| store::set_status(c, &id, SyncState::Error, Some(&stored)))
                 .await
             {
                 log::error!("source {source_id}: cannot store its status: {e}");
@@ -85,14 +85,9 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
         }
         return None;
     };
-    // Rust note: `try_from` refuses a negative number instead of wrapping it around, and `?`
-    // on an `Option` returns `None` from this function when there is no interval at all.
-    let interval = source
-        .interval_s
-        .and_then(|s| u64::try_from(s).ok())
-        .filter(|&s| s > 0)
-        .map(Duration::from_secs)
-        .or_else(|| default_interval(source.kind))?;
+    // Rust note: `?` on an `Option` returns `None` from this function when there is no
+    // interval at all.
+    let interval = super::interval(source.kind, source.interval_s)?;
     if source.auth_required && !manual {
         return Some(interval);
     }
@@ -106,10 +101,11 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
         manual,
     )
     .await;
-    let (state, status) = match &result {
-        Ok(()) => (SyncState::Ok, "ok"),
-        Err(SyncError::Provider(ProviderError::Auth)) => (SyncState::AuthRequired, "auth_required"),
-        Err(_) => (SyncState::Error, "error"),
+    let state = match &result {
+        Ok(()) => SyncState::Ok,
+        Err(SyncError::Provider(ProviderError::Auth)) => SyncState::AuthRequired,
+        Err(SyncError::Provider(ProviderError::Offline)) => SyncState::Offline,
+        Err(_) => SyncState::Error,
     };
     let last_error = result.err().map(|e| {
         log::warn!("source {source_id}: sync failed: {e}");
@@ -119,14 +115,23 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
     let (id, message) = (source_id.to_owned(), last_error.clone());
     if let Err(e) = ctx
         .db
-        .write(move |c| store::set_status(c, &id, status, message.as_deref()))
+        .write(move |c| store::set_status(c, &id, state, message.as_deref()))
         .await
     {
         log::error!("source {source_id}: cannot store its status: {e}");
     }
     ctx.emit_status(source_id, state, last_error);
+    // Without a connection, look again soon: the indicator should not say "offline" for an
+    // hour after the network is back.
+    let interval = match state {
+        SyncState::Offline => interval.min(OFFLINE_RETRY),
+        _ => interval,
+    };
     Some(next_cycle(ctx, source_id, interval).await)
 }
+
+/// How soon a source that could not connect is tried again, if its interval is longer.
+pub(super) const OFFLINE_RETRY: Duration = Duration::from_secs(60);
 
 /// When the timer should sync `source_id` again: after `interval`, or sooner when an outbox row
 /// may be tried again before then (§7.3).

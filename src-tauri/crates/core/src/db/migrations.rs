@@ -11,12 +11,13 @@ const MIGRATION_SLICE: &[M<'static>] = &[
     M::up(include_str!("migrations/003_google_read.sql")),
     M::up(include_str!("migrations/004_local_source.sql")),
     M::up(include_str!("migrations/005_outbox.sql")),
+    M::up(include_str!("migrations/006_source_offline.sql")),
 ];
 
 /// All migrations, in order. Migration 1 creates the v0.1 schema (`docs/architecture.md` §6),
 /// migration 2 adds `calendars.warnings` (§7.7), migration 3 what Google read needs: the event
 /// flags and ETag, and reminders (§7.5), migration 4 the built-in local source (§4), migration
-/// 5 the outbox and `events.pending_delete` (§7.3).
+/// 5 the outbox and `events.pending_delete` (§7.3), migration 6 `sources.offline` (§7.1).
 pub(crate) const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SLICE);
 
 /// An in-memory connection with the write pragmas and every migration applied.

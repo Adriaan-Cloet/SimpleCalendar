@@ -1,13 +1,20 @@
 <script lang="ts">
+	import SyncIndicator from '#lib/components/SyncIndicator.svelte';
+	import type { SyncSummary } from '#lib/sync-summary.js';
+
 	interface Props {
 		title: string;
 		onprevious: () => void;
 		ontoday: () => void;
 		onnext: () => void;
 		onnew: () => void;
+		/** What sync is doing, for the indicator */
+		sync: SyncSummary;
+		onsync: () => void;
+		onaccounts: () => void;
 	}
 
-	let { title, onprevious, ontoday, onnext, onnew }: Props = $props();
+	let { title, onprevious, ontoday, onnext, onnew, sync, onsync, onaccounts }: Props = $props();
 
 	// Prototype: the view switcher shows its states but does not switch yet
 	const views = ['Day', 'Week', 'Month'];
@@ -29,6 +36,7 @@
 	</div>
 
 	<div class="actions">
+		<SyncIndicator summary={sync} {onsync} {onaccounts} />
 		<div class="nav">
 			<button type="button" class="icon-button" aria-label="Previous week" onclick={onprevious}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">

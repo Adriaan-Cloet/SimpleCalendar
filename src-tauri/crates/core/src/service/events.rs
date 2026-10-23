@@ -457,7 +457,7 @@ impl CalendarService {
     /// Asks the engine to send what a write just queued for `source`, if anything.
     fn push(&self, source: Option<String>) {
         if let Some(source) = source {
-            self.sync.push(source);
+            self.sync.local_write(source);
         }
     }
 }

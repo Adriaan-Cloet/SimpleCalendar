@@ -37,7 +37,9 @@
 		type EventForm
 	} from '#lib/event-form.js';
 	import { describeRepeat, describeWhen, wallClock } from '#lib/occurrence-text.js';
+	import { listSources, onSyncStatus, syncNow, type SyncState } from '#lib/sources.js';
 	import { listSyncIssues, onSyncConflict, type SyncIssue } from '#lib/sync-issues.js';
+	import { summarize } from '#lib/sync-summary.js';
 	import { addDays, isoDate, startOfWeek } from '#lib/week-dates.js';
 
 	let now = $state(new Date());
@@ -162,6 +164,39 @@
 		return () => {
 			clearTimeout(noticeTimer);
 			unlisten.then((stop) => stop?.());
+		};
+	});
+
+	// What each source's sync is doing, for the toolbar's indicator (#22): the stored outcome
+	// of its last cycle, then `sync:status`. Read again after a change to the sources, which
+	// `calendar:changed` and closing the Accounts dialog stand for.
+	let syncStates = $state<Record<string, SyncState>>({});
+	const syncSummary = $derived(summarize(syncStates));
+	let sourcesRequest = 0;
+
+	async function loadSources() {
+		const mine = ++sourcesRequest;
+		try {
+			const sources = await listSources();
+			if (mine !== sourcesRequest) return;
+			// A cycle that started meanwhile keeps showing as syncing
+			syncStates = Object.fromEntries(
+				sources.map((s) => [s.id, syncStates[s.id] === 'syncing' ? 'syncing' : s.state])
+			);
+		} catch (e) {
+			console.error('cannot list the accounts', e);
+		}
+	}
+
+	$effect(() => {
+		loadSources();
+		const unlistenStatus = onSyncStatus(({ source_id, state }) => {
+			syncStates[source_id] = state;
+		}).catch(() => undefined);
+		const unlistenChanged = onCalendarChanged(loadSources).catch(() => undefined);
+		return () => {
+			unlistenStatus.then((stop) => stop?.());
+			unlistenChanged.then((stop) => stop?.());
 		};
 	});
 
@@ -314,6 +349,9 @@
 			ontoday={() => go(startOfWeek(new Date()))}
 			onnext={() => go(addDays(weekStart, 7))}
 			onnew={() => newEvent(defaultStart(weekStart, new Date()), false)}
+			sync={syncSummary}
+			onsync={() => syncNow().catch((e) => console.error('cannot sync', e))}
+			onaccounts={() => (subscriptionsOpen = true)}
 		/>
 		<WeekView
 			{weekStart}
@@ -328,7 +366,7 @@
 	</main>
 </div>
 
-<SubscriptionsDialog bind:open={subscriptionsOpen} />
+<SubscriptionsDialog bind:open={subscriptionsOpen} onclosed={loadSources} />
 <SyncIssuesDialog bind:open={issuesOpen} {issues} onchanged={loadIssues} />
 
 {#if conflicts.length > 0}

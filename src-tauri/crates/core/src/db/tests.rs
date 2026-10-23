@@ -55,7 +55,7 @@ fn migrations_are_valid() {
 
 #[test]
 fn user_version_is_latest_migration() {
-    assert_eq!(user_version(&test_connection()), 5);
+    assert_eq!(user_version(&test_connection()), 6);
 }
 
 #[test]
@@ -286,7 +286,7 @@ async fn open_is_idempotent() {
     let path = dir.path().join("test.db");
     drop(Db::open(&path).unwrap());
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 5);
+    assert_eq!(db.read(|c| Ok(user_version(c))).await.unwrap(), 6);
 }
 
 #[tokio::test]

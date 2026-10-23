@@ -293,6 +293,19 @@ impl Harness {
             .unwrap()
     }
 
+    /// Whether the last cycle of a source could not connect.
+    async fn source_offline(&self, id: &str) -> bool {
+        let id = id.to_owned();
+        self.db
+            .read(move |c| {
+                c.query_row("SELECT offline FROM sources WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
     /// Checks the invariants once more, then fails on any violation found during the test.
     async fn assert_invariants(&self) {
         let mut found = self.fake.violations();
@@ -513,7 +526,7 @@ impl Harness {
             .answer(vec![Err(ProviderError::Transient { retry_after: None })]);
         assert_eq!(self.sync().await.state, SyncState::Error);
         self.fake.script("src-1", vec![Ok(changes)]);
-        self.handle.push("src-1".into());
+        self.handle.sync_automatic("src-1".into());
         assert_eq!(self.finished("src-1").await.state, SyncState::Ok);
     }
 
@@ -833,7 +846,7 @@ async fn a_change_that_cannot_be_sent_backs_off_but_a_manual_sync_sends_it() {
     assert!(error.is_some());
 
     // An automatic sync leaves the row waiting, but pulls.
-    h.handle.push("src-1".into());
+    h.handle.sync_automatic("src-1".into());
     assert_eq!(h.finished("src-1").await.state, SyncState::Ok);
     assert_eq!(h.fake.writes().len(), 1);
     assert_eq!(h.pulls_so_far().len(), 1);
@@ -945,12 +958,12 @@ async fn edits_made_offline_reach_the_server_in_order_once_online() {
 
     h.edit("a", retitled).await;
     h.create("abc123").await;
-    h.handle.push("src-1".into());
+    h.handle.sync_automatic("src-1".into());
     assert_eq!(h.finished("src-1").await.state, SyncState::Error);
     h.delete("b").await;
     h.edit("a", moved_later).await;
     h.edit("abc123", retitled).await;
-    h.handle.push("src-1".into());
+    h.handle.sync_automatic("src-1".into());
     // Still backing off: nothing is sent.
     h.finished("src-1").await;
     assert_eq!(h.fake.writes().len(), 1);
@@ -2236,6 +2249,144 @@ async fn the_timer_skips_sources_that_need_sign_in() {
         .count();
     // Its only pull was the failed one.
     assert_eq!(src_1, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_local_write_syncs_two_seconds_after_the_last_one() {
+    let mut h = Harness::new().await;
+
+    let start = tokio::time::Instant::now();
+    h.handle.local_write("src-1".into());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.handle.local_write("src-1".into());
+    let pull = h.next_pull_eventually().await;
+
+    // Two seconds after the second write; the first did not sync on its own.
+    assert_eq!(pull.at - start, Duration::from_secs(3));
+    // The timer counts from the end of that cycle.
+    let next = h.next_pull_eventually().await;
+    assert_eq!(next.at - pull.at, 60 * MINUTE);
+}
+
+#[tokio::test]
+async fn a_local_write_during_a_cycle_runs_one_more() {
+    let mut h = Harness::new().await;
+    h.fake.gate("src-1");
+
+    h.handle.sync_now(Some("src-1".into()));
+    h.next_pull().await;
+    h.handle.local_write("src-1".into());
+    h.handle.local_write("src-1".into());
+    h.fake.release(1);
+    h.finished("src-1").await;
+    h.next_pull().await;
+    h.fake.release(1);
+    h.finished("src-1").await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.pulls_so_far().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn focus_syncs_every_source_at_most_once_a_minute() {
+    let mut h = Harness::new().await;
+    h.add_source("src-2", "ics", None).await;
+
+    h.handle.window_focused();
+    h.finished_eventually("src-1").await;
+    h.finished_eventually("src-2").await;
+    assert_eq!(h.pulls_so_far().len(), 2);
+
+    // Focused again within the minute: nothing.
+    tokio::time::sleep(59 * Duration::from_secs(1)).await;
+    h.handle.window_focused();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(h.pulls_so_far().is_empty());
+
+    // A minute after those cycles: both again.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.handle.window_focused();
+    h.finished_eventually("src-1").await;
+    h.finished_eventually("src-2").await;
+    assert_eq!(h.pulls_so_far().len(), 2);
+}
+
+#[tokio::test]
+async fn focus_during_the_start_sync_does_not_sync_twice() {
+    let mut h = Harness::new().await;
+    h.fake.gate("src-1");
+
+    h.handle.sync_all();
+    h.next_pull().await;
+    // The window shows up while the start sync runs.
+    h.handle.window_focused();
+    h.fake.release(1);
+    h.finished("src-1").await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.pulls_so_far().is_empty());
+}
+
+#[tokio::test]
+async fn focus_skips_sources_that_need_sign_in() {
+    let mut h = Harness::new().await;
+    h.add_source("src-2", "ics", None).await;
+    h.set_source_status("src-1", "auth_required").await;
+
+    h.handle.window_focused();
+    h.finished("src-2").await;
+
+    assert!(h.statuses.iter().all(|s| s.source_id != "src-1"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreachable_server_marks_the_source_offline_and_is_tried_again_in_a_minute() {
+    let mut h = Harness::new().await;
+    h.fake.fail_list(Some(ProviderError::Offline));
+
+    let status = h.sync().await;
+    assert_eq!(status.state, SyncState::Offline);
+    assert!(status.last_error.is_some());
+    assert_eq!(h.source_status("src-1").await.0, "error");
+    assert!(h.source_offline("src-1").await);
+
+    // Back within a minute, not after the hour of an ICS source.
+    let start = tokio::time::Instant::now();
+    h.fake.fail_list(None);
+    let status = h.finished_eventually("src-1").await;
+    assert_eq!(tokio::time::Instant::now() - start, MINUTE);
+    assert_eq!(status.state, SyncState::Ok);
+    assert!(!h.source_offline("src-1").await);
+}
+
+#[tokio::test]
+async fn a_change_that_finds_no_connection_is_not_an_attempt() {
+    let mut h = Harness::new().await;
+    h.writable_with(vec![single("a")]).await;
+    h.edit("a", retitled).await;
+    h.fake.answer(vec![Err(ProviderError::Offline)]);
+
+    assert_eq!(h.sync().await.state, SyncState::Offline);
+
+    assert_eq!(h.outbox().await, rows(&[("update", "pending")]));
+    // The server never saw it: the next cycle, automatic or not, sends it.
+    let (attempts, wait, _) = h.backoff().await;
+    assert_eq!(attempts, 0);
+    assert!(wait <= 0);
+    assert!(h.pulls_so_far().is_empty());
+    h.handle.sync_automatic("src-1".into());
+    h.finished("src-1").await;
+    assert!(h.outbox().await.is_empty());
+}
+
+#[test]
+fn a_source_interval_overrides_the_default_unless_it_is_not_positive() {
+    assert_eq!(interval(SourceKind::Ics, Some(300)), Some(5 * MINUTE));
+    assert_eq!(interval(SourceKind::Ics, None), Some(60 * MINUTE));
+    assert_eq!(interval(SourceKind::Google, Some(0)), Some(15 * MINUTE));
+    assert_eq!(interval(SourceKind::Google, Some(-5)), Some(15 * MINUTE));
+    assert_eq!(interval(SourceKind::Local, Some(300)), Some(5 * MINUTE));
+    assert_eq!(interval(SourceKind::Local, None), None);
 }
 
 // ---- providers -----------------------------------------------------------------------------

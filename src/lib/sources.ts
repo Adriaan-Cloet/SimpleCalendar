@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export type SourceKind = 'local' | 'ics' | 'google' | 'caldav';
-export type SyncState = 'syncing' | 'ok' | 'error' | 'auth_required';
+export type SyncState = 'syncing' | 'ok' | 'error' | 'offline' | 'auth_required';
 
 export interface SourceInfo {
 	id: string;
@@ -15,6 +15,10 @@ export interface SourceInfo {
 	/** Outcome of the last sync; `sync:status` events report a sync in progress */
 	state: Exclude<SyncState, 'syncing'>;
 	last_error: string | null;
+	/** The user's own interval in seconds; `null` for the default */
+	sync_interval_s: number | null;
+	/** The default interval of the kind, in seconds */
+	default_interval_s: number | null;
 	/** Epoch seconds */
 	last_synced_at: number | null;
 	warnings: string[];
@@ -68,6 +72,9 @@ export const addIcsSource = (url: string, name: string) =>
 	invoke<SourceInfo>('add_ics_source', { url, name });
 export const removeSource = (source: string) => invoke<void>('remove_source', { source });
 export const syncNow = (source: string | null = null) => invoke<void>('sync_now', { source });
+/** From 5 minutes to a day; `null` goes back to the default. The source syncs at once. */
+export const setSyncInterval = (source: string, seconds: number | null) =>
+	invoke<SourceInfo>('set_sync_interval', { source, seconds });
 
 /** Signs in in the system browser and resolves when that finishes. With `source`, signs that
  * account in again. */

@@ -510,6 +510,8 @@ CREATE TABLE sources (
     account_label   TEXT,                       -- Google account or ICS host; never a secret
     status          TEXT NOT NULL DEFAULT 'ok'
                     CHECK (status IN ('ok', 'auth_required', 'error')),
+    offline         INTEGER NOT NULL DEFAULT 0  -- with status 'error': no connection
+                    CHECK (offline IN (0, 1)),
     last_error      TEXT,
     sync_interval_s INTEGER,                    -- NULL = provider default
     created_at      INTEGER NOT NULL
@@ -626,6 +628,7 @@ CREATE TABLE settings (
 | `event_reminders`, `events.use_default_reminders`, `calendars.default_reminders` | v0.2, Google read (migration 3, #14) |
 | the `local` row in `sources`                                                     | v0.2, local calendars (migration 4)  |
 | `outbox`, `events.pending_delete`                                                | v0.2, Google write                   |
+| `sources.offline`                                                                | v0.3, sync triggers (migration 6)    |
 | `fired_reminders`                                                                | v0.3, reminders                      |
 
 Notes:
@@ -732,6 +735,28 @@ Implementation notes (`sync/`):
   still tries it, so an ICS feed that rejected a request once can recover without a sign-in.
 - Without a keychain the cycle fails before any request, with the message from §8 as
   `last_error`.
+
+Implementation notes (#22):
+
+- The shell calls `CalendarService::window_focused` on every `WindowEvent::Focused(true)`. The
+  engine starts every idle remote source whose last cycle ended more than `FOCUS_GAP` (a
+  minute) ago. A running source is left alone, so the focus that follows app start does not
+  sync anything twice.
+- A write that queues an outbox row calls `SyncHandle::local_write`. The engine moves that
+  source's timer to `WRITE_DELAY` (2 seconds) from now, so a burst of edits is sent by one
+  cycle. During a cycle it asks for one more instead.
+- A request that made no connection (no route, refused, a name that does not resolve) is
+  `ProviderError::Offline`; a failed TLS handshake stays `Transient`, since the server was
+  reached. The cycle ends as `offline`, stored as `status = 'error'` with `sources.offline = 1`
+  (migration 6), and the timer comes back within `OFFLINE_RETRY` (a minute). An outbox row
+  that met no connection goes back to `pending` without counting as an attempt.
+- `set_sync_interval(source, seconds?)` stores `sources.sync_interval_s`, from 5 minutes to a
+  day, or `NULL` for the default. It then syncs the source like the timer would, and the timer
+  counts the new interval from the end of that cycle.
+- The toolbar shows one indicator for all sources (`SyncIndicator.svelte`, rules in
+  `src/lib/sync-summary.ts`): syncing wins, then `auth_required`, then a failure. `offline`
+  shows only when no source could connect; one unreachable server among working ones is a
+  failure. A click syncs everything, or opens Accounts when the problem needs the user there.
 
 ### 7.2 One cycle for one source
 
@@ -1444,6 +1469,7 @@ Commands (all async, all return `Result`):
 | `list_sources`, `remove_source`            | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
 | `add_ics_source(url, name)`                | Subscribe to a feed                                           | v0.1, ICS subscriptions |
 | `sync_now(source?)`                        | Manual refresh                                                | v0.1, ICS subscriptions |
+| `set_sync_interval(source, seconds?)`      | Per-source interval override                                  | v0.3, sync triggers     |
 | `begin_google_sign_in`                     | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
 | `list_sync_issues`, `dismiss_sync_issue`   | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
 | `redo_sync_issue`                          | Make such a change again, as a new edit                       | v0.3, offline sync      |
@@ -1477,7 +1503,8 @@ Implementation notes (#9):
   also carries `reason`, §8), `invalid_input`, `not_found`, `keychain` or `database`. The
   `message` is meant to be shown as it is.
 - `list_sources` returns every source except the built-in local one, oldest first, with `state`
-  (`ok`, `error`, `auth_required`), `last_error`, `last_synced_at` (the latest of its
+  (`ok`, `error`, `auth_required`, and `offline` since #22), `sync_interval_s` and
+  `default_interval_s` (since #22), `last_error`, `last_synced_at` (the latest of its
   calendars) and `warnings` (those of all its calendars, §7.7). `syncing` only ever arrives as
   a `sync:status` event.
 - `add_ics_source` accepts `http`, `https`, `webcal` and `webcals` addresses with a host. It
