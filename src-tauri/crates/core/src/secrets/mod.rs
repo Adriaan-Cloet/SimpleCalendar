@@ -48,6 +48,13 @@ pub enum Secret {
     /// The secret of the user's own Google OAuth client, the override of the compiled-in one.
     /// Stored under an app account, not a source (`app_account`).
     ClientSecret { secret: String },
+    /// A CalDAV account: the address the user gave, and the login for it (§8). The address is
+    /// kept here too, so the three are stored and removed together.
+    Caldav {
+        url: String,
+        username: String,
+        password: String,
+    },
 }
 
 /// Never prints the secret itself, so a stray `{:?}` in a log line cannot leak it.
@@ -59,6 +66,7 @@ impl fmt::Debug for Secret {
                 f.write_str("GoogleRefreshToken { refresh_token: <redacted> }")
             }
             Secret::ClientSecret { .. } => f.write_str("ClientSecret { secret: <redacted> }"),
+            Secret::Caldav { .. } => f.write_str("Caldav { <redacted> }"),
         }
     }
 }

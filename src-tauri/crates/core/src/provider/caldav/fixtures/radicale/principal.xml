@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><response><href>/</href><propstat><prop><resourcetype><collection /></resourcetype><current-user-principal><href>/alice/</href></current-user-principal></prop><status>HTTP/1.1 200 OK</status></propstat><propstat><prop><C:calendar-home-set /></prop><status>HTTP/1.1 404 Not Found</status></propstat></response></multistatus>

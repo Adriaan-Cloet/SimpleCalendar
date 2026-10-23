@@ -28,6 +28,9 @@ chrono-tz = "0.10"
 getrandom = "0.4"
 icalendar = { version = "0.17", default-features = false, features = ["parser"] }
 log = "0.4"
+# WebDAV XML for CalDAV (§11): the requests' answers are `multistatus` documents with
+# namespaces. Already built through Tauri (`plist`), the same 0.42 with its default features.
+quick-xml = "0.42"
 # The OS keychain API (§8). The platform store crates below plug into it.
 keyring-core = "1"
 # HTTP client for feeds and, later, the Google API (§11). Without default features: rustls with

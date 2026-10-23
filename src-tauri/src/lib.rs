@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use simplecalendar_core::db::Db;
 use simplecalendar_core::google::{ClientConfig, Endpoints, GoogleAuth};
 use simplecalendar_core::provider::Providers;
+use simplecalendar_core::provider::caldav::CaldavProvider;
 use simplecalendar_core::provider::google::GoogleProvider;
 use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::reminders::{ReminderDue, ReminderHandle, ReminderScheduler};
@@ -62,7 +63,8 @@ pub fn run() {
             // The sync engine (§7.1), with a provider for every kind of remote source.
             let providers = Providers::new()
                 .with(Arc::new(IcsProvider::new()?))
-                .with(Arc::new(GoogleProvider::new(google.clone())));
+                .with(Arc::new(GoogleProvider::new(google.clone())))
+                .with(Arc::new(CaldavProvider::new()?));
             let (events, rx) = mpsc::unbounded_channel();
             let (engine, sync) =
                 SyncEngine::new(db.clone(), secrets.clone(), providers, events.clone());

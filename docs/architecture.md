@@ -415,11 +415,11 @@ by comparing the outbox row's `base` and `payload`, so that logic is not repeate
 
 ### Providers
 
-| Provider | Writable | Needed from                 | Cursor contents                                                                               |
-| -------- | -------- | --------------------------- | --------------------------------------------------------------------------------------------- |
-| ICS      | no       | v0.1, ICS subscriptions     | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                             |
-| Google   | yes      | v0.2, Google read and write | `nextSyncToken`                                                                               |
-| CalDAV   | yes      | v0.4, CalDAV                | A WebDAV sync-token, or the collection ctag plus the per-event ETags already in `events.etag` |
+| Provider | Writable | Needed from                 | Cursor contents                                                                              |
+| -------- | -------- | --------------------------- | -------------------------------------------------------------------------------------------- |
+| ICS      | no       | v0.1, ICS subscriptions     | JSON with the HTTP `ETag`, `Last-Modified` and a hash of the body                            |
+| Google   | yes      | v0.2, Google read and write | `nextSyncToken`                                                                              |
+| CalDAV   | yes      | v0.4, CalDAV                | JSON with the WebDAV sync-token and the collection ctag, plus every resource's path and ETag |
 
 **Local calendars are not a provider.** A source of kind `local` has no provider at all. The
 sync engine skips it, and writes to its calendars do not create outbox rows.
@@ -436,6 +436,15 @@ Nothing before v0.4, but the trait was shaped so it fits then without changes:
 - `EventUpdate.desired` gives it the full state for a whole-object write.
 - `events.etag` and `events.ical_uid` exist from the first migration.
 - `full = true` covers servers without incremental sync.
+
+Implemented in #26 (§7.8) without a change to the traits. One point differs from the plan
+above: the per-resource ETags travel in the cursor instead of being read from `events.etag`.
+A provider never reads the database (rules below), and comparing ETags needs the list of the
+last pull, so the cursor carries it: each resource's path, its ETag and the original starts of
+its exceptions. The alternative, passing the stored ETags into `pull`, would have changed the
+trait for every provider. The cost is about 100 bytes per resource, so 100 KB for a calendar
+with 1000 events, read and written once per pull. The list also tells a pull which exception
+rows to delete when a resource lost one, which `events.etag` alone could not.
 
 ## 6. SQLite schema
 
@@ -1306,6 +1315,87 @@ The test cases for all of this are listed in §12.
   feed unchanged leaves them as they were. `ChangeSet.warnings` carries them from the provider
   to the engine.
 
+### 7.8 CalDAV specifics
+
+_Needed from: v0.4 (CalDAV). Reading is #26; writing is #27._
+
+The source's keychain entry holds the address the user gave, the username and the password
+(§8). The address may be a server, a principal or one calendar.
+
+Discovery (RFC 6764, RFC 4791 §6.2.1):
+
+1. An address without a path is a server: `PROPFIND` on `/.well-known/caldav` first, then on
+   the address itself. An address with a path is only tried itself.
+2. If the answer's `resourcetype` is a calendar, that calendar is the account's only one. This
+   is the way in for servers whose calendars cannot be listed, as with some Open-Xchange setups.
+3. Otherwise its `calendar-home-set`, or that of its `current-user-principal`, is the home.
+   Its members (`Depth: 1`) are the calendars.
+4. Nothing found is `Permanent("no CalDAV calendars were found at this address")`.
+
+What was found is kept in memory per source and address, so later syncs list the calendars
+with one request. If that request answers 404, discovery runs again once.
+
+Calendars:
+
+- Members whose `resourcetype` has `calendar` and whose `supported-calendar-component-set`
+  (if present) has `VEVENT`. Task lists, the scheduling inbox and outbox, and Nextcloud's
+  trash bin are left out.
+- `remote_id` is the collection's full URL, so a pull needs no discovery.
+- The name is `displayname`, else the last path segment. Apple's `calendar-color`
+  (`#RRGGBBAA`) becomes `#rrggbb`. `calendar-timezone` is resolved like an ICS `TZID` (§7.7).
+- Access is `read` until #27, whatever `current-user-privilege-set` says. No calendar is
+  primary.
+
+A pull, by what the cursor holds (§5):
+
+| Cursor                | Requests                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| none, or unreadable   | `PROPFIND Depth: 1` for the tags and every member's ETag, then `calendar-multiget`; `full = true` |
+| a sync-token          | `REPORT sync-collection` (RFC 6578), then `calendar-multiget` for the changed resources           |
+| a ctag, no sync-token | `PROPFIND Depth: 0`; if the ctag changed, `PROPFIND Depth: 1` and the ETags are compared          |
+
+- A changed resource whose ETag equals the cursor's is not fetched.
+- Multigets ask for 100 resources at a time. A resource the multiget leaves out was deleted in
+  between.
+- A sync report cut short (507 on the collection, RFC 6578 §3.6) is continued with the token it
+  returned, up to 50 times.
+- A token the server rejects (403 `valid-sync-token`, 409, 410) is `CursorInvalid`, so the engine
+  starts over with a full pull. A server that does not do sync reports after all (400, 405,
+  415, 501, or an answer without a token) is pulled by comparing ETags instead.
+- If no member has an ETag, nothing can be compared: the calendar is read whole, `full = true`.
+- Deletions are exact: a resource that is gone deletes its event and the exceptions the cursor
+  lists for it, and a resource that lost an exception deletes that exception's row.
+
+Events:
+
+- A resource is parsed by the ICS parser (§7.6, §7.7). XML turns its CRLFs into LFs, which the
+  parser accepts.
+- `remote_id` is the resource's path for the event or master, and `<path>#<original start>`
+  for an exception. Writes (#27) and deletions address resources by path, not by `UID`.
+  `ical_uid` keeps the `UID`.
+- A resource holds one `UID` (RFC 4791 §4.1). A second event without `RECURRENCE-ID` is logged
+  and left out.
+- `etag` is the resource's ETag on every event of the resource.
+- A resource that does not parse is logged; its events stay as they were, and the cursor keeps
+  its old ETag, so the next pull tries again.
+
+Requests:
+
+- Basic authentication on every request. The client follows no redirects by itself, because
+  `reqwest` would turn a redirected `PROPFIND` into a `GET`. The provider follows up to 5,
+  keeping the method and body, but only on the same host. A redirect to another host is a
+  `Permanent` error that names the host, so the password goes nowhere the user did not name.
+- An address must be `https`. Plain `http` is accepted for `localhost` and loopback addresses
+  only, for local servers. This holds for every address the server names, such as its home.
+- 401 is `Auth`, 403 `Permanent`, 404 and 410 `NotFound`, 408, 429 and 5xx `Transient` with
+  `Retry-After` in seconds, other statuses `Permanent`. Answers over 32 MiB are refused. Logs
+  leave out URLs.
+
+Implementation notes (`provider/caldav/`): `xml/` builds the request bodies and reads a
+`multistatus` into a small tree, matching elements by namespace, never by prefix.
+`cursor/` holds the cursor and the comparison, as pure functions. `live.rs` is the opt-in
+test against a real server (§12).
+
 ## 8. Credentials
 
 _Needed from: v0.1 (ICS subscriptions; the feed URL is the first secret). The Google sign-in
@@ -1319,7 +1409,7 @@ part is needed from v0.2 (Google read), the CalDAV password from v0.4._
 | Google access token                | Memory only. Short-lived, re-created at start |
 | Full ICS URL                       | OS keychain                                   |
 | OAuth client secret override       | OS keychain                                   |
-| CalDAV password                    | OS keychain                                   |
+| CalDAV address, username, password | OS keychain                                   |
 | Account label, ICS host, client id | SQLite (not secret)                           |
 
 ICS URLs are treated as secrets because private feed addresses, including Google's own "secret
@@ -1750,6 +1840,7 @@ inspected offline.
 | `wiremock` 0.6 (dev only)                                      | Fake Google and ICS servers in tests | Never part of the shipped binary                                                                                                                             |                                                                                                 | v0.1, ICS subscriptions |
 | `base64` 0.23                                                  | PKCE challenge, random tokens        | Already built through `reqwest` and Tauri, the same version                                                                                                  | `oauth2` (see below)                                                                            | v0.2, Google read       |
 | `getrandom` 0.4                                                | PKCE verifier, `state`               | Already built through `uuid`, the same version                                                                                                               |                                                                                                 | v0.2, Google read       |
+| `quick-xml` 0.42                                               | WebDAV XML for CalDAV                | Already built through Tauri (`plist`), the same version and features. Its namespace-aware reader matches elements by namespace, which DAV needs              | `roxmltree`, `xml-rs` (a second XML parser in the binary)                                       | v0.4, CalDAV            |
 
 The two keychain store crates are platform-specific dependencies, so each platform compiles
 only its own.
@@ -1844,6 +1935,15 @@ Also written before the implementation. Each case is a small feed file in the te
 Against `wiremock`, with recorded response shapes. Includes pagination, HTTP 410, 412, 429 and
 a lost response on create. For Google write: the patch body contains exactly the changed
 fields, `attendees` is never present, and `sendUpdates=none` is on every write request.
+
+CalDAV (#26): the answers in `provider/caldav/fixtures/` were recorded from Radicale 3 and
+Nextcloud 35, in throwaway Docker containers, while the live test ran. The replay tests cover
+each server's discovery and calendar list, a full pull, an unchanged one, and one with an
+added, a deleted and a changed resource. Hand-written answers cover the rest: ctag and ETag
+comparison, no ETags, a rejected or unsupported sync-token, a cut-short report, redirects to
+another host, plain HTTP, and a resource that does not parse. `caldav_live` (ignored) runs
+against any server given in `SIMPLECALENDAR_CALDAV_URL`, `_USER` and `_PASSWORD`; it creates
+and deletes its own calendar.
 
 ### Sync engine (v0.1, then v0.2 and v0.3)
 
