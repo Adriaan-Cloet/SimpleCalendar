@@ -155,6 +155,8 @@ impl Harness {
             match self.events.recv().await.expect("engine stopped") {
                 CoreEvent::CalendarChanged { calendar_ids } => self.changed.push(calendar_ids),
                 CoreEvent::SyncConflict(conflict) => self.conflicts.push(conflict),
+                // The sync engine never sends these.
+                CoreEvent::ReminderDue(_) => {}
                 CoreEvent::SyncStatus(status) => {
                     self.statuses.push(status.clone());
                     if status.source_id == source_id && status.state != SyncState::Syncing {

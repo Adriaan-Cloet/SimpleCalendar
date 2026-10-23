@@ -9,6 +9,7 @@ pub mod model;
 pub mod outbox;
 pub mod provider;
 pub mod recurrence;
+pub mod reminders;
 pub mod secrets;
 pub mod service;
 pub mod sync;
@@ -26,6 +27,8 @@ pub enum CoreEvent {
     SyncStatus(sync::SyncStatus),
     /// A change could not be saved because the event changed elsewhere (`sync:conflict`).
     SyncConflict(sync::SyncConflict),
+    /// A reminder is due: the shell shows it as a desktop notification (§9).
+    ReminderDue(reminders::ReminderDue),
 }
 
 /// Version of this crate, as set in its `Cargo.toml`.

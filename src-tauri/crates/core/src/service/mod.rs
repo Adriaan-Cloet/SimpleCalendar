@@ -34,6 +34,7 @@ use crate::google::GoogleAuth;
 use crate::model::{LOCAL_SOURCE_ID, Occurrence, SourceKind};
 use crate::provider::ics::feed_url;
 use crate::recurrence::resolve_local;
+use crate::reminders::{self, ReminderHandle};
 use crate::secrets::{Secret, SecretError, Secrets, SecretsUnavailable};
 use crate::sync::{SyncHandle, SyncState, default_interval};
 
@@ -197,19 +198,23 @@ pub struct CalendarService {
     sync: SyncHandle,
     events: mpsc::UnboundedSender<CoreEvent>,
     google: Arc<GoogleAuth>,
+    reminders: ReminderHandle,
     /// Cancels the Google sign-in that is waiting for the browser, if one is.
     sign_in: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// The display zone this run has stored, so `list_occurrences` writes it once (§9).
+    display_zone: Arc<Mutex<Option<Tz>>>,
 }
 
 impl CalendarService {
     /// `events` is the same channel the sync engine reports on; `google` is shared with the
-    /// Google provider.
+    /// Google provider; `reminders` wakes the reminder scheduler when the display zone changes.
     pub fn new(
         db: Db,
         secrets: Secrets,
         sync: SyncHandle,
         events: mpsc::UnboundedSender<CoreEvent>,
         google: Arc<GoogleAuth>,
+        reminders: ReminderHandle,
     ) -> CalendarService {
         CalendarService {
             db,
@@ -217,7 +222,9 @@ impl CalendarService {
             sync,
             events,
             google,
+            reminders,
             sign_in: Arc::new(Mutex::new(None)),
+            display_zone: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -249,10 +256,32 @@ impl CalendarService {
         }
         let midnight = |date: NaiveDate| resolve_local(viewer, date.and_time(NaiveTime::MIN));
         let (from, to) = (midnight(from).timestamp(), midnight(to).timestamp());
+        self.remember_zone(viewer).await;
         Ok(self
             .db
             .read(move |c| occurrences::list_occurrences(c, from, to, viewer))
             .await?)
+    }
+
+    /// Remembers `zone` as the display zone, in which reminders of all-day and floating events
+    /// come due (§9), and wakes the scheduler if it changed. Written once per zone and run. A
+    /// failure is only logged: the caller's read goes on, and the next call tries again.
+    async fn remember_zone(&self, zone: Tz) {
+        if lock(&self.display_zone).replace(zone) == Some(zone) {
+            return;
+        }
+        match self
+            .db
+            .write(move |c| reminders::set_display_zone(c, zone))
+            .await
+        {
+            Ok(true) => self.reminders.changed(),
+            Ok(false) => {}
+            Err(e) => {
+                log::error!("cannot store the display zone: {e}");
+                *lock(&self.display_zone) = None;
+            }
+        }
     }
 
     /// Every calendar, local ones included: the oldest source first, in a source the primary

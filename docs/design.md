@@ -458,7 +458,22 @@ The sidebar's "On this computer" group has a "+" that adds a local calendar by n
 The calendar menu (right click) adds "Rename…" and a red "Delete calendar…" for local
 calendars; deleting asks again below the row, because it takes the events with it.
 
-## 14. Open points
+## 14. Reminders
+
+Since #25. A reminder is a desktop notification from the system, not something drawn in the
+window, so it follows the system's look and sound. Rust shows it (architecture §9).
+
+| Element     | Look                                                                                                                                                     |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Title       | The event's title                                                                                                                                        |
+| Body        | When it starts: "Today at 14:00", "Tomorrow at 09:00", "Monday 26 October at 09:00", or "Today, all day". The location on a second line, if there is one |
+| Several     | One notification per reminder, also when several come due at once                                                                                        |
+| Click       | Brings the window to the front, opens the day view on the occurrence's day, scrolls it into view an hour below the header and opens its popover          |
+| Busy window | An open editor or dialog stays open; only the day behind it changes                                                                                      |
+| New event   | Starts without a reminder; one is added in the editor. Calendar defaults only apply to events that use them (Google's)                                   |
+| Not shown   | Reminders of hidden calendars, `email` reminders, and reminders missed while the app was closed whose event has started                                  |
+
+## 15. Open points
 
 1. **Sidebar toggle.** Below 900px the sidebar is simply hidden. The app needs a button to show
    it. Until then "Subscriptions" in the sidebar footer cannot be reached in a narrow window.

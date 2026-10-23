@@ -138,6 +138,16 @@ pub enum OccurrenceTime {
     Date(NaiveDate),
 }
 
+impl OccurrenceTime {
+    /// The date in the viewer's zone.
+    pub fn date(self) -> NaiveDate {
+        match self {
+            OccurrenceTime::Timed(t) => t.date_naive(),
+            OccurrenceTime::Date(d) => d,
+        }
+    }
+}
+
 impl Serialize for OccurrenceTime {
     // Rust note: `collect_str` serialises anything that implements `Display` as a string,
     // without building a `String` first. Chrono's `format` returns such a value.

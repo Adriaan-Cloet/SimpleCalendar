@@ -39,7 +39,7 @@
 	style:--column={placement.column}
 	style:--columns={placement.columns}
 	style:--span={placement.span}
-	data-event
+	data-event={placement.id}
 	aria-pressed={selected}
 	aria-hidden={hidden}
 	tabindex={hidden ? -1 : undefined}
