@@ -10,6 +10,7 @@ use super::{SyncState, SyncStatus, default_interval};
 use crate::CoreEvent;
 use crate::db::{Db, DbError};
 use crate::model::SourceKind;
+use crate::outbox;
 use crate::provider::{
     CalendarProvider, ChangeSet, Next, PageToken, ProviderError, Providers, SourceContext,
     SyncCursor,
@@ -97,7 +98,14 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
     }
 
     ctx.emit_status(source_id, SyncState::Syncing, None);
-    let result = sync_source(ctx, source_id, &source.display_name, provider.as_ref()).await;
+    let result = sync_source(
+        ctx,
+        source_id,
+        &source.display_name,
+        provider.as_ref(),
+        manual,
+    )
+    .await;
     let (state, status) = match &result {
         Ok(()) => (SyncState::Ok, "ok"),
         Err(SyncError::Provider(ProviderError::Auth)) => (SyncState::AuthRequired, "auth_required"),
@@ -117,7 +125,26 @@ pub(super) async fn run(ctx: &Ctx, source_id: &str, manual: bool) -> Option<Dura
         log::error!("source {source_id}: cannot store its status: {e}");
     }
     ctx.emit_status(source_id, state, last_error);
-    Some(interval)
+    Some(next_cycle(ctx, source_id, interval).await)
+}
+
+/// When the timer should sync `source_id` again: after `interval`, or sooner when an outbox row
+/// may be tried again before then (§7.3).
+async fn next_cycle(ctx: &Ctx, source_id: &str, interval: Duration) -> Duration {
+    let id = source_id.to_owned();
+    match ctx
+        .db
+        .read(move |c| outbox::next_retry(c, &id, now()))
+        .await
+    {
+        // Rust note: `max(1)` makes the difference positive, so the cast to `u64` is exact.
+        Ok(Some(at)) => interval.min(Duration::from_secs((at - now()).max(1) as u64)),
+        Ok(None) => interval,
+        Err(e) => {
+            log::error!("source {source_id}: cannot read its outbox: {e}");
+            interval
+        }
+    }
 }
 
 /// Steps 1 to 4 of §7.2. Step 5, notifying, happens after every commit.
@@ -126,6 +153,7 @@ async fn sync_source(
     source_id: &str,
     display_name: &str,
     provider: &dyn CalendarProvider,
+    manual: bool,
 ) -> Result<(), SyncError> {
     // 1. Authenticate. For the read-only sources of v0.1 that means reading the secret.
     let cx = SourceContext {
@@ -135,8 +163,8 @@ async fn sync_source(
     };
 
     // 2. Push, so the pull below already sees our own writes. A row that cannot be sent now
-    // ends the cycle before the pull.
-    super::push::push(ctx, &cx, provider).await?;
+    // ends the cycle before the pull. A sync the user asked for does not wait for backoff.
+    super::push::push(ctx, &cx, provider, manual).await?;
 
     // 3. List calendars.
     let remote = provider.list_calendars(&cx).await?;
