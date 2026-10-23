@@ -30,7 +30,7 @@ This document describes how SimpleCalendar looks and moves. The tokens live in
 | `--text-secondary`       | `#6E6E73`               | `#98989D`               | Labels, hour labels, metadata                                             |
 | `--text-tertiary`        | `#A1A1A6`               | `#6E6E73`               | Decorative only: days outside the month, icons. No text that must be read |
 | `--surface`              | `#FFFFFF`               | `#1C1C1E`               | Main background, week grid                                                |
-| `--surface-weekend`      | `#FAFAFB`               | `#202022`               | Weekend columns                                                           |
+| `--surface-weekend`      | `#F3F3F5`               | `#262628`               | Weekend days, in every view                                               |
 | `--surface-sidebar`      | `#F5F5F7`               | `#232325`               | Sidebar                                                                   |
 | `--surface-elevated`     | `#FFFFFF`               | `#2C2C2E`               | Popovers, dialogs                                                         |
 | `--fill-hover`           | black 4%                | white 6%                | Hover on plain buttons and rows                                           |
@@ -354,14 +354,47 @@ on top. The tint sits between the hover and selected fills, which are measured f
 Since #23. The same grid (`TimeGrid.svelte`) with one column, so the overlap layout, the
 all-day row, the now line and double click work as in the week.
 
-| Element      | Look                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------ |
-| Toolbar      | The full date as heading ("Friday, 23 October 2026"); the arrows move a day                |
-| Day header   | Weekday and date on the left, as the events below read; today in red as in the week        |
-| Grid         | No weekend tint: it only means something next to weekdays                                  |
-| Switching    | Day and Week keep the selected date. A week's day header opens that day                    |
-| Mini month   | Marks the week on screen in the week view, the day in the day view; a click selects a date |
-| Month switch | Shown, disabled, until the month view (#24)                                                |
+| Element    | Look                                                                                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Toolbar    | The full date as heading ("Friday, 23 October 2026"); the arrows move a day                                                                 |
+| Day header | Weekday and date on the left, as the events below read; today in red as in the week                                                         |
+| Grid       | A Saturday or Sunday in `--surface-weekend`, as in the week and month                                                                       |
+| Switching  | Every view keeps the selected date. A week's day header opens that day                                                                      |
+| Mini month | Marks the week on screen in the week view, the day in the day view; a click opens that day in the day view, without the way back to a month |
+
+### Month view
+
+Since #24. Calm on purpose: a busy day shows what fits and sends the rest to the day view,
+which is built to show a full day.
+
+```
+┌ October 2026         [Day|Week|Month]          ‹ Today ›  + ┐
+│   Mon     Tue          Wed      …   Sat ░░░   Sun ░░░       │
+│     28     29 │          30 │ … │ ░░░░░ 3 │ ░░░░░ 4        │
+│ ──────────────┼─────────────┼───┼─────────┼─────────        │
+│     19     20 │          21 │ … │ ░░░░ 24 │ ░░░░ 25        │
+│ ● 09:00 Standup ● 09:00 Standup │ ● 15:00 Match             │
+│ ● 10:00 Design  ● 13:00 Workshop│                           │
+│ +3 more       │             │   │         │                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+| Element        | Look                                                                                                                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Weeks          | Monday first, as many as the month covers (4 to 6); the rows share the height                                                                                                                   |
+| Day number     | Top right, semibold. Days of other months in `--text-tertiary`; the 1st reads "Oct 1"; today in red                                                                                             |
+| Weekend        | Saturday and Sunday in `--surface-weekend`, as the week's columns                                                                                                                               |
+| Timed event    | One line: a dot in the calendar's colour, the start time in caption grey, the title cut with "…"                                                                                                |
+| All-day event  | The same line on a soft tint in its colour, title semibold, on every day it covers. No time                                                                                                     |
+| Order          | All-day events first, in one order on every day they share, then timed ones by start                                                                                                            |
+| Past midnight  | A timed event shows on the day it starts only                                                                                                                                                   |
+| Full day       | As many lines as fit; then the last line is "+N more"                                                                                                                                           |
+| Click an event | Opens its popover beside the line, as in the week                                                                                                                                               |
+| Click the cell | Anywhere else, "+N more" included, opens that day in the day view                                                                                                                               |
+| Back           | A day opened from the month gets "‹ October" before its heading: the month of the day now on screen, which the arrows may have moved. Escape does the same. It goes when another view is chosen |
+| Hidden         | A hidden calendar's events leave the month; the lines below close up                                                                                                                            |
+| Double click   | Nothing: one click already opens the day, and "New event" is in the toolbar                                                                                                                     |
+| Arrows         | Move a month, keeping the day, or the month's last day if it is shorter                                                                                                                         |
 
 ## 12. Subscriptions dialog
 

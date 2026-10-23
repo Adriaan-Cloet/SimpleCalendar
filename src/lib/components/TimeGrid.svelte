@@ -74,9 +74,9 @@
 		hourCycle: 'h23'
 	});
 
-	// Tinting only means something next to weekdays, so not in the day view
+	// Saturday and Sunday are tinted in every view, the day view too
 	function isWeekend(day: Date): boolean {
-		return !single && (day.getDay() === 0 || day.getDay() === 6);
+		return day.getDay() === 0 || day.getDay() === 6;
 	}
 
 	// An hour label too close to the now label would overlap it

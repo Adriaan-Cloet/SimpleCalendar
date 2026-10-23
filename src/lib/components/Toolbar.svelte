@@ -15,32 +15,61 @@
 		sync: SyncSummary;
 		onsync: () => void;
 		onaccounts: () => void;
+		/** The month to go back to, on a day opened from the month view: its name and the action */
+		back?: { label: string; onback: () => void };
 	}
 
-	let { title, view, onview, onprevious, ontoday, onnext, onnew, sync, onsync, onaccounts }: Props =
-		$props();
+	let {
+		title,
+		view,
+		onview,
+		onprevious,
+		ontoday,
+		onnext,
+		onnew,
+		sync,
+		onsync,
+		onaccounts,
+		back
+	}: Props = $props();
 
-	// Month comes with #24; until then it shows, disabled, where it will be
-	const views: { value: View | 'month'; label: string }[] = [
+	const views: { value: View; label: string }[] = [
 		{ value: 'day', label: 'Day' },
 		{ value: 'week', label: 'Week' },
 		{ value: 'month', label: 'Month' }
 	];
-	const unit = $derived(view === 'day' ? 'day' : 'week');
+	const selectedIndex = $derived(views.findIndex((option) => option.value === view));
 </script>
 
 <header class="toolbar">
-	<h1 class="title">{title}</h1>
+	<div class="heading">
+		{#if back}
+			<button
+				type="button"
+				class="back"
+				aria-label="Back to {back.label}"
+				title="Back to the month (Esc)"
+				onclick={back.onback}
+			>
+				<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+					<path d="M10 3.5 5.5 8l4.5 4.5" />
+				</svg>
+				{back.label}
+			</button>
+		{/if}
+		<h1 class="title">{title}</h1>
+	</div>
 
-	<div class="segmented" role="radiogroup" aria-label="View">
+	<div class="segmented" role="radiogroup" aria-label="View" style:--count={views.length}>
+		<!-- The white thumb slides to the chosen view -->
+		<span class="thumb" style:--index={selectedIndex} aria-hidden="true"></span>
 		{#each views as option (option.value)}
 			<button
 				type="button"
 				role="radio"
 				aria-checked={option.value === view}
 				class={{ segment: true, selected: option.value === view }}
-				disabled={option.value === 'month'}
-				onclick={() => option.value !== 'month' && onview(option.value)}>{option.label}</button
+				onclick={() => onview(option.value)}>{option.label}</button
 			>
 		{/each}
 	</div>
@@ -48,13 +77,13 @@
 	<div class="actions">
 		<SyncIndicator summary={sync} {onsync} {onaccounts} />
 		<div class="nav">
-			<button type="button" class="icon-button" aria-label="Previous {unit}" onclick={onprevious}>
+			<button type="button" class="icon-button" aria-label="Previous {view}" onclick={onprevious}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M10 3.5 5.5 8l4.5 4.5" />
 				</svg>
 			</button>
 			<button type="button" class="button" onclick={ontoday}>Today</button>
-			<button type="button" class="icon-button" aria-label="Next {unit}" onclick={onnext}>
+			<button type="button" class="icon-button" aria-label="Next {view}" onclick={onnext}>
 				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 					<path d="M6 3.5 10.5 8 6 12.5" />
 				</svg>
@@ -84,7 +113,39 @@
 		padding: 0 var(--space-lg) 0 var(--space-xl);
 	}
 
+	.heading {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		min-width: 0;
+	}
+
+	/* Back to the month, before the day's heading: quiet, in the accent colour */
+	.back {
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		gap: var(--space-2xs);
+		height: var(--control-height);
+		padding: 0 var(--space-sm) 0 var(--space-xs);
+		border: 0;
+		border-radius: var(--radius-md);
+		background: transparent;
+		color: var(--accent-text);
+		font-weight: var(--weight-medium);
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.back:hover {
+		background: var(--fill-hover);
+	}
+
+	.back:active {
+		background: var(--fill-pressed);
+	}
+
 	.title {
+		min-width: 0;
 		margin: 0;
 		font-family: var(--font-display);
 		font-size: var(--text-title);
@@ -96,14 +157,31 @@
 		text-overflow: ellipsis;
 	}
 
+	/* Equal segments, so the thumb can slide by its own width */
 	.segmented {
-		display: flex;
+		position: relative;
+		display: grid;
+		grid-template-columns: repeat(var(--count), 1fr);
 		padding: var(--space-2xs);
 		border-radius: var(--radius-md);
 		background: var(--fill-control);
 	}
 
+	.thumb {
+		position: absolute;
+		top: var(--space-2xs);
+		bottom: var(--space-2xs);
+		left: var(--space-2xs);
+		width: calc((100% - 2 * var(--space-2xs)) / var(--count));
+		border-radius: var(--radius-sm);
+		background: var(--control-thumb);
+		box-shadow: var(--shadow-1);
+		transform: translateX(calc(var(--index) * 100%));
+		transition: transform var(--duration-base) var(--ease-standard);
+	}
+
 	.segment {
+		position: relative;
 		min-width: 64px;
 		height: calc(var(--control-height) - 2 * var(--space-2xs));
 		padding: 0 var(--space-md);
@@ -115,17 +193,8 @@
 		transition: background-color var(--duration-fast) var(--ease-standard);
 	}
 
-	.segment:not(.selected):not(:disabled):hover {
+	.segment:not(.selected):hover {
 		background: var(--fill-hover);
-	}
-
-	.segment:disabled {
-		color: var(--text-tertiary);
-	}
-
-	.segment.selected {
-		background: var(--control-thumb);
-		box-shadow: var(--shadow-1);
 	}
 
 	.actions {
