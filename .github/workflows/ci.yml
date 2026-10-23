@@ -17,6 +17,8 @@ jobs:
   ci:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A stalled download fails the run instead of holding it for the default 6 hours
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +33,10 @@ jobs:
 
       - name: Install Tauri system dependencies (Linux)
         if: runner.os == 'Linux'
+        # The Ubuntu mirror is sometimes very slow: retry stalled downloads instead of waiting
+        timeout-minutes: 15
         run: |
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80-retries
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
