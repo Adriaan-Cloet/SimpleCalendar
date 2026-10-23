@@ -122,6 +122,7 @@ async fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<CoreEven
                 app.emit("calendar:changed", CalendarChanged { calendar_ids })
             }
             CoreEvent::SyncStatus(status) => app.emit("sync:status", status),
+            CoreEvent::SyncConflict(conflict) => app.emit("sync:conflict", conflict),
         };
         if let Err(e) = sent {
             log::warn!("cannot send an event to the webview: {e}");

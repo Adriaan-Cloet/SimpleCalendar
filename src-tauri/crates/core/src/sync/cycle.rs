@@ -249,15 +249,15 @@ async fn pull_pages(
         // Rust note: the closure runs on another thread, so it must own what it uses. `seen`
         // is moved into it and handed back as part of the result, instead of being shared
         // behind a lock.
-        let (returned, changed) = ctx
+        let (returned, applied) = ctx
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
-                let mut changed =
+                let mut applied =
                     store::apply_page(&tx, calendar_id, &upserts, &deletions, &mut seen)?;
                 if let Some((cursor, warnings)) = last {
                     if full {
-                        changed |= store::finish_full_pull(&tx, calendar_id, &seen)?;
+                        applied.changed |= store::finish_full_pull(&tx, calendar_id, &seen)?;
                     } else {
                         // Only inconsistent server data leaves these. They stay invisible,
                         // and the next full pull removes them.
@@ -272,16 +272,19 @@ async fn pull_pages(
                     store::store_cursor(&tx, calendar_id, &cursor, now())?;
                 }
                 tx.commit()?;
-                Ok((seen, changed))
+                Ok((seen, applied))
             })
             .await?;
         seen = returned;
 
         // After the commit, so the re-query it triggers sees the page.
-        if changed {
+        if applied.changed {
             ctx.emit(CoreEvent::CalendarChanged {
                 calendar_ids: vec![calendar_id],
             });
+        }
+        for conflict in applied.conflicts {
+            ctx.emit(CoreEvent::SyncConflict(conflict));
         }
         match next {
             Next::Page(token) => page = Some(token),
