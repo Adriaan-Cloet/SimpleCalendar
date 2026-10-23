@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::SyncConflict;
+use super::{SyncConflict, SyncState};
 use crate::model::SourceKind;
 use crate::outbox::{self, Op};
 use crate::provider::{
@@ -64,16 +64,24 @@ pub(super) fn load_source(conn: &Connection, id: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
-/// Records the outcome of a cycle on the source.
+/// Records the outcome of a cycle on the source. `Offline` is stored as `error` with the
+/// `offline` flag set (migration 6).
 pub(super) fn set_status(
     conn: &Connection,
     source_id: &str,
-    status: &str,
+    state: SyncState,
     last_error: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let (status, offline) = match state {
+        // A cycle never ends as `Syncing`.
+        SyncState::Ok | SyncState::Syncing => ("ok", false),
+        SyncState::Error => ("error", false),
+        SyncState::Offline => ("error", true),
+        SyncState::AuthRequired => ("auth_required", false),
+    };
     conn.execute(
-        "UPDATE sources SET status = ?2, last_error = ?3 WHERE id = ?1",
-        params![source_id, status, last_error],
+        "UPDATE sources SET status = ?2, offline = ?3, last_error = ?4 WHERE id = ?1",
+        params![source_id, status, offline, last_error],
     )?;
     Ok(())
 }

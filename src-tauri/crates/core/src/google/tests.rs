@@ -178,6 +178,29 @@ async fn token_errors_are_classified() {
     }
 }
 
+#[tokio::test]
+async fn a_token_request_without_a_connection_is_offline() {
+    // Bind a port, then free it: nothing listens there any more.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+    let endpoints = Endpoints {
+        authorize: base.join("auth").unwrap(),
+        token: base.join("token").unwrap(),
+        api: base.join("calendar/v3/").unwrap(),
+    };
+
+    let err = oauth::refresh(&http(), &endpoints, &client(), "1//refresh")
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, OAuthError::Offline);
+    assert_eq!(ProviderError::from(err), ProviderError::Offline);
+}
+
 #[test]
 fn a_rejected_grant_means_signing_in_again() {
     assert_eq!(

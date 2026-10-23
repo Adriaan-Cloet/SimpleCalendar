@@ -11,7 +11,7 @@ use simplecalendar_core::provider::ics::IcsProvider;
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
 use simplecalendar_core::sync::SyncEngine;
 use simplecalendar_core::{CalendarService, CoreEvent};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tokio::sync::mpsc;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,12 +72,22 @@ pub fn run() {
             app.manage(CalendarService::new(db, secrets, sync, events, google));
             Ok(())
         })
+        // The "window gains focus" trigger (§7.1); the engine keeps it to once a minute.
+        // `try_state`, because the service only exists once `setup` has run.
+        .on_window_event(|window, event| {
+            if let WindowEvent::Focused(true) = event
+                && let Some(service) = window.try_state::<CalendarService>()
+            {
+                service.window_focused();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::list_sources,
             commands::add_ics_source,
             commands::remove_source,
             commands::sync_now,
+            commands::set_sync_interval,
             commands::list_occurrences,
             commands::list_calendars,
             commands::update_calendar,

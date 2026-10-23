@@ -287,7 +287,8 @@ async fn a_cursor_that_is_not_ours_is_ignored() {
 #[tokio::test]
 async fn webcal_urls_are_fetched_over_https() {
     // The mock server speaks plain HTTP, so an `https://` request to it fails to connect:
-    // proof that the rewritten URL was used, and that such a failure is transient.
+    // proof that the rewritten URL was used, and that such a failure is transient: the server
+    // was reached, so it is not offline.
     let server = server().await;
     serve(&server, ResponseTemplate::new(200).set_body_string(FEED)).await;
     let url = format!("{}/feed.ics", server.uri()).replace("http://", "webcal://");
@@ -351,7 +352,7 @@ async fn other_client_errors_are_permanent() {
 }
 
 #[tokio::test]
-async fn an_unreachable_server_is_transient() {
+async fn an_unreachable_server_is_offline() {
     // Bind a port, then free it: nothing listens there any more.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -363,10 +364,17 @@ async fn an_unreachable_server_is_transient() {
         .await
         .unwrap_err();
 
-    assert!(
-        matches!(error, ProviderError::Transient { .. }),
-        "{error:?}"
-    );
+    assert_eq!(error, ProviderError::Offline);
+}
+
+#[tokio::test]
+async fn a_name_that_does_not_resolve_is_offline() {
+    // `.invalid` never resolves (RFC 2606); without a network no name does.
+    let error = pull(&cx(Some("http://feed.invalid/feed.ics".into())), None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, ProviderError::Offline);
 }
 
 #[tokio::test]

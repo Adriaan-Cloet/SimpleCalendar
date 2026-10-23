@@ -328,7 +328,11 @@ pub enum Next {
 /// Why a provider call failed, classified by the provider. The engine only reacts to these.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
-    /// Network trouble, HTTP 5xx, rate limit. Retry later.
+    /// No connection could be made: no network, the name does not resolve, or nothing listens.
+    /// The status indicator shows this as offline (§7.1). Retry soon.
+    #[error("no connection to the server; trying again soon")]
+    Offline,
+    /// Network trouble once connected, HTTP 5xx, rate limit. Retry later.
     #[error("the server could not be reached; trying again later")]
     Transient { retry_after: Option<Duration> },
     /// Credentials rejected. The user has to sign in again.
@@ -345,6 +349,35 @@ pub enum ProviderError {
     /// Will never succeed (bad request, forbidden). Do not retry.
     #[error("{0}")]
     Permanent(String),
+}
+
+impl ProviderError {
+    /// A request that got no answer: `Offline` if no connection was made, else `Transient`.
+    ///
+    /// No route, a refused connection and a name that does not resolve are all offline. A
+    /// failed TLS handshake is a connect error too, but the server was reached: rustls reports
+    /// it as an `io::Error` of kind `Other` or `InvalidData`, which those failures never are.
+    //
+    // Rust note: `source()` walks the chain of causes behind an error, and `downcast_ref`
+    // checks whether a `dyn Error` is of one concrete type, giving `Some` if it is.
+    pub(crate) fn unanswered(e: &reqwest::Error) -> ProviderError {
+        let mut tls = false;
+        let mut cause = std::error::Error::source(e);
+        while let Some(inner) = cause {
+            if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+                tls |= matches!(
+                    io.kind(),
+                    std::io::ErrorKind::Other | std::io::ErrorKind::InvalidData
+                );
+            }
+            cause = inner.source();
+        }
+        if e.is_connect() && !tls {
+            ProviderError::Offline
+        } else {
+            ProviderError::Transient { retry_after: None }
+        }
+    }
 }
 
 /// A source of calendars that can be read: ICS feeds, Google, CalDAV.

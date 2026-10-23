@@ -179,7 +179,10 @@ pub enum OAuthError {
     /// Google does not know the client id, or the secret does not match it.
     #[error("Google does not accept the client id or secret ({0}).")]
     Client(String),
-    /// Network trouble, HTTP 5xx or a rate limit. Try again later.
+    /// No connection to Google could be made (§7.1).
+    #[error("Google could not be reached. Check your internet connection.")]
+    Offline,
+    /// Network trouble once connected, HTTP 5xx or a rate limit. Try again later.
     #[error("Google could not be reached. Try again later.")]
     Transient,
     #[error("{0}")]
@@ -190,6 +193,7 @@ impl From<OAuthError> for ProviderError {
     fn from(e: OAuthError) -> ProviderError {
         match e {
             OAuthError::InvalidGrant => ProviderError::Auth,
+            OAuthError::Offline => ProviderError::Offline,
             OAuthError::Transient => ProviderError::Transient { retry_after: None },
             other => ProviderError::Permanent(other.to_string()),
         }
@@ -287,7 +291,10 @@ async fn token_request(
         .await
         .map_err(|e| {
             log::warn!("token request failed: {e}");
-            OAuthError::Transient
+            match ProviderError::unanswered(&e) {
+                ProviderError::Offline => OAuthError::Offline,
+                _ => OAuthError::Transient,
+            }
         })?;
     let status = response.status();
     let body = response.bytes().await.map_err(|_| OAuthError::Transient)?;

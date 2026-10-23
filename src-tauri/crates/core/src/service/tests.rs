@@ -231,6 +231,116 @@ async fn sources_are_listed_oldest_first_with_their_calendars_state() {
     assert_eq!(sources[0].id, first.id);
 }
 
+#[tokio::test]
+async fn a_source_that_could_not_connect_is_listed_offline() {
+    let s = setup();
+    let source = s.service.add_ics_source(FEED, "Work").await.unwrap();
+    let id = source.id.clone();
+    s.db.write(move |c| {
+        c.execute(
+            "UPDATE sources SET status = 'error', offline = 1, last_error = 'no connection'
+             WHERE id = ?1",
+            [id],
+        )
+    })
+    .await
+    .unwrap();
+
+    let sources = s.service.list_sources().await.unwrap();
+
+    assert_eq!(sources[0].state, SyncState::Offline);
+    assert_eq!(sources[0].last_error.as_deref(), Some("no connection"));
+}
+
+// ---- sync triggers -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_source_lists_its_interval_and_the_default_of_its_kind() {
+    let s = setup();
+
+    let source = s.service.add_ics_source(FEED, "Work").await.unwrap();
+
+    assert_eq!(source.sync_interval_s, None);
+    assert_eq!(source.default_interval_s, Some(3600));
+}
+
+#[tokio::test]
+async fn setting_an_interval_stores_it_and_syncs_the_source() {
+    let mut s = setup();
+    let source = s.service.add_ics_source(FEED, "Work").await.unwrap();
+    s.requests.all();
+
+    let changed = s
+        .service
+        .set_sync_interval(&source.id, Some(900))
+        .await
+        .unwrap();
+
+    assert_eq!(changed.sync_interval_s, Some(900));
+    assert_eq!(s.requests.all(), vec![format!("automatic:{}", source.id)]);
+
+    // `None` goes back to the default.
+    let changed = s.service.set_sync_interval(&source.id, None).await.unwrap();
+    assert_eq!(changed.sync_interval_s, None);
+    assert_eq!(
+        s.service.list_sources().await.unwrap()[0].sync_interval_s,
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_interval_outside_5_minutes_to_a_day_is_refused() {
+    let mut s = setup();
+    let source = s.service.add_ics_source(FEED, "Work").await.unwrap();
+    s.requests.all();
+
+    for seconds in [0, 299, 86_401] {
+        let error = s
+            .service
+            .set_sync_interval(&source.id, Some(seconds))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ServiceError::InvalidInput(_)), "{seconds}");
+    }
+    assert!(
+        s.service
+            .set_sync_interval(&source.id, Some(300))
+            .await
+            .is_ok()
+    );
+    assert!(
+        s.service
+            .set_sync_interval(&source.id, Some(86_400))
+            .await
+            .is_ok()
+    );
+    assert_eq!(s.requests.all().len(), 2);
+}
+
+#[tokio::test]
+async fn the_local_source_and_unknown_sources_have_no_interval() {
+    let mut s = setup();
+
+    for id in [LOCAL_SOURCE_ID, "nope"] {
+        let error = s
+            .service
+            .set_sync_interval(id, Some(900))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ServiceError::NotFound(_)), "{id}");
+    }
+    assert!(s.requests.all().is_empty());
+}
+
+#[tokio::test]
+async fn focusing_the_window_asks_the_engine() {
+    let mut s = setup();
+
+    s.service.window_focused();
+
+    assert_eq!(s.requests.all(), vec!["focus"]);
+}
+
 // ---- removing ------------------------------------------------------------------------------
 
 #[tokio::test]

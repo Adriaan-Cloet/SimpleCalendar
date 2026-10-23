@@ -35,7 +35,7 @@ use crate::model::{LOCAL_SOURCE_ID, Occurrence, SourceKind};
 use crate::provider::ics::feed_url;
 use crate::recurrence::resolve_local;
 use crate::secrets::{Secret, SecretError, Secrets, SecretsUnavailable};
-use crate::sync::{SyncHandle, SyncState};
+use crate::sync::{SyncHandle, SyncState, default_interval};
 
 /// What `get_status` reports. Sources needing sign-in and open conflicts join this in later
 /// versions (§10).
@@ -55,10 +55,14 @@ pub struct SourceInfo {
     pub display_name: String,
     /// The ICS host or the Google account.
     pub account_label: Option<String>,
-    /// The outcome of the last sync: `ok`, `error` or `auth_required`. While a sync runs, the
-    /// `sync:status` events say so.
+    /// The outcome of the last sync: `ok`, `error`, `offline` or `auth_required`. While a sync
+    /// runs, the `sync:status` events say so.
     pub state: SyncState,
     pub last_error: Option<String>,
+    /// The user's own sync interval in seconds; `None` for the default of the kind.
+    pub sync_interval_s: Option<i64>,
+    /// The default interval of the kind, in seconds.
+    pub default_interval_s: Option<u64>,
     /// When the last sync of any of its calendars finished, in epoch seconds. `None` before the
     /// first successful sync.
     pub last_synced_at: Option<i64>,
@@ -103,6 +107,8 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 }
 
 const SOURCE_GONE: &str = "This subscription no longer exists.";
+/// The range `set_sync_interval` accepts: from 5 minutes to a day.
+const SYNC_INTERVALS: std::ops::RangeInclusive<u32> = 300..=86_400;
 const CALENDAR_GONE: &str = "This calendar no longer exists.";
 const NOT_LOCAL_RENAME: &str = "Only calendars on this computer can be renamed.";
 const NOT_LOCAL_REMOVE: &str =
@@ -390,6 +396,43 @@ impl CalendarService {
         self.sync.sync_now(source_id);
     }
 
+    /// The window gained focus: syncs the sources that did not sync in the last minute (§7.1).
+    pub fn window_focused(&self) {
+        self.sync.window_focused();
+    }
+
+    /// Sets how often the timer syncs `source_id`: every `seconds`, from 5 minutes to a day, or
+    /// the default of its kind for `None`. The source syncs now, and the timer counts the new
+    /// interval from the end of that cycle.
+    pub async fn set_sync_interval(
+        &self,
+        source_id: &str,
+        seconds: Option<u32>,
+    ) -> Result<SourceInfo, ServiceError> {
+        if seconds.is_some_and(|s| !SYNC_INTERVALS.contains(&s)) {
+            return Err(ServiceError::InvalidInput(
+                "Choose an interval from 5 minutes to a day.".into(),
+            ));
+        }
+        let id = source_id.to_owned();
+        let changed = self
+            .db
+            .write(move |c| {
+                c.execute(
+                    "UPDATE sources SET sync_interval_s = ?2 WHERE id = ?1 AND kind <> 'local'",
+                    params![id, seconds],
+                )
+            })
+            .await?;
+        if changed == 0 {
+            return Err(ServiceError::NotFound(SOURCE_GONE));
+        }
+        self.sync.sync_automatic(source_id.to_owned());
+        let id = source_id.to_owned();
+        let source = self.db.read(move |c| source_info(c, &id)).await?;
+        source.ok_or(ServiceError::NotFound(SOURCE_GONE))
+    }
+
     /// Subscribes to the feed at `url`. `name` may be empty; the feed's host is used then.
     ///
     /// The URL goes to the keychain only. The database stores the host, for display (§8). The
@@ -606,23 +649,29 @@ fn source_info(c: &Connection, id: &str) -> rusqlite::Result<Option<SourceInfo>>
     let Some(mut source) = c
         .query_row(
             "SELECT s.id, s.kind, s.display_name, s.account_label, s.status, s.last_error,
-                    (SELECT max(last_synced_at) FROM calendars WHERE source_id = s.id)
+                    (SELECT max(last_synced_at) FROM calendars WHERE source_id = s.id),
+                    s.offline, s.sync_interval_s
              FROM sources s WHERE s.id = ?1",
             [id],
             |r| {
                 let kind: String = r.get(1)?;
                 let status: String = r.get(4)?;
+                let offline: bool = r.get(7)?;
+                let kind = parse_kind(1, &kind)?;
                 Ok(SourceInfo {
                     id: r.get(0)?,
-                    kind: parse_kind(1, &kind)?,
+                    kind,
                     display_name: r.get(2)?,
                     account_label: r.get(3)?,
                     state: match status.as_str() {
                         "auth_required" => SyncState::AuthRequired,
+                        "error" if offline => SyncState::Offline,
                         "error" => SyncState::Error,
                         _ => SyncState::Ok,
                     },
                     last_error: r.get(5)?,
+                    sync_interval_s: r.get(8)?,
+                    default_interval_s: default_interval(kind).map(|d| d.as_secs()),
                     last_synced_at: r.get(6)?,
                     warnings: Vec::new(),
                 })

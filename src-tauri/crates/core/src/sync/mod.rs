@@ -38,6 +38,8 @@ pub enum SyncState {
     Ok,
     /// The last cycle failed; `last_error` says why. The timer tries again.
     Error,
+    /// The last cycle could not connect to the server. The timer tries again within a minute.
+    Offline,
     /// The credentials were rejected. Automatic syncs skip the source until the user signs in
     /// again; a manual sync still tries.
     AuthRequired,
@@ -71,6 +73,23 @@ pub fn default_interval(kind: SourceKind) -> Option<Duration> {
     }
 }
 
+/// A window focus syncs a source only if its last cycle ended at least this long ago (§7.1).
+pub const FOCUS_GAP: Duration = Duration::from_secs(60);
+
+/// How long after the last of a burst of local writes their source is synced (§7.1).
+pub const WRITE_DELAY: Duration = Duration::from_secs(2);
+
+/// The interval of a source: its own if it has a valid one, else the default of its kind.
+/// `None` for kinds that are never synced.
+pub fn interval(kind: SourceKind, interval_s: Option<i64>) -> Option<Duration> {
+    // Rust note: `try_from` refuses a negative number instead of wrapping it around.
+    interval_s
+        .and_then(|s| u64::try_from(s).ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .or_else(|| default_interval(kind))
+}
+
 /// A handle to send requests to a running engine. Cloning is cheap.
 #[derive(Debug, Clone)]
 pub struct SyncHandle {
@@ -95,14 +114,28 @@ impl SyncHandle {
         });
     }
 
-    /// Syncs `source_id` soon because a local edit queued an outbox row for it: the cycle sends
-    /// it before pulling (§7.2). Like the timer, this skips a source that needs a new sign-in;
-    /// the row waits until the user signs in again.
-    pub fn push(&self, source_id: String) {
+    /// Syncs `source_id` `WRITE_DELAY` after the last of these calls, because a local edit
+    /// queued an outbox row for it: the cycle sends it before pulling (§7.2). A burst of edits
+    /// is sent by one cycle. Like the timer, this skips a source that needs a new sign-in; the
+    /// row waits until the user signs in again.
+    pub fn local_write(&self, source_id: String) {
+        self.send(Msg::LocalWrite { source_id });
+    }
+
+    /// Syncs `source_id` at once, as the timer does: a source that needs a new sign-in is
+    /// skipped. For a changed interval, which the timer counts from the end of this cycle.
+    pub fn sync_automatic(&self, source_id: String) {
         self.send(Msg::Sync {
             source_id: Some(source_id),
             manual: false,
         });
+    }
+
+    /// The window gained focus: syncs every remote source whose last cycle ended more than
+    /// `FOCUS_GAP` ago, so focusing the window again and again syncs at most once a minute.
+    /// Sources that need a new sign-in are skipped.
+    pub fn window_focused(&self) {
+        self.send(Msg::Focus);
     }
 
     /// Stops the engine. Cycles that are running are cancelled at their next `.await`; a page
@@ -150,15 +183,30 @@ impl Requests {
         requested
     }
 
-    /// The sources of the `push` requests since the last call, in order.
+    /// Every request since the last call, in order: `manual:` or `automatic:` with the source
+    /// (or `all`), `write:` with the source, or `focus`.
+    pub(crate) fn all(&mut self) -> Vec<String> {
+        let mut requested = Vec::new();
+        while let Ok(msg) = self.0.try_recv() {
+            requested.push(match msg {
+                Msg::Sync { source_id, manual } => format!(
+                    "{}:{}",
+                    if manual { "manual" } else { "automatic" },
+                    source_id.as_deref().unwrap_or("all")
+                ),
+                Msg::LocalWrite { source_id } => format!("write:{source_id}"),
+                Msg::Focus => "focus".into(),
+                Msg::Finished { .. } | Msg::Shutdown => continue,
+            });
+        }
+        requested
+    }
+
+    /// The sources of the `local_write` requests since the last call, in order.
     pub(crate) fn pushes(&mut self) -> Vec<String> {
         let mut requested = Vec::new();
         while let Ok(msg) = self.0.try_recv() {
-            if let Msg::Sync {
-                source_id: Some(source_id),
-                manual: false,
-            } = msg
-            {
+            if let Msg::LocalWrite { source_id } = msg {
                 requested.push(source_id);
             }
         }
@@ -174,6 +222,12 @@ enum Msg {
         source_id: Option<String>,
         manual: bool,
     },
+    /// A local write queued a change for the source.
+    LocalWrite {
+        source_id: String,
+    },
+    /// The window gained focus.
+    Focus,
     /// A cycle ended. `next` is when the timer should sync the source again; `None` if it is
     /// gone or is never synced.
     Finished {
@@ -198,8 +252,11 @@ pub struct SyncEngine {
     /// Sources that were requested again during their cycle. The value is whether any of
     /// those requests was manual.
     again: HashMap<String, bool>,
-    /// When the timer syncs each idle source next.
+    /// When the timer syncs each idle source next. A local write moves this to
+    /// `WRITE_DELAY` from now.
     due: HashMap<String, Instant>,
+    /// When the last cycle of each source ended, for the focus trigger.
+    ended: HashMap<String, Instant>,
     /// The running cycles. Dropping the set cancels them.
     tasks: JoinSet<()>,
 }
@@ -228,6 +285,7 @@ impl SyncEngine {
             running: HashSet::new(),
             again: HashMap::new(),
             due: HashMap::new(),
+            ended: HashMap::new(),
             tasks: JoinSet::new(),
         };
         (engine, SyncHandle { tx })
@@ -262,6 +320,8 @@ impl SyncEngine {
                     source_id: None,
                     manual,
                 }) => self.start_all(manual).await,
+                Some(Msg::LocalWrite { source_id }) => self.local_write(source_id),
+                Some(Msg::Focus) => self.focused().await,
                 Some(Msg::Finished { source_id, next }) => self.finished(source_id, next),
                 Some(Msg::Shutdown) | None => break,
             }
@@ -277,6 +337,38 @@ impl SyncEngine {
                 }
             }
             Err(e) => log::error!("cannot list sources to sync: {e}"),
+        }
+    }
+
+    /// Syncs `source_id` once no write has come for `WRITE_DELAY`. During a cycle, asks for one
+    /// more: that cycle may have sent the outbox before this write was queued.
+    fn local_write(&mut self, source_id: String) {
+        if self.running.contains(&source_id) {
+            self.again.entry(source_id).or_default();
+        } else {
+            self.due.insert(source_id, Instant::now() + WRITE_DELAY);
+        }
+    }
+
+    /// Starts every remote source that is idle and did not end a cycle in the last
+    /// `FOCUS_GAP`. A running source is left alone: its cycle is as fresh as it gets.
+    async fn focused(&mut self) {
+        let ids = match self.ctx.db.read(store::remote_source_ids).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                log::error!("cannot list sources to sync: {e}");
+                return;
+            }
+        };
+        let now = Instant::now();
+        for id in ids {
+            let recent = self
+                .ended
+                .get(&id)
+                .is_some_and(|&at| now.duration_since(at) < FOCUS_GAP);
+            if !recent && !self.running.contains(&id) {
+                self.start(id, false);
+            }
         }
     }
 
@@ -315,6 +407,7 @@ impl SyncEngine {
 
     fn finished(&mut self, source_id: String, next: Option<Duration>) {
         self.running.remove(&source_id);
+        self.ended.insert(source_id.clone(), Instant::now());
         // Collect the results of finished tasks, so the set does not grow.
         while self.tasks.try_join_next().is_some() {}
         if let Some(manual) = self.again.remove(&source_id) {

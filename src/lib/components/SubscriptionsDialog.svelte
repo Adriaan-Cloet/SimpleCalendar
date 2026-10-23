@@ -3,6 +3,7 @@
 	// address and the Google sign-in token go straight to the keychain in Rust; this dialog only
 	// ever shows the host or the account's address.
 	import { displayLocale } from '#lib/display-format.js';
+	import { intervalChoices } from '#lib/sync-summary.js';
 	import {
 		addIcsSource,
 		beginGoogleSignIn,
@@ -10,6 +11,7 @@
 		getGoogleClient,
 		getStatus,
 		setGoogleClient,
+		setSyncInterval,
 		listSources,
 		onSyncStatus,
 		removeSource,
@@ -22,9 +24,11 @@
 
 	interface Props {
 		open: boolean;
+		/** After the dialog closed, so the caller can read the sources again */
+		onclosed?: () => void;
 	}
 
-	let { open = $bindable() }: Props = $props();
+	let { open = $bindable(), onclosed }: Props = $props();
 
 	let dialog: HTMLDialogElement | undefined = $state();
 	let sources = $state<SourceInfo[]>([]);
@@ -129,6 +133,18 @@
 		}
 	}
 
+	/** A new interval from the select; the source syncs at once, and its events show that */
+	async function changeInterval(source: SourceInfo, value: string) {
+		const seconds = value === '' ? null : Number(value);
+		try {
+			const changed = await setSyncInterval(source.id, seconds);
+			sources = sources.map((s) => (s.id === changed.id ? changed : s));
+		} catch (e) {
+			listError = serviceError(e).message;
+			await reload();
+		}
+	}
+
 	async function remove(source: SourceInfo) {
 		confirming = null;
 		try {
@@ -206,6 +222,9 @@
 		if (source.state === 'auth_required') {
 			return { text: 'Sign in again to keep this account in sync.', problem: true };
 		}
+		if (source.state === 'offline') {
+			return { text: 'Offline. Trying again soon.', problem: false };
+		}
 		if (source.state !== 'ok' && source.last_error) {
 			// The core's messages start in lower case ("the server answered HTTP 404")
 			const text = source.last_error;
@@ -220,7 +239,10 @@
 	bind:this={dialog}
 	class="dialog"
 	aria-labelledby="subscriptions-title"
-	onclose={() => (open = false)}
+	onclose={() => {
+		open = false;
+		onclosed?.();
+	}}
 >
 	<header>
 		<h2 id="subscriptions-title" class="title">Accounts</h2>
@@ -259,6 +281,18 @@
 						{#each source.warnings as warning (warning)}
 							<span class="warning">{warning}</span>
 						{/each}
+						{#if source.default_interval_s !== null}
+							<select
+								class="interval"
+								aria-label="How often {source.display_name} syncs"
+								value={source.sync_interval_s?.toString() ?? ''}
+								onchange={(e) => changeInterval(source, e.currentTarget.value)}
+							>
+								{#each intervalChoices(source.default_interval_s, source.sync_interval_s) as choice (choice.value)}
+									<option value={choice.value?.toString() ?? ''}>{choice.label}</option>
+								{/each}
+							</select>
+						{/if}
 					</div>
 					<div class="row-actions">
 						{#if confirming === source.id}
@@ -561,6 +595,31 @@
 		font-size: var(--text-footnote);
 		line-height: var(--leading-footnote);
 		color: var(--text-secondary);
+	}
+
+	/* How often it syncs: quiet until hovered, like the meta line above it */
+	.interval {
+		align-self: flex-start;
+		max-width: 100%;
+		height: 22px;
+		margin-top: var(--space-2xs);
+		margin-left: calc(-1 * var(--space-2xs));
+		padding: 0 var(--space-2xs);
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: var(--text-footnote);
+		transition: border-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.interval:hover {
+		border-color: var(--separator);
+	}
+
+	.interval option {
+		color: var(--text);
+		background: var(--surface-elevated);
 	}
 
 	.row-actions {

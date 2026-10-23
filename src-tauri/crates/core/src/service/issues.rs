@@ -121,7 +121,7 @@ impl CalendarService {
             })
             .await??;
         if let Some(source) = push {
-            self.sync.push(source);
+            self.sync.local_write(source);
         }
         // Only fails when the shell stopped listening, which happens when the app exits.
         let _ = self.events.send(CoreEvent::CalendarChanged {

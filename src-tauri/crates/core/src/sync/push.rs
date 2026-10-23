@@ -127,13 +127,14 @@ pub(super) async fn push(
                 return Err(SyncError::Provider(e));
             }
             // The provider already tried a fresh token once (§7.3). The row waits for the
-            // next sign-in, without counting as an attempt.
-            Err(ProviderError::Auth) => {
+            // next sign-in, without counting as an attempt. Without a connection the server
+            // never saw the row either: it waits for the next cycle, which comes soon (§7.1).
+            Err(e @ (ProviderError::Auth | ProviderError::Offline)) => {
                 let id = row.id;
                 ctx.db
                     .write(move |c| outbox::retry_later(c, id, 0, None))
                     .await?;
-                return Err(SyncError::Provider(ProviderError::Auth));
+                return Err(SyncError::Provider(e));
             }
             Err(other) => Outcome::Failed(other.to_string()),
         };

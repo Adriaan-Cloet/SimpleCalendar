@@ -230,8 +230,9 @@ fn request_error(e: reqwest::Error) -> ProviderError {
     if e.is_builder() {
         return ProviderError::Permanent("the feed address is not a valid URL".into());
     }
+    let error = ProviderError::unanswered(&e);
     log::info!("feed request failed: {}", e.without_url());
-    ProviderError::Transient { retry_after: None }
+    error
 }
 
 /// Classifies an HTTP status that is not a success.

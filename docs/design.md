@@ -217,13 +217,14 @@ Nothing in the week grid has a shadow. Depth is reserved for things that float a
 
 ## 8. Motion
 
-| Token             | Value                        | Use                                         |
-| ----------------- | ---------------------------- | ------------------------------------------- |
-| `--duration-fast` | 120ms                        | Hover, press, checkbox                      |
-| `--duration-base` | 200ms                        | Fades, such as showing or hiding a calendar |
-| `--duration-slow` | 320ms                        | Popovers, sheets                            |
-| `--ease-standard` | `cubic-bezier(0.2, 0, 0, 1)` | Things that appear or change                |
-| `--ease-exit`     | `cubic-bezier(0.4, 0, 1, 1)` | Things that leave                           |
+| Token             | Value                        | Use                                                      |
+| ----------------- | ---------------------------- | -------------------------------------------------------- |
+| `--duration-fast` | 120ms                        | Hover, press, checkbox                                   |
+| `--duration-base` | 200ms                        | Fades, such as showing or hiding a calendar              |
+| `--duration-slow` | 320ms                        | Popovers, sheets                                         |
+| `--duration-spin` | 1000ms                       | One turn of the sync indicator; none with reduced motion |
+| `--ease-standard` | `cubic-bezier(0.2, 0, 0, 1)` | Things that appear or change                             |
+| `--ease-exit`     | `cubic-bezier(0.4, 0, 1, 1)` | Things that leave                                        |
 
 - Only `opacity` and `transform` animate. Both are cheap in both engines, also when WebKitGTK
   runs without GPU compositing.

@@ -98,7 +98,7 @@ impl GoogleProvider {
             }
             let response = request.send().await.map_err(|e| {
                 log::warn!("Google request failed: {e}");
-                ProviderError::Transient { retry_after: None }
+                ProviderError::unanswered(&e)
             })?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED && attempt == 0 {
