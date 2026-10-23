@@ -22,11 +22,11 @@ type Row = (
 );
 
 impl Setup {
-    async fn google_calendar(&self) -> i64 {
+    pub(super) async fn google_calendar(&self) -> i64 {
         self.remote_calendar("google", "write").await
     }
 
-    async fn outbox(&self) -> Vec<Row> {
+    pub(super) async fn outbox(&self) -> Vec<Row> {
         self.db
             .read(|c| {
                 c.prepare(
@@ -46,7 +46,7 @@ impl Setup {
     }
 
     /// The event's `remote_id`, and whether it waits to be deleted.
-    async fn remote_row(&self, id: i64) -> Option<(String, bool)> {
+    pub(super) async fn remote_row(&self, id: i64) -> Option<(String, bool)> {
         self.db
             .read(move |c| {
                 c.query_row(
@@ -61,12 +61,12 @@ impl Setup {
     }
 
     /// A meeting the server already has in `calendar`.
-    async fn synced_meeting(&mut self, calendar: i64) -> i64 {
+    pub(super) async fn synced_meeting(&mut self, calendar: i64) -> i64 {
         self.synced(meeting(calendar)).await
     }
 
     /// The event of `d` as if the server already had it: no outbox row, ETag `"e1"`.
-    async fn synced(&mut self, d: EventDraft) -> i64 {
+    pub(super) async fn synced(&mut self, d: EventDraft) -> i64 {
         let id = self.service.create_event(d, "UTC").await.unwrap().event_id;
         self.db
             .write(move |c| {
@@ -227,7 +227,7 @@ async fn events_move_only_between_calendars_on_this_computer() {
 
 /// A weekly standup in `calendar` from Tuesday 20 October 2026, 09:00 to 09:30 in Brussels,
 /// as the server has it.
-async fn google_standup(s: &mut Setup, calendar: i64) -> i64 {
+pub(super) async fn google_standup(s: &mut Setup, calendar: i64) -> i64 {
     s.synced(standup_on(calendar, "2026-10-20", "Standup"))
         .await
 }

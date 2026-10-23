@@ -285,7 +285,7 @@ pub fn claim(
 pub fn next_pending(c: &Connection, source_id: &str) -> rusqlite::Result<Option<Pending>> {
     c.query_row(
         &format!(
-            "{PENDING_COLUMNS}
+            "SELECT {PENDING_COLUMNS} {PENDING_FROM}
              WHERE c.source_id = ?1 AND o.status = 'pending'
              ORDER BY o.id
              LIMIT 1"
@@ -300,17 +300,19 @@ pub fn next_pending(c: &Connection, source_id: &str) -> rusqlite::Result<Option<
 /// the event decides with them who wins (§7.4).
 pub fn waiting(c: &Connection, id: i64) -> rusqlite::Result<Vec<Pending>> {
     let mut stmt = c.prepare(&format!(
-        "{PENDING_COLUMNS}
+        "SELECT {PENDING_COLUMNS} {PENDING_FROM}
          WHERE o.event_id = ?1 AND o.status IN ('pending', 'in_flight')
          ORDER BY o.id"
     ))?;
     stmt.query_map([id], read_pending)?.collect()
 }
 
-/// The start of a query for `read_pending`.
+/// The columns `read_pending` reads, in order. A query may add its own after them.
 const PENDING_COLUMNS: &str = "
-    SELECT o.id, o.calendar_id, o.event_id, o.event_remote_id, o.op, o.payload, o.base,
-           coalesce(e.etag, o.base_etag), o.attempts, o.next_attempt_at
+    o.id, o.calendar_id, o.event_id, o.event_remote_id, o.op, o.payload, o.base,
+    coalesce(e.etag, o.base_etag), o.attempts, o.next_attempt_at";
+/// The tables they come from: `o` the outbox, `c` the calendar, `e` the event if it is there.
+const PENDING_FROM: &str = "
     FROM outbox o
     JOIN calendars c ON c.id = o.calendar_id
     LEFT JOIN events e ON e.id = o.event_id";
@@ -336,6 +338,42 @@ fn read_pending(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
         attempts: r.get(8)?,
         next_attempt_at: r.get(9)?,
     })
+}
+
+/// A row that was not saved: the server had a newer version (`conflicted`) or refused it
+/// (`failed`). It is kept until the user dismisses or redoes it (§7.3, #21).
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub row: Pending,
+    pub conflicted: bool,
+    /// Why it was not saved, for the user.
+    pub reason: Option<String>,
+    /// When the edit was made, in epoch seconds.
+    pub created_at: i64,
+    pub calendar_name: String,
+    pub calendar_writable: bool,
+}
+
+/// Every row that was not saved, newest first; or only row `id`.
+pub fn issues(c: &Connection, id: Option<i64>) -> rusqlite::Result<Vec<Issue>> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT {PENDING_COLUMNS}, o.status = 'conflicted', o.last_error, o.created_at, c.name,
+                c.access = 'write'
+         {PENDING_FROM}
+         WHERE o.status IN ('conflicted', 'failed') AND (?1 IS NULL OR o.id = ?1)
+         ORDER BY o.id DESC"
+    ))?;
+    stmt.query_map([id], |r| {
+        Ok(Issue {
+            row: read_pending(r)?,
+            conflicted: r.get(10)?,
+            reason: r.get(11)?,
+            created_at: r.get(12)?,
+            calendar_name: r.get(13)?,
+            calendar_writable: r.get(14)?,
+        })
+    })?
+    .collect()
 }
 
 /// Whether `remote` already has `payload`'s value in every field that differs from `base`, or
@@ -404,7 +442,7 @@ pub fn set_outcome(
     Ok(())
 }
 
-/// Removes a row that was sent.
+/// Removes a row that was sent, dismissed or redone.
 pub fn remove(c: &Connection, id: i64) -> rusqlite::Result<()> {
     c.execute("DELETE FROM outbox WHERE id = ?1", [id])?;
     Ok(())

@@ -939,8 +939,37 @@ Implementation notes (#19):
 - **Sign-in.** The provider already retries a 401 once with a refreshed token. If that fails,
   the row goes back to `pending` without counting as an attempt and the source becomes
   `auth_required`; the rows are sent after the next sign-in.
-- Listing `conflicted` and `failed` rows comes with #21. A conflict is announced with
-  `sync:conflict` since #20 (§7.4); a failed row is only logged.
+- A conflict is announced with `sync:conflict` since #20 (§7.4). Both kinds of row are listed
+  since #21, below.
+
+Implementation notes (#21):
+
+- `service/issues.rs`: `list_sync_issues` returns the `conflicted` and `failed` rows newest
+  first (`outbox::issues`), with what the change was (`create`, `update`, `delete`), the title
+  of the user's change (for a delete, the title before it), `last_error` as the reason, the
+  calendar's name and `can_redo`. `dismiss_sync_issue` deletes the row; the event stays as it
+  is. Neither touches a `pending` or `in_flight` row.
+- `redo_sync_issue` makes the kept change again as a new edit, in one transaction with removing
+  the row, and checks editability like every write (§4):
+
+  | Change           | Event here                | Redo                                     |
+  | ---------------- | ------------------------- | ---------------------------------------- |
+  | create or update | still here, may be edited | The payload over it; queue an update     |
+  | create or update | gone                      | Created again under a new id             |
+  | delete           | still here, may be edited | Deleted again (an occurrence: cancelled) |
+  | delete           | gone                      | Nothing; the row goes                    |
+
+  The update is against the event as it is now, so it carries the server's ETag and only the
+  fields that differ from it. A series whose times or rule change this way loses its local
+  exceptions and is pulled in full, as for "all events" (`series.rs`). An occurrence deleted
+  elsewhere comes back as a single event: its series no longer has it. An event deleted here
+  since, or a read-only calendar, refuses the redo and keeps the row.
+
+- Frontend: the sidebar shows "N changes not saved" while there are any, which opens
+  `SyncIssuesDialog` with Redo and Dismiss per row. `sync:conflict` shows `SyncNotice` at the
+  bottom for 8 seconds, with "Show" to open the list. A failed row has no event of its own, so
+  the page reads the list again after every `calendar:changed`. The words are in
+  `src/lib/sync-issue-text.ts`.
 
 ### 7.4 Conflicts: server wins
 
@@ -1417,6 +1446,7 @@ Commands (all async, all return `Result`):
 | `sync_now(source?)`                        | Manual refresh                                                | v0.1, ICS subscriptions |
 | `begin_google_sign_in`                     | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
 | `list_sync_issues`, `dismiss_sync_issue`   | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
+| `redo_sync_issue`                          | Make such a change again, as a new edit                       | v0.3, offline sync      |
 
 Events from Rust to the webview:
 

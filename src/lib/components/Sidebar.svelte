@@ -5,6 +5,7 @@
 	import CalendarColorMenu from '#lib/components/CalendarColorMenu.svelte';
 	import { displayLocale } from '#lib/display-format.js';
 	import { serviceError } from '#lib/sources.js';
+	import { issueCountLabel } from '#lib/sync-issue-text.js';
 	import { isSameDay, monthWeeks } from '#lib/week-dates.js';
 
 	interface Props {
@@ -16,6 +17,10 @@
 		onupdate: (id: number, update: CalendarUpdate) => void;
 		/** Opens the subscriptions dialog */
 		onsubscriptions: () => void;
+		/** How many changes the server did not save */
+		issueCount: number;
+		/** Opens the list of those changes */
+		onissues: () => void;
 		/** A new calendar on this computer; rejects with a `ServiceError` */
 		oncreatecalendar: (name: string) => Promise<void>;
 		/** Deletes a local calendar with its events; rejects with a `ServiceError` */
@@ -28,6 +33,8 @@
 		calendars,
 		onupdate,
 		onsubscriptions,
+		issueCount,
+		onissues,
 		oncreatecalendar,
 		onremovecalendar
 	}: Props = $props();
@@ -267,6 +274,17 @@
 			</section>
 		{/each}
 	</nav>
+
+	{#if issueCount > 0}
+		<button type="button" class="footer-button issues" onclick={onissues}>
+			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+				<circle cx="8" cy="8" r="6" />
+				<path d="M8 4.75v3.75" />
+				<circle class="filled" cx="8" cy="11" r="0.9" />
+			</svg>
+			{issueCountLabel(issueCount)}
+		</button>
+	{/if}
 
 	<footer class="footer">
 		<button type="button" class="footer-button" onclick={onsubscriptions}>
@@ -630,6 +648,16 @@
 	.footer-button .filled {
 		fill: currentColor;
 		stroke: none;
+	}
+
+	/* Changes not saved: above the footer, only while there are some */
+	.issues {
+		align-self: flex-start;
+		margin-bottom: calc(-1 * var(--space-md));
+	}
+
+	.issues svg {
+		color: var(--danger);
 	}
 
 	/* Appearance control (prototype only): icons only, sized to its content */
