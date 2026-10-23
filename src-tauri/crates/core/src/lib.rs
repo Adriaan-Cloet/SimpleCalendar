@@ -24,6 +24,8 @@ pub enum CoreEvent {
     CalendarChanged { calendar_ids: Vec<i64> },
     /// A source started or finished a sync cycle (`sync:status`).
     SyncStatus(sync::SyncStatus),
+    /// A change could not be saved because the event changed elsewhere (`sync:conflict`).
+    SyncConflict(sync::SyncConflict),
 }
 
 /// Version of this crate, as set in its `Cargo.toml`.

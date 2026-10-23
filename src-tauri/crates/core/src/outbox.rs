@@ -14,7 +14,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::model::SourceKind;
-use crate::provider::{EventData, Reminder, ReminderMethod, Reminders};
+use crate::provider::{EventData, Field, Reminder, ReminderMethod, Reminders, RemoteEvent};
 
 /// What a row asks the server to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,39 +284,69 @@ pub fn claim(
 /// The oldest pending row of `source_id`'s calendars, without taking it.
 pub fn next_pending(c: &Connection, source_id: &str) -> rusqlite::Result<Option<Pending>> {
     c.query_row(
-        "SELECT o.id, o.calendar_id, o.event_id, o.event_remote_id, o.op, o.payload, o.base,
-                coalesce(e.etag, o.base_etag), o.attempts, o.next_attempt_at
-         FROM outbox o
-         JOIN calendars c ON c.id = o.calendar_id
-         LEFT JOIN events e ON e.id = o.event_id
-         WHERE c.source_id = ?1 AND o.status = 'pending'
-         ORDER BY o.id
-         LIMIT 1",
+        &format!(
+            "{PENDING_COLUMNS}
+             WHERE c.source_id = ?1 AND o.status = 'pending'
+             ORDER BY o.id
+             LIMIT 1"
+        ),
         [source_id],
-        |r| {
-            let op: String = r.get(4)?;
-            let data = |i: usize| -> rusqlite::Result<Option<EventData>> {
-                let text: Option<String> = r.get(i)?;
-                // A value this code did not write reads as missing; the engine then fails the
-                // row rather than sending something it cannot read.
-                Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
-            };
-            Ok(Pending {
-                id: r.get(0)?,
-                calendar_id: r.get(1)?,
-                event_id: r.get(2)?,
-                event_remote_id: r.get(3)?,
-                // The column's `CHECK` allows only these three.
-                op: Op::parse(&op).unwrap_or(Op::Update),
-                payload: data(5)?,
-                base: data(6)?,
-                if_match: r.get(7)?,
-                attempts: r.get(8)?,
-                next_attempt_at: r.get(9)?,
-            })
-        },
+        read_pending,
     )
     .optional()
+}
+
+/// The rows of event `id` that were not sent yet, in order. A pull that brings a change to
+/// the event decides with them who wins (§7.4).
+pub fn waiting(c: &Connection, id: i64) -> rusqlite::Result<Vec<Pending>> {
+    let mut stmt = c.prepare(&format!(
+        "{PENDING_COLUMNS}
+         WHERE o.event_id = ?1 AND o.status IN ('pending', 'in_flight')
+         ORDER BY o.id"
+    ))?;
+    stmt.query_map([id], read_pending)?.collect()
+}
+
+/// The start of a query for `read_pending`.
+const PENDING_COLUMNS: &str = "
+    SELECT o.id, o.calendar_id, o.event_id, o.event_remote_id, o.op, o.payload, o.base,
+           coalesce(e.etag, o.base_etag), o.attempts, o.next_attempt_at
+    FROM outbox o
+    JOIN calendars c ON c.id = o.calendar_id
+    LEFT JOIN events e ON e.id = o.event_id";
+
+fn read_pending(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
+    let op: String = r.get(4)?;
+    let data = |i: usize| -> rusqlite::Result<Option<EventData>> {
+        let text: Option<String> = r.get(i)?;
+        // A value this code did not write reads as missing; the engine then fails the row
+        // rather than sending something it cannot read.
+        Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
+    };
+    Ok(Pending {
+        id: r.get(0)?,
+        calendar_id: r.get(1)?,
+        event_id: r.get(2)?,
+        event_remote_id: r.get(3)?,
+        // The column's `CHECK` allows only these three.
+        op: Op::parse(&op).unwrap_or(Op::Update),
+        payload: data(5)?,
+        base: data(6)?,
+        if_match: r.get(7)?,
+        attempts: r.get(8)?,
+        next_attempt_at: r.get(9)?,
+    })
+}
+
+/// Whether `remote` already has `payload`'s value in every field that differs from `base`, or
+/// in every field when there is no `base` (a create): the server got the change (§7.4).
+pub fn has_change(payload: &EventData, base: Option<&EventData>, remote: &RemoteEvent) -> bool {
+    let theirs = EventData::from(remote);
+    let fields = match base {
+        Some(base) => payload.changed_from(base),
+        None => Field::ALL.into_iter().collect(),
+    };
+    fields.into_iter().all(|field| payload.same(&theirs, field))
 }
 
 /// Puts a row that could not be sent back in line, to be tried again from `next_attempt_at`
@@ -380,8 +410,8 @@ pub fn remove(c: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Whether event `id` has a row still waiting to be sent. A pull leaves such an event alone,
-/// so the server's copy never overwrites an edit that is about to be sent (§7.4).
+/// Whether event `id` has a row still waiting to be sent. A full pull that does not list such
+/// an event does not delete it: a create is not on the server yet.
 pub fn has_pending(c: &Connection, id: i64) -> rusqlite::Result<bool> {
     c.query_row(
         "SELECT EXISTS (SELECT 1 FROM outbox

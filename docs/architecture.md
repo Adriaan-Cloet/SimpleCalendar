@@ -908,7 +908,8 @@ Implementation notes (#18):
   row becomes `conflicted`. Any other refusal rolls the event back to `base` (a create is
   removed, a delete shown again) and the row becomes `failed`. Both keep their payload and
   `last_error` for the sync issues list (#21).
-- A pull leaves an event that has a `pending` row alone, and a full pull does not delete it.
+- A full pull does not delete an event that has a `pending` row. What a pull does to such an
+  event otherwise is in §7.4 (#20).
 - Google: `events.insert` with the whole event and our id, `events.patch` with only the changed
   fields (a cleared text is `null`, a time sends both `date` and `dateTime`, one of them
   `null`, `recurrence` and `reminders` whole), `events.delete`, all with `sendUpdates=none`.
@@ -938,7 +939,8 @@ Implementation notes (#19):
 - **Sign-in.** The provider already retries a 401 once with a refreshed token. If that fails,
   the row goes back to `pending` without counting as an attempt and the source becomes
   `auth_required`; the rows are sent after the next sign-in.
-- Telling the user about `conflicted` and `failed` rows comes with #21; they are only logged.
+- Listing `conflicted` and `failed` rows comes with #21. A conflict is announced with
+  `sync:conflict` since #20 (§7.4); a failed row is only logged.
 
 ### 7.4 Conflicts: server wins
 
@@ -960,6 +962,30 @@ Handling:
 
 Nothing is ever overwritten on the server without an ETag check, so an edit made on a phone or
 by someone else is never silently lost.
+
+Implementation notes (#20):
+
+- **Push.** 412, and `NotFound` on an update, fetch the event once (`sync/push.rs`, `check`), as
+  in #18. A delete the server no longer has is a success.
+- **Pull.** An upsert or deletion for an event with rows that were not sent yet
+  (`store::apply_page`, `reconcile`):
+  - Same ETag as the local row (or, when either has none, the values the app owns equal the
+    first row's `base`): the server has not changed it since the edit. The event is left alone
+    and the rows go out with the next push.
+  - The server already has our change: the last row's payload in every field that differs from
+    the first row's `base` (every field for a create), or a deletion when we deleted it. The rows
+    are removed and the server's version stored, without a notice.
+  - Otherwise the server wins, as on a 412.
+- **Server wins** is one function for both paths (`store::server_wins`): the rows become
+  `conflicted` with their payload, a deleted event shows again, the server's version replaces
+  the row (or the row goes if the server has none), and the engine emits `sync:conflict` after
+  the commit with the newest row's id and the title of the user's change (for a delete, the
+  title before it).
+- A full pull still never deletes an event with waiting rows that it did not list: that is a
+  create the server has not had yet, or a Google occurrence changed here, which `events.list`
+  only returns once the change is sent.
+- `conflicted` rows are not `pending`, so a later edit to the event queues a new row against the
+  server's version.
 
 ```mermaid
 sequenceDiagram

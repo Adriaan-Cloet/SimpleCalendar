@@ -8,10 +8,12 @@ use std::collections::{BTreeSet, HashSet};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use super::SyncConflict;
 use crate::model::SourceKind;
-use crate::outbox;
+use crate::outbox::{self, Op};
 use crate::provider::{
-    CalendarRef, MAX_REMINDER_MINUTES, RemoteCalendar, RemoteEvent, SeriesRole, SyncCursor,
+    CalendarRef, EventData, MAX_REMINDER_MINUTES, RemoteCalendar, RemoteEvent, SeriesRole,
+    SyncCursor,
 };
 
 /// A source, as far as a cycle needs it.
@@ -173,41 +175,61 @@ pub(super) fn apply_calendars(
     Ok((calendars, changed))
 }
 
-/// Applies one page of changes and adds the remote ids it upserted to `seen`. Returns whether
-/// anything changed.
+/// What applying a page did.
+#[derive(Debug, Default)]
+pub(crate) struct Applied {
+    /// Whether any event changed.
+    pub changed: bool,
+    /// Our changes that met a newer version on the server, for `sync:conflict` (§7.4).
+    pub conflicts: Vec<SyncConflict>,
+}
+
+/// Applies one page of changes and adds the remote ids it upserted to `seen`.
+///
+/// An event with outbox rows that were not sent yet is a possible conflict (§7.4). If the server
+/// still has the version our edit was based on, the event is left alone and the edit goes out
+/// with the next push. If the server already has our change, the rows are done. Otherwise the
+/// server wins: its version replaces ours and the rows become `conflicted`.
 pub(crate) fn apply_page(
     tx: &Transaction,
     calendar_id: i64,
     upserts: &[RemoteEvent],
     deletions: &[String],
     seen: &mut HashSet<String>,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Applied> {
+    let mut applied = Applied::default();
     for event in upserts {
         seen.insert(event.remote_id.clone());
-        if waiting(tx, calendar_id, &event.remote_id)? {
-            // An edit is about to be sent; its ETag check decides who wins (§7.4).
-            log::info!("event {}: kept, an edit waits to be sent", event.remote_id);
-            continue;
+        match waiting(tx, calendar_id, &event.remote_id)? {
+            None => {
+                upsert_event(tx, calendar_id, event)?;
+                applied.changed = true;
+            }
+            Some((id, rows)) => reconcile(tx, calendar_id, id, &rows, Some(event), &mut applied)?,
         }
-        upsert_event(tx, calendar_id, event)?;
     }
-    let mut deleted = 0;
     for remote_id in deletions {
-        if waiting(tx, calendar_id, remote_id)? {
-            continue;
+        match waiting(tx, calendar_id, remote_id)? {
+            // Deleting a master also deletes its linked exceptions, through the cascade on
+            // `recurring_event_id`.
+            None => {
+                applied.changed |= tx.execute(
+                    "DELETE FROM events WHERE calendar_id = ?1 AND remote_id = ?2",
+                    params![calendar_id, remote_id],
+                )? > 0;
+            }
+            Some((id, rows)) => reconcile(tx, calendar_id, id, &rows, None, &mut applied)?,
         }
-        // Deleting a master also deletes its linked exceptions, through the cascade on
-        // `recurring_event_id`.
-        deleted += tx.execute(
-            "DELETE FROM events WHERE calendar_id = ?1 AND remote_id = ?2",
-            params![calendar_id, remote_id],
-        )?;
     }
-    Ok(!upserts.is_empty() || deleted > 0)
+    Ok(applied)
 }
 
-/// Whether the event `remote_id` has an outbox row that was not sent yet.
-fn waiting(tx: &Transaction, calendar_id: i64, remote_id: &str) -> rusqlite::Result<bool> {
+/// The id of event `remote_id` and its outbox rows that were not sent yet, if it has any.
+fn waiting(
+    tx: &Transaction,
+    calendar_id: i64,
+    remote_id: &str,
+) -> rusqlite::Result<Option<(i64, Vec<outbox::Pending>)>> {
     let id: Option<i64> = tx
         .query_row(
             "SELECT id FROM events WHERE calendar_id = ?1 AND remote_id = ?2",
@@ -215,10 +237,113 @@ fn waiting(tx: &Transaction, calendar_id: i64, remote_id: &str) -> rusqlite::Res
             |r| r.get(0),
         )
         .optional()?;
-    match id {
-        Some(id) => outbox::has_pending(tx, id),
-        None => Ok(false),
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let rows = outbox::waiting(tx, id)?;
+    Ok((!rows.is_empty()).then_some((id, rows)))
+}
+
+/// Decides between the server's version of event `id` (`remote`, or `None` if it was deleted
+/// there) and our `rows` for it, which are not empty (§7.4).
+fn reconcile(
+    tx: &Transaction,
+    calendar_id: i64,
+    id: i64,
+    rows: &[outbox::Pending],
+    remote: Option<&RemoteEvent>,
+    applied: &mut Applied,
+) -> rusqlite::Result<()> {
+    // Rust note: `rows` is never empty, so `first` and `last` are `Some`; the `let else` only
+    // satisfies the compiler.
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return Ok(());
+    };
+    let done = match remote {
+        Some(remote) => {
+            // The ETag tells whether the server's version is still the one the edit was based
+            // on. Without one on either side, the values the app owns do.
+            let ours: Option<String> =
+                tx.query_row("SELECT etag FROM events WHERE id = ?1", [id], |r| r.get(0))?;
+            let unchanged = match (ours, &remote.etag) {
+                (Some(ours), Some(theirs)) => ours == *theirs,
+                _ => first
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| *base == EventData::from(remote)),
+            };
+            if unchanged {
+                log::info!("event {}: kept, an edit waits to be sent", remote.remote_id);
+                return Ok(());
+            }
+            last.op != Op::Delete
+                && last
+                    .payload
+                    .as_ref()
+                    .is_some_and(|p| outbox::has_change(p, first.base.as_ref(), remote))
+        }
+        None => last.op == Op::Delete,
+    };
+    applied.changed = true;
+    if !done {
+        let conflict = server_wins(tx, calendar_id, Some(id), rows, remote)?;
+        applied.conflicts.push(conflict);
+        return Ok(());
     }
+    // An earlier attempt got through and only its answer was lost.
+    for row in rows {
+        outbox::remove(tx, row.id)?;
+    }
+    match remote {
+        Some(remote) => upsert_event(tx, calendar_id, remote),
+        None => tx
+            .execute("DELETE FROM events WHERE id = ?1", [id])
+            .map(drop),
+    }
+}
+
+/// The server wins (§7.4): `rows` become `conflicted`, keeping their payload for the sync issues
+/// list, and event `id` becomes what the server has, `remote`, or goes if the server has nothing.
+/// Returns what `sync:conflict` reports.
+pub(super) fn server_wins(
+    tx: &Transaction,
+    calendar_id: i64,
+    id: Option<i64>,
+    rows: &[outbox::Pending],
+    remote: Option<&RemoteEvent>,
+) -> rusqlite::Result<SyncConflict> {
+    let remote_id = rows.first().map_or("", |r| r.event_remote_id.as_str());
+    log::warn!("event {remote_id}: changed elsewhere; the server's version stays");
+    for row in rows {
+        outbox::set_outcome(
+            tx,
+            row.id,
+            "conflicted",
+            "The event was changed elsewhere, so this change was not saved.",
+        )?;
+    }
+    match (remote, id) {
+        (Some(event), Some(id)) => {
+            tx.execute("UPDATE events SET pending_delete = 0 WHERE id = ?1", [id])?;
+            upsert_event(tx, calendar_id, event)?;
+        }
+        (None, Some(id)) => {
+            tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
+        }
+        (_, None) => {}
+    }
+    // The title of the user's change, or of the event before it for a delete.
+    let title = rows
+        .last()
+        .and_then(|r| r.payload.as_ref())
+        .or_else(|| rows.first().and_then(|r| r.base.as_ref()))
+        .map(|data| data.title.clone())
+        .or_else(|| remote.map(|r| r.title.clone()))
+        .unwrap_or_default();
+    Ok(SyncConflict {
+        outbox_id: rows.last().map_or(0, |r| r.id),
+        title,
+    })
 }
 
 /// Inserts or updates one event, then links it to its series (§7.2). The engine also stores
@@ -344,7 +469,8 @@ pub(crate) fn upsert_event(
 }
 
 /// After the last page of a full pull: deletes the events that were not seen, except those
-/// with an outbox row still to send (a create the server has not heard of yet), then the
+/// with an outbox row still to send (a create the server has not heard of yet, or an
+/// occurrence changed here that the server only lists once it is sent), then the
 /// exceptions whose series never arrived. Returns whether anything was deleted.
 pub(super) fn finish_full_pull(
     tx: &Transaction,

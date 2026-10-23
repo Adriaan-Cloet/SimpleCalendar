@@ -10,7 +10,8 @@
 //! | Network, 5xx, 429              | Stop: the row waits with backoff, the cycle skips its pull |
 //! | Sign-in rejected               | Stop: the row waits for a new sign-in, no pull             |
 //! | 412, or the event is gone      | Fetch it: if it already has our change, a success; else    |
-//! |                                | the server's copy stays, the row becomes `conflicted`      |
+//! |                                | the server's copy stays, the row becomes `conflicted` and  |
+//! |                                | `sync:conflict` is sent                                    |
 //! | Refused for good               | Roll the event back, the row becomes `failed`              |
 //!
 //! Stopping at the first row that cannot be sent keeps the order. A row is `in_flight` while
@@ -30,7 +31,7 @@ use crate::provider::{
 
 use super::SyncError;
 use super::cycle::Ctx;
-use super::store::upsert_event;
+use super::store::{server_wins, upsert_event};
 use crate::CoreEvent;
 
 /// What sending one row did.
@@ -233,32 +234,26 @@ async fn check(
     let remote = writer.get_event(cx, calendar, &row.event_remote_id).await?;
     Ok(match (row.op, remote) {
         (Op::Delete, None) => Outcome::Done(Sent::Deleted),
-        (Op::Update, Some(remote)) if has_our_change(row, &remote) => {
+        (Op::Update, Some(remote))
+            if row
+                .payload
+                .as_ref()
+                .is_some_and(|p| outbox::has_change(p, row.base.as_ref(), &remote)) =>
+        {
             Outcome::Done(Sent::Stored(Box::new(remote)))
         }
         (_, remote) => Outcome::Conflicted(remote.map(Box::new)),
     })
 }
 
-/// Whether `remote` has the payload's value in every field the row changes.
-fn has_our_change(row: &Pending, remote: &RemoteEvent) -> bool {
-    let (Some(payload), Some(base)) = (&row.payload, &row.base) else {
-        return false;
-    };
-    let theirs = EventData::from(remote);
-    payload
-        .changed_from(base)
-        .into_iter()
-        .all(|field| payload.same(&theirs, field))
-}
-
 /// Stores what became of `row`, in one transaction, and tells the views.
 async fn apply(ctx: &Ctx, row: Pending, outcome: Outcome) -> Result<(), SyncError> {
     let calendar_id = row.calendar_id;
-    let changed = ctx
+    let (changed, conflict) = ctx
         .db
         .write(move |c| {
             let tx = c.transaction()?;
+            let mut conflict = None;
             let changed = match outcome {
                 Outcome::Done(Sent::Unchanged) => {
                     outbox::remove(&tx, row.id)?;
@@ -282,26 +277,13 @@ async fn apply(ctx: &Ctx, row: Pending, outcome: Outcome) -> Result<(), SyncErro
                     true
                 }
                 Outcome::Conflicted(remote) => {
-                    log::warn!(
-                        "event {}: changed elsewhere; the server's version stays",
-                        row.event_remote_id
-                    );
-                    outbox::set_outcome(
+                    conflict = Some(server_wins(
                         &tx,
-                        row.id,
-                        "conflicted",
-                        "The event was changed elsewhere, so this change was not saved.",
-                    )?;
-                    match (remote, row.event_id) {
-                        (Some(event), Some(id)) => {
-                            tx.execute("UPDATE events SET pending_delete = 0 WHERE id = ?1", [id])?;
-                            upsert_event(&tx, calendar_id, &event)?;
-                        }
-                        (None, Some(id)) => {
-                            tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
-                        }
-                        (_, None) => {}
-                    }
+                        calendar_id,
+                        row.event_id,
+                        std::slice::from_ref(&row),
+                        remote.as_deref(),
+                    )?);
                     true
                 }
                 Outcome::Failed(why) => {
@@ -312,13 +294,16 @@ async fn apply(ctx: &Ctx, row: Pending, outcome: Outcome) -> Result<(), SyncErro
                 }
             };
             tx.commit()?;
-            Ok(changed)
+            Ok((changed, conflict))
         })
         .await?;
     if changed {
         ctx.emit(CoreEvent::CalendarChanged {
             calendar_ids: vec![calendar_id],
         });
+    }
+    if let Some(conflict) = conflict {
+        ctx.emit(CoreEvent::SyncConflict(conflict));
     }
     Ok(())
 }

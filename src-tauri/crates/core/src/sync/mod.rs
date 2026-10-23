@@ -51,6 +51,15 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
 }
 
+/// The payload of `sync:conflict`: a change that met a newer version on the server, which won
+/// (§7.4). The outbox row keeps the change for the sync issues list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SyncConflict {
+    pub outbox_id: i64,
+    /// The event's title as the user last saw it.
+    pub title: String,
+}
+
 /// How often the timer syncs a source of this kind, unless `sources.sync_interval_s` overrides
 /// it. `None` for kinds that are never synced.
 pub fn default_interval(kind: SourceKind) -> Option<Duration> {
