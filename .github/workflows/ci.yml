@@ -31,19 +31,41 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The downloaded packages are cached, so a run only downloads what changed since the last
+      # one. The key changes every week, so security updates are picked up.
+      - name: Week for the package cache (Linux)
+        if: runner.os == 'Linux'
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache system packages (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}-${{ steps.week.outputs.week }}
+          restore-keys: apt-${{ runner.os }}-
+
       - name: Install Tauri system dependencies (Linux)
         if: runner.os == 'Linux'
         # The Ubuntu mirror is sometimes very slow: retry stalled downloads instead of waiting
         timeout-minutes: 15
         run: |
+          # The runner's Azure mirror stalls for minutes at a time; the main archive does not
+          grep -rl azure.archive.ubuntu.com /etc/apt/sources.list /etc/apt/sources.list.d \
+            | xargs -r sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g'
           printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80-retries
+          mkdir -p ~/apt-archives/partial
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-archives" -o APT::Sandbox::User=root \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
             libssl-dev
+          # apt leaves a root-only lock file, which the cache cannot read
+          sudo rm -rf ~/apt-archives/lock ~/apt-archives/partial
+          sudo chown -R "$USER" ~/apt-archives
 
       - name: Set up Node
         uses: actions/setup-node@v7
