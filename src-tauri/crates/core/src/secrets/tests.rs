@@ -102,6 +102,41 @@ fn debug_output_never_contains_the_secret() {
     assert!(printed.contains("IcsUrl"), "{printed}");
 }
 
+fn caldav() -> Secret {
+    Secret::Caldav {
+        url: "https://dav.example.com/".into(),
+        username: "alice@example.com".into(),
+        password: "app-password-xyz".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_caldav_account_is_stored_whole() {
+    let (store, secrets) = memory();
+    secrets.set("dav", &caldav()).await.unwrap();
+
+    let raw = store.raw("source:dav").unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "v": 1,
+            "kind": "caldav",
+            "url": "https://dav.example.com/",
+            "username": "alice@example.com",
+            "password": "app-password-xyz"
+        })
+    );
+    assert_eq!(secrets.get("dav").await.unwrap(), Some(caldav()));
+}
+
+#[test]
+fn debug_output_never_contains_the_caldav_password() {
+    let printed = format!("{:?}", caldav());
+    assert!(!printed.contains("app-password-xyz"), "{printed}");
+    assert!(printed.contains("Caldav"), "{printed}");
+}
+
 // ---- availability --------------------------------------------------------------------------
 
 #[tokio::test]

@@ -1,0 +1,40 @@
+<?xml version='1.0' encoding='utf-8'?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:ICAL="http://apple.com/ns/ical/"><response><href>/alice/</href><propstat><prop><resourcetype><principal /><collection /></resourcetype><current-user-privilege-set><privilege><read /></privilege><privilege><all /></privilege><privilege><write /></privilege><privilege><write-properties /></privilege><privilege><write-content /></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat><propstat><prop><displayname /><ICAL:calendar-color /><C:calendar-timezone /><C:supported-calendar-component-set /></prop><status>HTTP/1.1 404 Not Found</status></propstat></response><response><href>/alice/simplecalendar-test/</href><propstat><prop><resourcetype><C:calendar /><collection /></resourcetype><displayname>simplecalendar-test</displayname><C:supported-calendar-component-set><C:comp name="VTODO" /><C:comp name="VEVENT" /><C:comp name="VJOURNAL" /></C:supported-calendar-component-set><current-user-privilege-set><privilege><read /></privilege><privilege><C:read-free-busy /></privilege><privilege><all /></privilege><privilege><write /></privilege><privilege><write-properties /></privilege><privilege><write-content /></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat><propstat><prop><ICAL:calendar-color /><C:calendar-timezone /></prop><status>HTTP/1.1 404 Not Found</status></propstat></response><response><href>/alice/tasks/</href><propstat><prop><resourcetype><C:calendar /><collection /></resourcetype><displayname>Tasks</displayname><ICAL:calendar-color>#FF9500FF</ICAL:calendar-color><C:calendar-timezone>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//seed//EN
+BEGIN:VTIMEZONE
+TZID:Europe/Brussels
+BEGIN:STANDARD
+DTSTART:19701025T030000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:19700329T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+END:DAYLIGHT
+END:VTIMEZONE
+END:VCALENDAR
+</C:calendar-timezone><C:supported-calendar-component-set><C:comp name="VTODO" /></C:supported-calendar-component-set><current-user-privilege-set><privilege><read /></privilege><privilege><C:read-free-busy /></privilege><privilege><all /></privilege><privilege><write /></privilege><privilege><write-properties /></privilege><privilege><write-content /></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat></response><response><href>/alice/work/</href><propstat><prop><resourcetype><C:calendar /><collection /></resourcetype><displayname>Work</displayname><ICAL:calendar-color>#FF9500FF</ICAL:calendar-color><C:calendar-timezone>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//seed//EN
+BEGIN:VTIMEZONE
+TZID:Europe/Brussels
+BEGIN:STANDARD
+DTSTART:19701025T030000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:19700329T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+END:DAYLIGHT
+END:VTIMEZONE
+END:VCALENDAR
+</C:calendar-timezone><C:supported-calendar-component-set><C:comp name="VEVENT" /></C:supported-calendar-component-set><current-user-privilege-set><privilege><read /></privilege><privilege><C:read-free-busy /></privilege><privilege><all /></privilege><privilege><write /></privilege><privilege><write-properties /></privilege><privilege><write-content /></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>

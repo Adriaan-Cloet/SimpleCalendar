@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:response><d:href>/remote.php/dav/calendars/alice/simplecalendar-test/added.ics</d:href><d:propstat><d:prop><d:getetag>&quot;c89294d4b8c92d79a3839fc41d59a98f&quot;</d:getetag><cal:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//SimpleCalendar test//EN
+BEGIN:VEVENT
+UID:added
+DTSTAMP:20261001T080000Z
+DTSTART;TZID=Europe/Brussels:20261102T140000
+DTEND;TZID=Europe/Brussels:20261102T150000
+SUMMARY:added
+END:VEVENT
+END:VCALENDAR
+</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/remote.php/dav/calendars/alice/simplecalendar-test/weekly.ics</d:href><d:propstat><d:prop><d:getetag>&quot;b1e8cde1a524b3329e8589d2c7750475&quot;</d:getetag><cal:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//SimpleCalendar test//EN
+BEGIN:VEVENT
+UID:weekly
+DTSTAMP:20261001T080000Z
+DTSTART;TZID=Europe/Brussels:20261102T140000
+DTEND;TZID=Europe/Brussels:20261102T150000
+SUMMARY:weekly
+RRULE:FREQ=WEEKLY;COUNT=4
+END:VEVENT
+END:VCALENDAR
+</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>

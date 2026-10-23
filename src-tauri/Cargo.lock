@@ -3873,6 +3873,7 @@ dependencies = [
  "icalendar",
  "keyring-core",
  "log",
+ "quick-xml",
  "reqwest",
  "rrule",
  "rusqlite",
