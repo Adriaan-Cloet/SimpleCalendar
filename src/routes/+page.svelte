@@ -10,6 +10,7 @@
 		listOccurrences,
 		occurrenceKey,
 		onCalendarChanged,
+		onReminderOpen,
 		updateCalendar,
 		updateEvent,
 		type CalendarUpdate,
@@ -100,6 +101,9 @@
 			const hidden = new Set(cals.filter((c) => !c.visible).map((c) => c.id));
 			occurrences = loaded === key ? keepHidden(occurrences, found, hidden) : found;
 			loaded = key;
+			// A reminder's occurrence that is not on these days, or no longer exists, is not
+			// waited for
+			if (reveal && !found.some((o) => occurrenceKey(o) === reveal)) reveal = null;
 		} catch (e) {
 			// Outside Tauri (`npm run dev` in a browser) there is no backend: show an empty week
 			console.error('cannot load the days', e);
@@ -222,6 +226,24 @@
 
 	let selected = $state<{ key: string; anchor: HTMLElement } | null>(null);
 	let subscriptionsOpen = $state(false);
+
+	// A clicked reminder opens its occurrence in the day view (#25): the time grid scrolls to it
+	// and selects it once it is drawn. An open editor or dialog stays open, with the day behind it.
+	let reveal = $state<string | null>(null);
+
+	$effect(() => {
+		const unlisten = onReminderOpen((open) => {
+			fromMonth = false;
+			go(wallClock(open.date), 'day');
+			if (editing || subscriptionsOpen || issuesOpen) return;
+			reveal = occurrenceKey(open);
+			// Also when the day was on screen already, so a missing occurrence is not waited for
+			load(range);
+		}).catch(() => undefined);
+		return () => {
+			unlisten.then((stop) => stop?.());
+		};
+	});
 
 	const selectedOccurrence = $derived(
 		selected ? occurrences.find((o) => occurrenceKey(o) === selected!.key) : undefined
@@ -421,7 +443,11 @@
 				calendars={calendarsById}
 				{occurrences}
 				selectedKey={selected?.key ?? null}
-				onselect={(key, anchor) => (selected = { key, anchor })}
+				onselect={(key, anchor) => {
+					selected = { key, anchor };
+					reveal = null;
+				}}
+				{reveal}
 				onscroll={close}
 				oncreate={newEvent}
 				onday={view === 'week' ? (day) => go(day, 'day') : undefined}

@@ -40,7 +40,14 @@ fn setup_with(client: Option<ClientConfig>, endpoints: Endpoints) -> Setup {
     let (tx, events) = mpsc::unbounded_channel();
     let google = GoogleAuth::new(db.clone(), secrets.clone(), client, endpoints).unwrap();
     Setup {
-        service: CalendarService::new(db.clone(), secrets, sync, tx, Arc::new(google)),
+        service: CalendarService::new(
+            db.clone(),
+            secrets,
+            sync,
+            tx,
+            Arc::new(google),
+            ReminderHandle::default(),
+        ),
         db,
         store,
         requests,
@@ -844,6 +851,36 @@ async fn the_same_dates_cover_other_instants_in_another_zone() {
                 .fixed_offset()
         )
     );
+}
+
+#[tokio::test]
+async fn the_zone_of_the_last_listing_is_the_display_zone() {
+    let s = setup();
+    let zone = || {
+        s.db.read(|c| {
+            c.query_row(
+                "SELECT value FROM settings WHERE key = 'display_zone'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+    };
+    assert_eq!(zone().await.unwrap(), None);
+
+    for tz in ["Europe/Brussels", "America/New_York"] {
+        s.service
+            .list_occurrences("2026-10-19", "2026-10-26", tz)
+            .await
+            .unwrap();
+        assert_eq!(zone().await.unwrap().as_deref(), Some(tz));
+    }
+    // A rejected call changes nothing.
+    let _ = s
+        .service
+        .list_occurrences("2026-10-19", "2026-10-26", "Mars/Olympus")
+        .await;
+    assert_eq!(zone().await.unwrap().as_deref(), Some("America/New_York"));
 }
 
 #[tokio::test]

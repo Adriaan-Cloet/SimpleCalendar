@@ -6,6 +6,7 @@
 	import { displayLocale } from '#lib/display-format.js';
 	import { wallClock } from '#lib/occurrence-text.js';
 	import { layoutDay } from '#lib/overlap-layout.js';
+	import { revealScrollTop } from '#lib/reveal.js';
 	import { addDays, atMinutes, isSameDay, isoDate, minutesSinceMidnight } from '#lib/week-dates.js';
 	import { placeWeek } from '#lib/week-layout.js';
 	import EventBlock from './EventBlock.svelte';
@@ -21,6 +22,8 @@
 		occurrences: Occurrence[];
 		selectedKey: string | null;
 		onselect: (key: string, anchor: HTMLElement) => void;
+		/** An occurrence to scroll into view and select once it is drawn, for a reminder (#25) */
+		reveal?: string | null;
 		onscroll: () => void;
 		/** A double click on an empty spot: a new event there, local wall-clock start */
 		oncreate: (start: Date, allDay: boolean) => void;
@@ -36,6 +39,7 @@
 		occurrences,
 		selectedKey,
 		onselect,
+		reveal = null,
 		onscroll,
 		oncreate,
 		onday
@@ -95,14 +99,58 @@
 	let scroller: HTMLElement | undefined = $state();
 	let body: HTMLElement | undefined = $state();
 
+	// A scroll this grid made itself, which must not close the popover it opens
+	let ownScroll = false;
+
+	function scrollTo(scroller: HTMLElement, top: number) {
+		const before = scroller.scrollTop;
+		scroller.scrollTop = top;
+		if (scroller.scrollTop !== before) ownScroll = true;
+	}
+
+	function scrolled() {
+		if (ownScroll) ownScroll = false;
+		else onscroll();
+	}
+
 	// Open at 07:30 rather than midnight
 	$effect(() => {
 		if (!scroller || !body) return;
-		scroller.scrollTop = (body.offsetHeight / 24) * 7.5;
+		scrollTo(scroller, (body.offsetHeight / 24) * 7.5);
+	});
+
+	// Scrolls the occurrence to reveal into view, an hour below the header, and selects it. Runs
+	// again when the occurrences are drawn, until it is there.
+	$effect(() => {
+		const key = reveal;
+		if (!key || !scroller || !body || layouts.length === 0) return;
+		const anchor = scroller.querySelector<HTMLElement>(`[data-event="${CSS.escape(key)}"]`);
+		if (!anchor) return;
+		// All-day events are in the sticky header and always show
+		if (!anchor.closest('.sticky')) {
+			const view = scroller.getBoundingClientRect();
+			const box = anchor.getBoundingClientRect();
+			const top = box.top - view.top + scroller.scrollTop;
+			const target = revealScrollTop({
+				scrollTop: scroller.scrollTop,
+				viewHeight: scroller.clientHeight,
+				covered: scroller.querySelector<HTMLElement>('.sticky')?.offsetHeight ?? 0,
+				top,
+				bottom: top + box.height,
+				margin: body.offsetHeight / 24
+			});
+			if (target !== null) scrollTo(scroller, target);
+		}
+		onselect(key, anchor);
 	});
 </script>
 
-<div class={{ grid: true, single }} style:--days={dayCount} bind:this={scroller} {onscroll}>
+<div
+	class={{ grid: true, single }}
+	style:--days={dayCount}
+	bind:this={scroller}
+	onscroll={scrolled}
+>
 	<div class="sticky">
 		<div class="row header">
 			<div></div>
@@ -150,7 +198,7 @@
 					style:grid-column="{first + 2} / {last + 3}"
 					style:grid-row={row + 1}
 					style:--cal={calendarColor(occurrence.color, occurrence.calendar_id)}
-					data-event
+					data-event={key}
 					aria-pressed={key === selectedKey}
 					aria-hidden={hidden}
 					tabindex={hidden ? -1 : undefined}

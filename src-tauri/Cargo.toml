@@ -37,6 +37,10 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.12.3", features = [] }
 tauri-plugin-log = "2"
+# Desktop notifications for reminders (§9, §11), shown from Rust only. 2.7 reports a click on a
+# notification on Linux and Windows, which opens the event. On Linux it talks D-Bus through
+# `zbus` (about 35 crates, pure Rust), on Windows through WinRT.
+tauri-plugin-notification = "2.7"
 # Opens the system browser for Google sign-in (§8, §11). The crate `tauri-plugin-opener` uses
 # for this; the plugin itself would add `zbus` and 30 more crates on Linux for "reveal in
 # folder". `shellexecute-on-windows` opens through ShellExecuteW instead of `cmd /c start`,

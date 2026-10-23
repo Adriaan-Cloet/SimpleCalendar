@@ -2,21 +2,24 @@ mod commands;
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simplecalendar_core::db::Db;
 use simplecalendar_core::google::{ClientConfig, Endpoints, GoogleAuth};
 use simplecalendar_core::provider::Providers;
 use simplecalendar_core::provider::google::GoogleProvider;
 use simplecalendar_core::provider::ics::IcsProvider;
+use simplecalendar_core::reminders::{ReminderDue, ReminderHandle, ReminderScheduler};
 use simplecalendar_core::secrets::{KeychainStore, Secrets};
 use simplecalendar_core::sync::SyncEngine;
 use simplecalendar_core::{CalendarService, CoreEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -64,12 +67,36 @@ pub fn run() {
             let (engine, sync) =
                 SyncEngine::new(db.clone(), secrets.clone(), providers, events.clone());
             tauri::async_runtime::spawn(engine.run());
-            tauri::async_runtime::spawn(forward_events(app.handle().clone(), rx));
+            // The reminder scheduler (§9), woken by every change the core reports.
+            let reminders = ReminderHandle::default();
+            let scheduler = ReminderScheduler::new(db.clone(), events.clone(), &reminders);
+            tauri::async_runtime::spawn(scheduler.run());
+            tauri::async_runtime::spawn(forward_events(
+                app.handle().clone(),
+                rx,
+                reminders.clone(),
+            ));
+            // A click on a reminder opens its event.
+            let handle = app.handle().clone();
+            app.notification().on_action(move |action| {
+                if action.action_id() != "tap" {
+                    return;
+                }
+                let open = action
+                    .notification()
+                    .and_then(|n| n.extra().get(OPEN_KEY))
+                    .and_then(|v| serde_json::from_value::<ReminderOpen>(v.clone()).ok());
+                if let Some(open) = open {
+                    open_reminder(&handle, open);
+                }
+            })?;
             // The "app start" trigger.
             sync.sync_all();
 
             // Every command goes through the service (§2).
-            app.manage(CalendarService::new(db, secrets, sync, events, google));
+            app.manage(CalendarService::new(
+                db, secrets, sync, events, google, reminders,
+            ));
             Ok(())
         })
         // The "window gains focus" trigger (§7.1); the engine keeps it to once a minute.
@@ -127,18 +154,73 @@ struct CalendarChanged {
     calendar_ids: Vec<i64>,
 }
 
-/// Passes what the core reports on to the webview (§2, §10), until the core stops.
-async fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<CoreEvent>) {
+/// The payload of `reminder:open`: the occurrence whose reminder was clicked, and its day in the
+/// display zone. It travels inside the notification, which hands it back on a click.
+#[derive(Clone, Serialize, Deserialize)]
+struct ReminderOpen {
+    event_id: i64,
+    original_start: i64,
+    /// `YYYY-MM-DD`
+    date: String,
+}
+
+/// The key of `ReminderOpen` in a notification's extra data.
+const OPEN_KEY: &str = "open";
+
+/// Passes what the core reports on to the webview (§2, §10) and wakes the reminder scheduler
+/// after a change, until the core stops.
+async fn forward_events(
+    app: AppHandle,
+    mut rx: mpsc::UnboundedReceiver<CoreEvent>,
+    reminders: ReminderHandle,
+) {
     while let Some(event) = rx.recv().await {
         let sent = match event {
             CoreEvent::CalendarChanged { calendar_ids } => {
+                reminders.changed();
                 app.emit("calendar:changed", CalendarChanged { calendar_ids })
             }
             CoreEvent::SyncStatus(status) => app.emit("sync:status", status),
             CoreEvent::SyncConflict(conflict) => app.emit("sync:conflict", conflict),
+            CoreEvent::ReminderDue(reminder) => {
+                notify(&app, reminder);
+                Ok(())
+            }
         };
         if let Err(e) = sent {
             log::warn!("cannot send an event to the webview: {e}");
         }
+    }
+}
+
+/// Shows a reminder as a desktop notification: the title, then when it starts and where.
+fn notify(app: &AppHandle, reminder: ReminderDue) {
+    let open = ReminderOpen {
+        event_id: reminder.event_id,
+        original_start: reminder.original_start,
+        date: reminder.date.format("%Y-%m-%d").to_string(),
+    };
+    let shown = app
+        .notification()
+        .builder()
+        .title(reminder.title)
+        .body(reminder.body)
+        .extra(OPEN_KEY, open)
+        .show();
+    if let Err(e) = shown {
+        log::warn!("cannot show a reminder: {e}");
+    }
+}
+
+/// Brings the window to the front and asks the frontend to open the occurrence in the day view.
+fn open_reminder(app: &AppHandle, open: ReminderOpen) {
+    if let Some(window) = app.get_webview_window("main") {
+        // Each may fail on a platform that does not support it; the event is still opened.
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    if let Err(e) = app.emit("reminder:open", open) {
+        log::warn!("cannot open a reminder's event: {e}");
     }
 }

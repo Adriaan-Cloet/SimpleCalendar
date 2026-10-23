@@ -629,7 +629,7 @@ CREATE TABLE settings (
 | the `local` row in `sources`                                                     | v0.2, local calendars (migration 4)  |
 | `outbox`, `events.pending_delete`                                                | v0.2, Google write                   |
 | `sources.offline`                                                                | v0.3, sync triggers (migration 6)    |
-| `fired_reminders`                                                                | v0.3, reminders                      |
+| `fired_reminders`                                                                | v0.3, reminders (migration 7, #25)   |
 
 Notes:
 
@@ -1450,6 +1450,35 @@ _Needed from: v0.3 (reminders). Confirmed in review: reminders are part of v1._
 - The scheduler does not know whether a window exists. Running it from a tray process later
   needs no change in the core.
 
+Implementation notes (#25):
+
+- `reminders::ReminderScheduler` runs as one task from app start. It computes the reminders whose
+  time falls in the next 24 hours, shows the due ones and waits for the next, at most 24 hours.
+  A `ReminderHandle` wakes it: the app crate calls it on every `calendar:changed`, the service
+  when the display zone changes. While it waits it reads the wall clock every 30 seconds, because
+  a sleep stops counting while the computer is suspended.
+- It only expands as far ahead as the longest `popup` reminder of any event or calendar default,
+  and not at all when there is none. Occurrences come from the same query as
+  `list_occurrences` (visible calendars only), with the row whose reminders apply: an
+  exception's own, not its series'.
+- A reminder is due from its time until its event starts, or for 60 seconds after its time, so
+  a reminder at the start (0 minutes) still shows when the task wakes a moment late. Minutes
+  are exact: a reminder 1440 minutes before an event after a DST change is 24 hours before it,
+  not the same wall-clock time a day earlier. That is how Google counts them.
+- `fired_reminders` (migration 7) is keyed by the occurrence's `event_id` (the master's for a
+  series), its start as an instant, and the minutes. The row is written before
+  `CoreEvent::ReminderDue` is sent, with `INSERT OR IGNORE` and only if the event still exists,
+  so a crash can lose a notification but never show one twice. A moved event gets its reminders
+  again.
+- The display zone is the `display_zone` row in `settings`. `list_occurrences` stores its `tz`
+  there (once per zone and run). Until the first call nothing is shown: without a zone,
+  all-day and floating events have no time and no text can say "today".
+- The notification text is built in the core (`reminders/plan.rs`): the title, then "Today at
+  14:00" or "Monday 26 October at 09:00", "Today, all day", and the location on a second line.
+- The app crate shows it with `tauri-plugin-notification` and puts the occurrence in the
+  notification's extra data. A click (`tap`) brings the window to the front and emits
+  `reminder:open`. The frontend has no permission for the plugin's commands; it needs none.
+
 ## 10. Frontend contract
 
 _Needed from: v0.1 (ICS subscriptions). Each row says from which version it is needed._
@@ -1476,11 +1505,12 @@ Commands (all async, all return `Result`):
 
 Events from Rust to the webview:
 
-| Event              | Payload                      | Needed from             |
-| ------------------ | ---------------------------- | ----------------------- |
-| `calendar:changed` | Affected calendar ids        | v0.1, ICS subscriptions |
-| `sync:status`      | Source id, state, last error | v0.1, ICS subscriptions |
-| `sync:conflict`    | Outbox row id, event title   | v0.3, offline sync      |
+| Event              | Payload                                              | Needed from             |
+| ------------------ | ---------------------------------------------------- | ----------------------- |
+| `calendar:changed` | Affected calendar ids                                | v0.1, ICS subscriptions |
+| `sync:status`      | Source id, state, last error                         | v0.1, ICS subscriptions |
+| `sync:conflict`    | Outbox row id, event title                           | v0.3, offline sync      |
+| `reminder:open`    | Event id, original start, date of a clicked reminder | v0.3, reminders         |
 
 Conventions:
 
@@ -1521,8 +1551,8 @@ Implementation notes (#11):
 - `list_occurrences(from, to, tz)` takes dates (`YYYY-MM-DD`, `to` exclusive), not instants.
   Rust turns them into the viewer's midnights with the RFC 5545 gap rules, so a week with a DST
   change is 167 or 169 hours long without the frontend knowing. A range of 1 to 400 days is
-  accepted; anything else, or an unknown zone, is `invalid_input`. The display zone is not
-  remembered yet; reminders (#25) add that.
+  accepted; anything else, or an unknown zone, is `invalid_input`. Since #25 the zone is
+  remembered as the display zone (§9).
 - `list_calendars` returns every calendar with `source_kind`, `source_name` (since #14), the
   resolved `color` (override, else provider, else `null`), `editable` and `visible`, oldest
   source first, primary calendar first, then by name.
@@ -1601,8 +1631,9 @@ Implementation notes (#16):
   `start` but not precede it; an all-day `end` must lie after `start`. Title, location and
   description are trimmed; a blank title becomes "New event". Reminders are sorted and
   deduplicated, at most four weeks. Both return the occurrence in the viewer's zone `tz`, as
-  `list_occurrences` would, so the caller needs no second query; `tz` is an argument because
-  the display zone is not remembered yet (#25).
+  `list_occurrences` would, so the caller needs no second query. `tz` stays an argument: the
+  editor's answer must be in the zone of the view that asked, which the remembered display
+  zone (#25) only follows.
 - **Editability is checked in the write transaction**, by the rule of §4, before anything
   else: an event that is not editable is `not_editable` for update and delete, whatever the
   draft says, and so is a target calendar without write access. Tested for all eight
@@ -1725,10 +1756,10 @@ only its own.
 
 ### App crate
 
-| Crate                                       | Purpose                             | Why                                                                                                                                                               | Needed from       |
-| ------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `open` 5, feature `shellexecute-on-windows` | Open the browser for Google sign-in | The crate `tauri-plugin-opener` opens URLs with. Adds `open`, `is-wsl` and `is-docker` on Linux; on Windows it uses ShellExecuteW, whose `dunce` is already built | v0.2, Google read |
-| `tauri-plugin-notification` 2               | Reminder notifications              | Official Tauri plugin                                                                                                                                             | v0.3, reminders   |
+| Crate                                       | Purpose                             | Why                                                                                                                                                                                                                                                                                                 | Needed from       |
+| ------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `open` 5, feature `shellexecute-on-windows` | Open the browser for Google sign-in | The crate `tauri-plugin-opener` opens URLs with. Adds `open`, `is-wsl` and `is-docker` on Linux; on Windows it uses ShellExecuteW, whose `dunce` is already built                                                                                                                                   | v0.2, Google read |
+| `tauri-plugin-notification` 2.7             | Reminder notifications              | Official Tauri plugin. Since 2.7 it reports a click on a notification on Linux and Windows, which opens the event (#25). **Cost:** on Linux it builds `zbus` and its `async-io` runtime, the 35 crates `tauri-plugin-opener` was rejected for (below); on Windows WinRT toasts. Used from Rust only | v0.3, reminders   |
 
 ### Frontend (npm)
 

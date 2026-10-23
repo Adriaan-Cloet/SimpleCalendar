@@ -166,5 +166,17 @@ export const onCalendarChanged = (
 ): Promise<UnlistenFn> =>
 	listen<CalendarChanged>('calendar:changed', (event) => handler(event.payload));
 
+/** A clicked reminder (#25): the occurrence to open, on its day in the display zone */
+export interface ReminderOpen {
+	event_id: number;
+	original_start: number;
+	/** `YYYY-MM-DD` */
+	date: string;
+}
+
+/** Rust has brought the window to the front already */
+export const onReminderOpen = (handler: (open: ReminderOpen) => void): Promise<UnlistenFn> =>
+	listen<ReminderOpen>('reminder:open', (event) => handler(event.payload));
+
 /** Identifies an occurrence, also when it is drawn in pieces on several days */
-export const occurrenceKey = (o: Occurrence) => `${o.event_id}:${o.original_start}`;
+export const occurrenceKey = (o: OccurrenceRef) => `${o.event_id}:${o.original_start}`;

@@ -60,6 +60,40 @@ pub fn list_occurrences(
     to: i64,
     viewer: Tz,
 ) -> rusqlite::Result<Vec<Occurrence>> {
+    Ok(shown(conn, from, to, viewer)?
+        .into_iter()
+        .map(|(_, f)| f.into_occurrence(viewer))
+        .collect())
+}
+
+/// An occurrence as the reminder scheduler needs it (§9).
+pub(crate) struct Timed {
+    pub(crate) occurrence: Occurrence,
+    /// The row whose reminders apply: an exception's own row, not its series'.
+    pub(crate) row_id: i64,
+    /// The start as an instant (epoch seconds), all-day and floating ones in the `viewer` zone.
+    pub(crate) start: i64,
+}
+
+/// What `list_occurrences` returns, with the row and start instant of each occurrence.
+pub(crate) fn list_timed(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+    viewer: Tz,
+) -> rusqlite::Result<Vec<Timed>> {
+    Ok(shown(conn, from, to, viewer)?
+        .into_iter()
+        .map(|(start, f)| Timed {
+            row_id: f.row.id,
+            start,
+            occurrence: f.into_occurrence(viewer),
+        })
+        .collect())
+}
+
+/// The occurrences `list_occurrences` returns, in its order, each with its start instant.
+fn shown(conn: &Connection, from: i64, to: i64, viewer: Tz) -> rusqlite::Result<Vec<(i64, Found)>> {
     let (wide_from, wide_to) = (from - WIDEN, to + WIDEN);
     let mut found = Vec::new();
 
@@ -110,11 +144,7 @@ pub fn list_occurrences(
         })
         .collect();
     shown.sort_by_key(|(start, end, f)| (*start, *end, f.event_id));
-
-    Ok(shown
-        .into_iter()
-        .map(|(_, _, f)| f.into_occurrence(viewer))
-        .collect())
+    Ok(shown.into_iter().map(|(start, _, f)| (start, f)).collect())
 }
 
 /// One occurrence in the `viewer` zone, also when its calendar is hidden: the single event
