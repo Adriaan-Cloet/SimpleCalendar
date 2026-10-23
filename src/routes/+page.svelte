@@ -24,6 +24,7 @@
 	import Sidebar from '#lib/components/Sidebar.svelte';
 	import SubscriptionsDialog from '#lib/components/SubscriptionsDialog.svelte';
 	import SyncIssuesDialog from '#lib/components/SyncIssuesDialog.svelte';
+	import MonthGrid from '#lib/components/MonthGrid.svelte';
 	import SyncNotice from '#lib/components/SyncNotice.svelte';
 	import Toolbar from '#lib/components/Toolbar.svelte';
 	import TimeGrid from '#lib/components/TimeGrid.svelte';
@@ -42,6 +43,7 @@
 	import { summarize } from '#lib/sync-summary.js';
 	import {
 		inRange,
+		ownRange,
 		step,
 		viewRange,
 		viewTitle,
@@ -58,12 +60,22 @@
 		return () => clearInterval(timer);
 	});
 
-	// The selected date and the view around it (#23). Both views keep the date, so switching
-	// shows the same day in its week and back.
+	// The selected date and the view around it (#23, #24). Every view keeps the date, so
+	// switching shows the same day in its week or month and back.
 	let view = $state<View>('week');
 	let date = $state(new Date());
 	const range = $derived(viewRange(view, date));
 	const title = $derived(viewTitle(view, date, displayLocale));
+
+	// A day opened from the month view offers a way back to the month, of the day now on screen,
+	// until another view is chosen (#24)
+	let fromMonth = $state(false);
+	const monthName = new Intl.DateTimeFormat(displayLocale, { month: 'long' });
+	const back = $derived(
+		fromMonth && view === 'day'
+			? { label: monthName.format(date), onback: () => go(date, 'month') }
+			: undefined
+	);
 
 	let calendars = $state<CalendarInfo[]>([]);
 	let occurrences = $state<Occurrence[]>([]);
@@ -335,15 +347,30 @@
 		close();
 		date = to;
 		view = next;
+		if (next !== 'day') fromMonth = false;
+	}
+
+	// Escape on a day opened from the month goes back, unless it closes something first. This
+	// listener runs before the popover's, which is added when the popover opens.
+	function onkeydown(e: KeyboardEvent) {
+		if (e.key !== 'Escape' || e.defaultPrevented || !back) return;
+		if (selected || editing || subscriptionsOpen || issuesOpen) return;
+		back.onback();
 	}
 </script>
+
+<svelte:window {onkeydown} />
 
 <div class="app">
 	<Sidebar
 		today={now}
 		{view}
 		{date}
-		onday={(day) => go(day)}
+		onday={(day) => {
+			// The mini month opens the day itself, so there is no month to go back to
+			fromMonth = false;
+			go(day, 'day');
+		}}
 		{calendars}
 		onupdate={update}
 		onsubscriptions={() => (subscriptionsOpen = true)}
@@ -358,27 +385,48 @@
 		<Toolbar
 			{title}
 			{view}
-			onview={(next) => go(date, next)}
+			{back}
+			onview={(next) => {
+				fromMonth = false;
+				go(date, next);
+			}}
 			onprevious={() => go(step(view, date, -1))}
 			ontoday={() => go(new Date())}
 			onnext={() => go(step(view, date, 1))}
-			onnew={() => newEvent(defaultStart(range, new Date()), false)}
+			onnew={() => newEvent(defaultStart(ownRange(view, date), new Date()), false)}
 			sync={syncSummary}
 			onsync={() => syncNow().catch((e) => console.error('cannot sync', e))}
 			onaccounts={() => (subscriptionsOpen = true)}
 		/>
-		<TimeGrid
-			start={range.start}
-			dayCount={range.days}
-			{now}
-			calendars={calendarsById}
-			{occurrences}
-			selectedKey={selected?.key ?? null}
-			onselect={(key, anchor) => (selected = { key, anchor })}
-			onscroll={close}
-			oncreate={newEvent}
-			onday={view === 'week' ? (day) => go(day, 'day') : undefined}
-		/>
+		{#if view === 'month'}
+			<MonthGrid
+				start={range.start}
+				dayCount={range.days}
+				month={date}
+				{now}
+				calendars={calendarsById}
+				{occurrences}
+				selectedKey={selected?.key ?? null}
+				onselect={(key, anchor) => (selected = { key, anchor })}
+				onday={(day) => {
+					go(day, 'day');
+					fromMonth = true;
+				}}
+			/>
+		{:else}
+			<TimeGrid
+				start={range.start}
+				dayCount={range.days}
+				{now}
+				calendars={calendarsById}
+				{occurrences}
+				selectedKey={selected?.key ?? null}
+				onselect={(key, anchor) => (selected = { key, anchor })}
+				onscroll={close}
+				oncreate={newEvent}
+				onday={view === 'week' ? (day) => go(day, 'day') : undefined}
+			/>
+		{/if}
 	</main>
 </div>
 
