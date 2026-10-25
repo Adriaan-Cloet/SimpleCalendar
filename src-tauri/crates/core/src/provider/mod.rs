@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Access, EventStatus, SourceKind};
 use crate::secrets::Secret;
 
+pub mod caldav;
 pub mod google;
 pub(crate) mod http;
 pub mod ics;

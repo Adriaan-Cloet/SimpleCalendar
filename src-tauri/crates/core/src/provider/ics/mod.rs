@@ -4,7 +4,7 @@
 //! of the body, so a feed that did not change costs a `304` or a hash comparison, not a parse.
 //! A feed that did change is parsed into one `full` change set.
 
-mod parse;
+pub(super) mod parse;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
-use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RETRY_AFTER};
+use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -138,7 +138,7 @@ impl CalendarProvider for IcsProvider {
             return Ok(unchanged(cursor.clone()));
         }
         if !status.is_success() {
-            return Err(status_error(status, retry_after(&response)));
+            return Err(status_error(status, http::retry_after(&response)));
         }
 
         let header = |name| {
@@ -210,19 +210,13 @@ fn unchanged(cursor: SyncCursor) -> ChangeSet {
 }
 
 /// Reads the body, refusing it once it grows past `max` bytes.
-async fn read_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, ProviderError> {
-    let too_large = || ProviderError::Permanent(format!("the feed is larger than {max} bytes"));
-    if response.content_length().is_some_and(|n| n > max as u64) {
-        return Err(too_large());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-        if body.len() + chunk.len() > max {
-            return Err(too_large());
+async fn read_body(response: reqwest::Response, max: usize) -> Result<Vec<u8>, ProviderError> {
+    http::read_body(response, max).await.map_err(|e| match e {
+        http::BodyError::TooLarge => {
+            ProviderError::Permanent(format!("the feed is larger than {max} bytes"))
         }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+        http::BodyError::Request(e) => request_error(e),
+    })
 }
 
 /// Classifies a failed request. The URL is never part of the message: it is a secret (§8).
@@ -243,17 +237,4 @@ fn status_error(status: StatusCode, retry_after: Option<Duration>) -> ProviderEr
         408 | 429 | 500..=599 => ProviderError::Transient { retry_after },
         _ => ProviderError::Permanent(format!("the server answered HTTP {status}")),
     }
-}
-
-/// `Retry-After` in seconds. The HTTP-date form is rare for feeds and is ignored.
-fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    response
-        .headers()
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-        .map(Duration::from_secs)
 }

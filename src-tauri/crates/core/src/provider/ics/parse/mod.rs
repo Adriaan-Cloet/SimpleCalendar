@@ -24,11 +24,11 @@ const DAY: i64 = 24 * 3600;
 /// Why a feed could not be read at all. A single broken event is skipped instead.
 #[derive(Debug, thiserror::Error)]
 #[error("not an iCalendar feed: {0}")]
-pub(super) struct ParseError(&'static str);
+pub(in crate::provider) struct ParseError(&'static str);
 
 /// What a feed holds.
 #[derive(Debug)]
-pub(super) struct Feed {
+pub(in crate::provider) struct Feed {
     pub events: Vec<RemoteEvent>,
     /// Problems the user should know about, such as a time zone that could not be resolved
     /// (§7.7). Each is listed once, however many events it affects.
@@ -37,7 +37,7 @@ pub(super) struct Feed {
 
 /// Every event in the feed. Events without a `UID` or a usable `DTSTART` are logged and left
 /// out, so one broken event never hides the rest.
-pub(super) fn parse_feed(text: &str) -> Result<Feed, ParseError> {
+pub(in crate::provider) fn parse_feed(text: &str) -> Result<Feed, ParseError> {
     // Lines may be folded (RFC 5545 §3.1): a line that starts with a space continues the one
     // before it. The parser expects them joined.
     let unfolded = parser::unfold(text.trim_start_matches('\u{feff}'));
@@ -72,6 +72,21 @@ pub(super) fn parse_feed(text: &str) -> Result<Feed, ParseError> {
         events,
         warnings: warnings.into_iter().collect(),
     })
+}
+
+/// The IANA name for the zone of a CalDAV `calendar-timezone`: a `VCALENDAR` with one
+/// `VTIMEZONE` (RFC 4791 §5.2.2). Its `TZID` is resolved like an event's (§7.7), at the
+/// current time. `None` if it is not one, or only matches fixed offsets.
+pub(in crate::provider) fn calendar_zone(text: &str) -> Option<String> {
+    let unfolded = parser::unfold(text.trim_start_matches('\u{feff}'));
+    let roots = parser::read_calendar_simple(&unfolded).ok()?;
+    let calendar = roots.iter().find(|c| is(c, "VCALENDAR"))?;
+    let vtimezone = calendar.components.iter().find(|c| is(c, "VTIMEZONE"))?;
+    let tzid = prop(vtimezone, "TZID")?.val.as_str().to_owned();
+    match Zones::of(calendar).resolve(&tzid, chrono::Utc::now().naive_utc()) {
+        Some(Zone::Iana(tz)) => Some(tz.name().to_owned()),
+        _ => None,
+    }
 }
 
 /// One `VEVENT` as an event row.

@@ -459,3 +459,48 @@ fn html_is_not_a_feed() {
     assert!(parse_feed("<!doctype html><html><body>Sign in</body></html>").is_err());
     assert!(parse_feed("").is_err());
 }
+
+// ---- a CalDAV calendar's zone --------------------------------------------------------------
+
+/// A `calendar-timezone` value: one `VTIMEZONE` in a `VCALENDAR`, with LF line ends as XML
+/// leaves them.
+fn calendar_timezone(tzid: &str, offsets: (&str, &str)) -> String {
+    format!(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\nBEGIN:VTIMEZONE\nTZID:{tzid}\n\
+         BEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\n\
+         TZOFFSETFROM:{1}\nTZOFFSETTO:{0}\nEND:STANDARD\n\
+         BEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\n\
+         TZOFFSETFROM:{0}\nTZOFFSETTO:{1}\nEND:DAYLIGHT\nEND:VTIMEZONE\nEND:VCALENDAR\n",
+        offsets.0, offsets.1
+    )
+}
+
+#[test]
+fn a_calendar_zone_is_named_by_its_tzid() {
+    let text = calendar_timezone("Europe/Brussels", ("+0100", "+0200"));
+    assert_eq!(calendar_zone(&text).as_deref(), Some("Europe/Brussels"));
+    let text = calendar_timezone("W. Europe Standard Time", ("+0100", "+0200"));
+    assert_eq!(calendar_zone(&text).as_deref(), Some("Europe/Berlin"));
+}
+
+#[test]
+fn a_calendar_zone_with_an_unknown_name_is_matched_by_its_rules() {
+    let text = calendar_timezone("My office", ("+0100", "+0200"));
+    let zone = calendar_zone(&text).expect("an IANA zone with the same rules");
+    let tz: Tz = zone.parse().unwrap();
+    // Whatever zone matched, it has to keep Brussels' times.
+    let summer = NaiveDate::from_ymd_opt(2026, 7, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    assert_eq!(
+        resolve_local(tz, summer).timestamp(),
+        resolve_local(Brussels, summer).timestamp()
+    );
+}
+
+#[test]
+fn a_calendar_zone_that_is_not_a_zone_is_none() {
+    assert_eq!(calendar_zone("not a calendar"), None);
+    assert_eq!(calendar_zone("BEGIN:VCALENDAR\nEND:VCALENDAR\n"), None);
+}
