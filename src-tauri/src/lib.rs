@@ -61,10 +61,12 @@ pub fn run() {
             )?);
 
             // The sync engine (§7.1), with a provider for every kind of remote source.
+            // The service shares the CalDAV provider, to check a login before adding it.
+            let caldav = Arc::new(CaldavProvider::new()?);
             let providers = Providers::new()
                 .with(Arc::new(IcsProvider::new()?))
                 .with(Arc::new(GoogleProvider::new(google.clone())))
-                .with(Arc::new(CaldavProvider::new()?));
+                .with(caldav.clone());
             let (events, rx) = mpsc::unbounded_channel();
             let (engine, sync) =
                 SyncEngine::new(db.clone(), secrets.clone(), providers, events.clone());
@@ -97,7 +99,7 @@ pub fn run() {
 
             // Every command goes through the service (§2).
             app.manage(CalendarService::new(
-                db, secrets, sync, events, google, reminders,
+                db, secrets, sync, events, google, caldav, reminders,
             ));
             Ok(())
         })
@@ -114,6 +116,8 @@ pub fn run() {
             commands::get_status,
             commands::list_sources,
             commands::add_ics_source,
+            commands::add_caldav_source,
+            commands::update_caldav_password,
             commands::remove_source,
             commands::sync_now,
             commands::set_sync_interval,

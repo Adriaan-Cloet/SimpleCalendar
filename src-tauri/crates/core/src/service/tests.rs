@@ -8,6 +8,7 @@ use crate::model::{LOCAL_SOURCE_ID, Occurrence, OccurrenceTime};
 use crate::secrets::{MemoryStore, UnavailableReason, account};
 use crate::sync::Requests;
 
+mod caldav;
 mod events;
 mod issues;
 mod outbox;
@@ -21,6 +22,7 @@ struct Setup {
     service: CalendarService,
     db: Db,
     store: Arc<MemoryStore>,
+    caldav: Arc<caldav::FakeCaldav>,
     requests: Requests,
     events: mpsc::UnboundedReceiver<CoreEvent>,
     _dir: TempDir,
@@ -39,6 +41,7 @@ fn setup_with(client: Option<ClientConfig>, endpoints: Endpoints) -> Setup {
     let (sync, requests) = SyncHandle::detached();
     let (tx, events) = mpsc::unbounded_channel();
     let google = GoogleAuth::new(db.clone(), secrets.clone(), client, endpoints).unwrap();
+    let caldav = Arc::new(caldav::FakeCaldav::new());
     Setup {
         service: CalendarService::new(
             db.clone(),
@@ -46,10 +49,12 @@ fn setup_with(client: Option<ClientConfig>, endpoints: Endpoints) -> Setup {
             sync,
             tx,
             Arc::new(google),
+            caldav.clone(),
             ReminderHandle::default(),
         ),
         db,
         store,
+        caldav,
         requests,
         events,
         _dir: dir,
