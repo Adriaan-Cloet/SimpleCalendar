@@ -1,4 +1,4 @@
-//! The CalDAV provider: finding an account's calendars and reading them
+//! The CalDAV provider: finding an account's calendars, reading them and writing their events
 //! (`docs/architecture.md` §5, §7.8).
 //!
 //! Discovery starts at the address the user gave: its `/.well-known/caldav` (RFC 6764), then
@@ -10,12 +10,17 @@
 //! A pull asks for changes in the best way the calendar offers: a sync-token report
 //! (RFC 6578), else the ctag and the ETag of every resource, compared with the cursor. The
 //! changed resources are fetched with `calendar-multiget` and parsed by the ICS parser.
+//!
+//! A write fetches the event's resource, changes it (`ical`) and puts it back with `If-Match`
+//! (`write.rs`).
 
 mod cursor;
+mod ical;
 #[cfg(test)]
 mod live;
 #[cfg(test)]
 mod tests;
+mod write;
 mod xml;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -23,21 +28,18 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::header::{CONTENT_TYPE, LOCATION};
+use reqwest::header::{CONTENT_TYPE, ETAG, LOCATION};
 use reqwest::{Method, StatusCode, Url};
 
 use self::cursor::{Cursor, Item, compare};
 use self::xml::{CALDAV, CS, DAV, ICAL, Multistatus, Response};
-use super::ics::parse::{calendar_zone, parse_feed};
+use super::ics::parse::{Feed, address, calendar_zone, parse_feed};
 use super::{
     CalendarProvider, CalendarRef, Capabilities, ChangeSet, Next, PageToken, ProviderError,
-    RemoteCalendar, RemoteEvent, SourceContext, SyncCursor, http,
+    RemoteCalendar, RemoteEvent, SourceContext, SyncCursor, WritableProvider, http,
 };
 use crate::model::{Access, SourceKind};
 use crate::secrets::Secret;
-
-/// Whether this provider writes. Not before #27, so every calendar is stored read-only.
-const WRITES: bool = false;
 
 /// The largest answer that is read. A multiget of `MULTIGET_BATCH` events is far below it.
 const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -60,11 +62,23 @@ enum Found {
     Calendar(Url),
 }
 
+/// What discovery found for one source.
+#[derive(Debug, Clone)]
+struct Discovered {
+    /// The address it started from.
+    given: String,
+    found: Found,
+    /// The user's own addresses (`calendar-user-address-set`), as `parse::address` writes them.
+    addresses: Vec<String>,
+}
+
 pub struct CaldavProvider {
     client: reqwest::Client,
     max_bytes: usize,
-    /// What discovery found, by source id, with the address it started from.
-    found: Mutex<HashMap<String, (String, Found)>>,
+    /// What discovery found, by source id.
+    found: Mutex<HashMap<String, Discovered>>,
+    /// The ETags this provider's own writes went from and to, by resource URL (`write.rs`).
+    written: Mutex<HashMap<String, Vec<(String, String)>>>,
 }
 
 impl CaldavProvider {
@@ -73,6 +87,7 @@ impl CaldavProvider {
             client: http::client_without_redirects()?,
             max_bytes: MAX_BYTES,
             found: Mutex::new(HashMap::new()),
+            written: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -84,6 +99,8 @@ struct Account<'a> {
     url: Url,
     username: &'a str,
     password: &'a str,
+    /// The user's own addresses, once discovery found them: who organizes an invitation.
+    addresses: Vec<String>,
 }
 
 impl<'a> Account<'a> {
@@ -103,6 +120,7 @@ impl<'a> Account<'a> {
             url: server_url(url)?,
             username,
             password,
+            addresses: Vec::new(),
         })
     }
 }
@@ -143,24 +161,41 @@ fn allowed(url: &Url) -> bool {
     }
 }
 
-/// An answer: the address it finally came from, its status, `Retry-After` and body.
+/// An answer: the address it finally came from, its status, `Retry-After`, ETag and body.
 struct Answer {
     url: Url,
     status: StatusCode,
     retry_after: Option<Duration>,
+    etag: Option<String>,
     body: String,
 }
 
 impl CaldavProvider {
-    /// Sends one WebDAV request with the account's login and follows redirects on the same
-    /// host, keeping the method and body. A redirect to another host is refused, so the
-    /// password never goes anywhere but the server the user named or the addresses it lists.
+    /// Sends one WebDAV request with an XML body.
     async fn send(
         &self,
         account: &Account<'_>,
         method: &str,
-        mut url: Url,
+        url: Url,
         depth: &str,
+        body: &str,
+    ) -> Result<Answer, ProviderError> {
+        let headers = [
+            ("Depth", depth),
+            (CONTENT_TYPE.as_str(), "application/xml; charset=utf-8"),
+        ];
+        self.exchange(account, method, url, &headers, body).await
+    }
+
+    /// Sends one request with the account's login and follows redirects on the same host,
+    /// keeping the method, headers and body. A redirect to another host is refused, so the
+    /// password never goes anywhere but the server the user named or the addresses it lists.
+    async fn exchange(
+        &self,
+        account: &Account<'_>,
+        method: &str,
+        mut url: Url,
+        headers: &[(&str, &str)],
         body: &str,
     ) -> Result<Answer, ProviderError> {
         let method = Method::from_bytes(method.as_bytes()).expect("a valid method name");
@@ -172,12 +207,14 @@ impl CaldavProvider {
             ));
         }
         for _ in 0..=MAX_REDIRECTS {
-            let response = self
+            let mut request = self
                 .client
                 .request(method.clone(), url.clone())
-                .basic_auth(account.username, Some(account.password))
-                .header("Depth", depth)
-                .header(CONTENT_TYPE, "application/xml; charset=utf-8")
+                .basic_auth(account.username, Some(account.password));
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            let response = request
                 .body(body.to_owned())
                 .send()
                 .await
@@ -188,6 +225,12 @@ impl CaldavProvider {
                 continue;
             }
             let retry_after = http::retry_after(&response);
+            let etag = response
+                .headers()
+                .get(ETAG)
+                .and_then(|e| e.to_str().ok())
+                .filter(|e| !e.is_empty())
+                .map(str::to_owned);
             let body = http::read_body(response, self.max_bytes)
                 .await
                 .map_err(|e| match e {
@@ -201,6 +244,7 @@ impl CaldavProvider {
                 url,
                 status,
                 retry_after,
+                etag,
                 body: String::from_utf8_lossy(&body).into_owned(),
             });
         }
@@ -253,30 +297,32 @@ impl CaldavProvider {
         &self,
         cx: &SourceContext,
         account: &Account<'_>,
-    ) -> Result<Found, ProviderError> {
-        if let Some(found) = self.remembered(cx, account) {
-            return Ok(found);
+    ) -> Result<Discovered, ProviderError> {
+        if let Some(discovered) = self.remembered(cx, account) {
+            return Ok(discovered);
         }
-        let found = self.discover(account).await?;
+        let (found, addresses) = self.discover(account).await?;
+        let discovered = Discovered {
+            given: account.given.to_owned(),
+            found,
+            addresses,
+        };
         self.found
             .lock()
             .expect("the discovery cache is never poisoned")
-            .insert(
-                cx.source_id.clone(),
-                (account.given.to_owned(), found.clone()),
-            );
-        Ok(found)
+            .insert(cx.source_id.clone(), discovered.clone());
+        Ok(discovered)
     }
 
-    fn remembered(&self, cx: &SourceContext, account: &Account<'_>) -> Option<Found> {
+    fn remembered(&self, cx: &SourceContext, account: &Account<'_>) -> Option<Discovered> {
         let found = self
             .found
             .lock()
             .expect("the discovery cache is never poisoned");
         found
             .get(&cx.source_id)
-            .filter(|(given, _)| given == account.given)
-            .map(|(_, found)| found.clone())
+            .filter(|d| d.given == account.given)
+            .cloned()
     }
 
     fn forget(&self, cx: &SourceContext) {
@@ -286,7 +332,7 @@ impl CaldavProvider {
             .remove(&cx.source_id);
     }
 
-    async fn discover(&self, account: &Account<'_>) -> Result<Found, ProviderError> {
+    async fn discover(&self, account: &Account<'_>) -> Result<(Found, Vec<String>), ProviderError> {
         let mut starts = Vec::new();
         // An address without a path is a server: it says where CalDAV lives.
         if account.url.path() == "/" {
@@ -294,8 +340,13 @@ impl CaldavProvider {
         }
         starts.push(account.url.clone());
         for start in starts {
-            if let Some(found) = self.discover_from(account, start).await? {
-                return Ok(found);
+            if let Some((found, mut addresses)) = self.discover_from(account, start).await? {
+                // Servers often list only the principal's path. A login that is an e-mail
+                // address is the user's address as well.
+                if account.username.contains('@') {
+                    addresses.push(address(account.username));
+                }
+                return Ok((found, addresses));
             }
         }
         Err(ProviderError::Permanent(
@@ -303,36 +354,39 @@ impl CaldavProvider {
         ))
     }
 
-    /// What `start` leads to, or `None` if it is not a way in.
+    /// What `start` leads to, with the user's addresses, or `None` if it is not a way in.
     async fn discover_from(
         &self,
         account: &Account<'_>,
         start: Url,
-    ) -> Result<Option<Found>, ProviderError> {
+    ) -> Result<Option<(Found, Vec<String>)>, ProviderError> {
         let Some((url, here)) = self.describe(account, start).await? else {
             return Ok(None);
         };
-        if is_calendar(&here) {
-            return Ok(Some(Found::Calendar(url)));
+        if !is_calendar(&here)
+            && let Some(home) = home_of(&url, &here)
+        {
+            return Ok(Some((Found::Home(home), addresses_of(&here))));
         }
-        if let Some(home) = home_of(&url, &here) {
-            return Ok(Some(Found::Home(home)));
-        }
-        let Some(principal) = here
+        let principal = here
             .prop(DAV, "current-user-principal")
             .and_then(|p| p.href())
             .and_then(|p| url.join(&p).ok())
-        else {
-            return Ok(None);
+            .filter(|p| *p != url);
+        let principal = match principal {
+            Some(principal) => self.describe(account, principal).await?,
+            None => None,
         };
-        if principal == url {
-            return Ok(None);
+        let addresses = principal
+            .as_ref()
+            .map(|(_, p)| addresses_of(p))
+            .unwrap_or_default();
+        if is_calendar(&here) {
+            return Ok(Some((Found::Calendar(url), addresses)));
         }
-        Ok(self
-            .describe(account, principal)
-            .await?
+        Ok(principal
             .and_then(|(url, principal)| home_of(&url, &principal))
-            .map(Found::Home))
+            .map(|home| (Found::Home(home), addresses)))
     }
 
     /// `PROPFIND` for the discovery properties of one address. `None` if the address does not
@@ -373,6 +427,33 @@ fn is_calendar(response: &Response) -> bool {
 fn home_of(base: &Url, response: &Response) -> Option<Url> {
     let home = response.prop(CALDAV, "calendar-home-set")?.href()?;
     base.join(&home).ok()
+}
+
+/// The user's own addresses, as a principal lists them (RFC 6638 §2.4.1), to know which
+/// invitations they organize.
+fn addresses_of(principal: &Response) -> Vec<String> {
+    principal
+        .prop(CALDAV, "calendar-user-address-set")
+        .map(|set| {
+            set.children(DAV, "href")
+                .map(|h| address(h.text()))
+                .filter(|a| !a.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Marks the invitations the user organizes as theirs: the parser cannot know their address.
+fn own_invitations(feed: &mut Feed, addresses: &[String]) {
+    for event in &mut feed.events {
+        if feed
+            .organizers
+            .get(&event.remote_id)
+            .is_some_and(|organizer| addresses.contains(organizer))
+        {
+            event.is_organizer = true;
+        }
+    }
 }
 
 // ---- calendars -----------------------------------------------------------------------------
@@ -439,7 +520,7 @@ fn calendar(base: &Url, response: &Response) -> Option<RemoteCalendar> {
         time_zone: response
             .prop(CALDAV, "calendar-timezone")
             .and_then(|z| calendar_zone(z.raw_text())),
-        access: if WRITES && can_write(response) {
+        access: if can_write(response) {
             Access::Write
         } else {
             Access::Read
@@ -458,11 +539,12 @@ fn color(value: &str) -> Option<String> {
         .then(|| format!("#{}", rgb.to_ascii_lowercase()))
 }
 
-/// Whether the user may change the calendar's events (RFC 3744 §5.4).
+/// Whether the user may change the calendar's events (RFC 3744 §5.4). A server that does not
+/// say is taken at its word when it refuses a write.
 fn can_write(response: &Response) -> bool {
     response
         .prop(DAV, "current-user-privilege-set")
-        .is_some_and(|set| {
+        .is_none_or(|set| {
             set.children(DAV, "privilege")
                 .any(|p| p.has(DAV, "all") || p.has(DAV, "write") || p.has(DAV, "write-content"))
         })
@@ -801,7 +883,8 @@ impl CaldavProvider {
                         // pull tries again.
                         log::warn!("{}: {e}", fetched.href);
                     }
-                    Some(Ok(feed)) => {
+                    Some(Ok(mut feed)) => {
+                        own_invitations(&mut feed, &account.addresses);
                         let read =
                             cursor::resource(&fetched.href, &fetched.etag, feed.events, previous);
                         pulled.upserts.extend(read.events);
@@ -880,9 +963,9 @@ impl CalendarProvider for CaldavProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            writable: WRITES,
+            writable: true,
             incremental_sync: true,
-            reminders: false,
+            reminders: true,
         }
     }
 
@@ -892,12 +975,12 @@ impl CalendarProvider for CaldavProvider {
     ) -> Result<Vec<RemoteCalendar>, ProviderError> {
         let account = Account::of(cx)?;
         let remembered = self.remembered(cx, &account).is_some();
-        let found = self.locate(cx, &account).await?;
+        let found = self.locate(cx, &account).await?.found;
         match self.calendars(&account, &found).await {
             // The server moved the calendars since they were found: look again, once.
             Err(ProviderError::NotFound) if remembered => {
                 self.forget(cx);
-                let found = self.locate(cx, &account).await?;
+                let found = self.locate(cx, &account).await?.found;
                 self.calendars(&account, &found).await
             }
             result => result,
@@ -911,17 +994,46 @@ impl CalendarProvider for CaldavProvider {
         cursor: Option<&SyncCursor>,
         _page: Option<&PageToken>,
     ) -> Result<ChangeSet, ProviderError> {
-        let account = Account::of(cx)?;
-        let collection = Url::parse(&calendar.remote_id)
-            .ok()
-            .filter(allowed)
-            .ok_or_else(|| ProviderError::Permanent("the calendar address is invalid".into()))?;
+        let mut account = Account::of(cx)?;
+        // The engine lists the calendars first, which runs discovery.
+        if let Some(discovered) = self.remembered(cx, &account) {
+            account.addresses = discovered.addresses;
+        }
+        let collection = collection_of(calendar)?;
         // A cursor this provider cannot read is treated as none: the calendar is read whole.
         match cursor.and_then(Cursor::load) {
             None => self.pull_all(&account, &collection).await,
             Some(previous) => self.pull_changes(&account, &collection, previous).await,
         }
     }
+
+    fn as_writable(&self) -> Option<&dyn WritableProvider> {
+        Some(self)
+    }
+}
+
+/// The calendar's collection, from its remote id.
+fn collection_of(calendar: &CalendarRef) -> Result<Url, ProviderError> {
+    Url::parse(&calendar.remote_id)
+        .ok()
+        .filter(allowed)
+        .ok_or_else(|| ProviderError::Permanent("the calendar address is invalid".into()))
+}
+
+/// The remote id for a new event in the calendar with remote id `calendar`: the path of a
+/// resource named after `name`, a UUID in hex (§7.3). Writes and pulls address events by path
+/// (§7.8), so the app stores this from the start.
+pub fn new_event_id(calendar: &str, name: &str) -> String {
+    let path = Url::parse(calendar)
+        .map(|u| u.path().to_owned())
+        .unwrap_or_default();
+    format!("{}/{name}.ics", path.trim_end_matches('/'))
+}
+
+/// The remote id of the occurrence of the series `master` at `original_start_utc`, as a pull
+/// names its exception.
+pub fn occurrence_id(master: &str, original_start_utc: i64) -> String {
+    cursor::exception_id(master, original_start_utc)
 }
 
 /// Classifies a failed request. The URL is left out of the log: it names the account.

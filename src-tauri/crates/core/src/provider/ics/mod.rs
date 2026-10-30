@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     CalendarProvider, CalendarRef, Capabilities, ChangeSet, Next, PageToken, ProviderError,
-    RemoteCalendar, SourceContext, SyncCursor, http,
+    Reminders, RemoteCalendar, RemoteEvent, SourceContext, SyncCursor, http,
 };
 use crate::model::{Access, SourceKind};
 use crate::secrets::Secret;
@@ -171,8 +171,17 @@ impl CalendarProvider for IcsProvider {
                 .map_err(|e| ProviderError::Permanent(format!("parsing the feed failed: {e}")))?
                 .map_err(|e| ProviderError::Permanent(e.to_string()))?;
 
+        // A feed's alarms are the publisher's, not the user's: they stay off (§9).
+        let upserts = feed
+            .events
+            .into_iter()
+            .map(|event| RemoteEvent {
+                reminders: Reminders::default(),
+                ..event
+            })
+            .collect();
         Ok(ChangeSet {
-            upserts: feed.events,
+            upserts,
             deletions: Vec::new(),
             full: true,
             next: Next::Done(next_cursor),

@@ -6,14 +6,18 @@
 //! ```
 //!
 //! It creates a calendar named `simplecalendar-test` in the account's home, reads it, changes
-//! it on the server and reads the changes, then deletes it again. Nothing else is touched. Its
-//! address differs per run: Nextcloud keeps a deleted calendar in its trash bin and refuses to
-//! create one at the same address.
+//! it on the server and reads the changes, writes through the provider (#27), then deletes it
+//! again. Nothing else is touched. Its address differs per run: Nextcloud keeps a deleted
+//! calendar in its trash bin and refuses to create one at the same address.
 
+use chrono::TimeZone;
+use chrono_tz::Europe::Brussels;
 use reqwest::Method;
 
 use super::*;
-use crate::provider::SeriesRole;
+use crate::provider::{
+    Etag, EventData, EventUpdate, Field, Reminder, ReminderMethod, Reminders, SeriesRole,
+};
 
 const CALENDAR: &str = "simplecalendar-test";
 
@@ -56,6 +60,18 @@ impl Admin {
             .status()
     }
 
+    async fn get(&self, url: &Url) -> String {
+        self.client
+            .get(url.clone())
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    }
+
     async fn put(&self, collection: &Url, name: &str, body: String) {
         let status = self
             .send("PUT", &collection.join(name).unwrap(), body)
@@ -83,7 +99,7 @@ async fn caldav_live() {
     };
     let provider = CaldavProvider::new().unwrap();
     let account = Account::of(&cx).unwrap();
-    let Found::Home(home) = provider.discover(&account).await.unwrap() else {
+    let (Found::Home(home), _) = provider.discover(&account).await.unwrap() else {
         panic!("the address is a calendar; give the server's address");
     };
 
@@ -180,5 +196,210 @@ async fn caldav_live() {
         [format!("{path}single.ics"), exception.remote_id.clone()]
     );
 
+    writes(&cx, &admin, &provider, &reference, &collection, run).await;
+
     admin.send("DELETE", &collection, String::new()).await;
+}
+
+fn brussels(d: u32, h: u32) -> i64 {
+    Brussels
+        .with_ymd_and_hms(2026, 11, d, h, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp()
+}
+
+fn retitled(remote_id: &str, base: &RemoteEvent, title: &str) -> EventUpdate {
+    EventUpdate {
+        remote_id: remote_id.into(),
+        desired: EventData {
+            title: title.into(),
+            ..EventData::from(base)
+        },
+        changed: [Field::Title].into_iter().collect(),
+    }
+}
+
+/// Creating, changing and deleting through the provider, as the outbox does (§7.3).
+async fn writes(
+    cx: &SourceContext,
+    admin: &Admin,
+    provider: &CaldavProvider,
+    calendar: &CalendarRef,
+    collection: &Url,
+    run: i64,
+) {
+    let writer = provider.as_writable().expect("CalDAV writes");
+    let url = |href: &str| collection.join(href).unwrap();
+
+    // A new event, with a reminder; sent twice, as after a lost answer.
+    let id = new_event_id(&calendar.remote_id, &format!("new{run}"));
+    let data = EventData {
+        title: "created".into(),
+        description: Some("two\nlines, and more".into()),
+        location: None,
+        all_day: false,
+        start_utc: brussels(3, 10),
+        end_utc: brussels(3, 11),
+        start_tz: Some("Europe/Brussels".into()),
+        end_tz: Some("Europe/Brussels".into()),
+        recurrence: None,
+        reminders: Reminders {
+            use_default: false,
+            overrides: vec![Reminder {
+                method: ReminderMethod::Popup,
+                minutes_before: 15,
+            }],
+        },
+    };
+    let created = writer.create_event(cx, calendar, &id, &data).await.unwrap();
+    assert_eq!(EventData::from(&created), data);
+    let again = writer.create_event(cx, calendar, &id, &data).await.unwrap();
+    assert_eq!(again.remote_id, created.remote_id);
+    let read = writer.get_event(cx, calendar, &id).await.unwrap().unwrap();
+    assert_eq!(EventData::from(&read), data);
+
+    // A change keeps what this app does not know.
+    admin
+        .put(
+            collection,
+            "kept.ics",
+            event("kept", "CATEGORIES:Work\r\nX-OTHER-APP:keep me\r\n"),
+        )
+        .await;
+    let kept_id = format!("{}kept.ics", collection.path());
+    let kept = writer
+        .get_event(cx, calendar, &kept_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let base = Etag(kept.etag.clone().unwrap());
+    let changed = writer
+        .update_event(
+            cx,
+            calendar,
+            &retitled(&kept_id, &kept, "renamed"),
+            Some(&base),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.title, "renamed");
+    let text = admin.get(&url("kept.ics")).await;
+    assert!(text.contains("X-OTHER-APP:keep me"), "{text}");
+    assert!(text.contains("SUMMARY:renamed"), "{text}");
+
+    // An edit based on the ETag this app's own write replaced is no conflict. Once someone
+    // else wrote, an edit or delete based on it is.
+    let stale = writer
+        .update_event(
+            cx,
+            calendar,
+            &retitled(&kept_id, &kept, "again"),
+            Some(&base),
+        )
+        .await;
+    assert!(stale.is_ok(), "own writes are no conflict: {stale:?}");
+    admin
+        .put(
+            collection,
+            "kept.ics",
+            event("kept", "X-CHANGED:elsewhere\r\n"),
+        )
+        .await;
+    let conflict = writer
+        .update_event(
+            cx,
+            calendar,
+            &retitled(&kept_id, &kept, "lost"),
+            Some(&base),
+        )
+        .await;
+    assert!(
+        matches!(conflict, Err(ProviderError::Conflict)),
+        "{conflict:?}"
+    );
+    let conflict = writer
+        .delete_event(cx, calendar, &kept_id, Some(&base))
+        .await;
+    assert!(
+        matches!(conflict, Err(ProviderError::Conflict)),
+        "{conflict:?}"
+    );
+
+    // One occurrence of the series becomes an exception in its resource, and the series can
+    // still be changed from the ETag it was read with.
+    let series_id = format!("{}weekly.ics", collection.path());
+    let series = writer
+        .get_event(cx, calendar, &series_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let series_etag = Etag(series.etag.clone().unwrap());
+    let occurrence = occurrence_id(&series_id, brussels(16, 14));
+    let one = EventUpdate {
+        remote_id: occurrence.clone(),
+        desired: EventData {
+            title: "just this one".into(),
+            start_utc: brussels(16, 15),
+            end_utc: brussels(16, 16),
+            recurrence: None,
+            ..EventData::from(&series)
+        },
+        changed: [Field::Title, Field::Times].into_iter().collect(),
+    };
+    let exception = writer
+        .update_event(cx, calendar, &one, Some(&series_etag))
+        .await
+        .unwrap();
+    assert_eq!(exception.remote_id, occurrence);
+    assert_eq!(EventData::from(&exception), one.desired);
+    writer
+        .update_event(
+            cx,
+            calendar,
+            &retitled(&series_id, &series, "weekly, renamed"),
+            Some(&series_etag),
+        )
+        .await
+        .unwrap();
+    let text = admin.get(&url("weekly.ics")).await;
+    assert!(
+        text.contains("SUMMARY:weekly, renamed") || text.contains("SUMMARY:weekly\\, renamed"),
+        "{text}"
+    );
+    assert!(text.contains("SUMMARY:just this one"), "{text}");
+
+    // Another occurrence goes; then the exception; then the whole series.
+    writer
+        .delete_event(
+            cx,
+            calendar,
+            &occurrence_id(&series_id, brussels(23, 14)),
+            None,
+        )
+        .await
+        .unwrap();
+    writer
+        .delete_event(cx, calendar, &occurrence, None)
+        .await
+        .unwrap();
+    let text = admin.get(&url("weekly.ics")).await;
+    assert!(text.contains("EXDATE"), "{text}");
+    assert!(!text.contains("RECURRENCE-ID"), "{text}");
+    let series = writer
+        .get_event(cx, calendar, &series_id)
+        .await
+        .unwrap()
+        .unwrap();
+    writer
+        .delete_event(cx, calendar, &series_id, series.etag.map(Etag).as_ref())
+        .await
+        .unwrap();
+    assert!(
+        writer
+            .get_event(cx, calendar, &series_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

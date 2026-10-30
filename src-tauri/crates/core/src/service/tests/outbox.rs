@@ -26,6 +26,22 @@ impl Setup {
         self.remote_calendar("google", "write").await
     }
 
+    /// A writable CalDAV calendar at `https://dav.example.com/alice/work/`.
+    pub(super) async fn caldav_calendar(&self) -> i64 {
+        let id = self.remote_calendar("caldav", "write").await;
+        self.db
+            .write(move |c| {
+                c.execute(
+                    "UPDATE calendars SET remote_id = 'https://dav.example.com/alice/work/'
+                     WHERE id = ?1",
+                    [id],
+                )
+            })
+            .await
+            .unwrap();
+        id
+    }
+
     pub(super) async fn outbox(&self) -> Vec<Row> {
         self.db
             .read(|c| {
@@ -294,6 +310,73 @@ async fn one_occurrence_of_a_google_series_is_addressed_by_googles_instance_id()
         (base.recurrence.as_ref(), payload.recurrence.as_ref()),
         (None, None)
     );
+}
+
+#[tokio::test]
+async fn a_new_caldav_event_is_named_by_its_path_in_the_calendar() {
+    let s = setup();
+    let cal = s.caldav_calendar().await;
+    let id = s
+        .service
+        .create_event(meeting(cal), "UTC")
+        .await
+        .unwrap()
+        .event_id;
+    let (remote_id, _) = s.remote_row(id).await.unwrap();
+    let name = remote_id
+        .strip_prefix("/alice/work/")
+        .and_then(|r| r.strip_suffix(".ics"))
+        .unwrap_or_else(|| panic!("{remote_id}"));
+    assert_eq!(name.len(), 32);
+    assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+    let rows = s.outbox().await;
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1.as_str()),
+        ("create", remote_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn one_occurrence_of_a_caldav_series_is_addressed_in_its_series_resource() {
+    let mut s = setup();
+    let cal = s.caldav_calendar().await;
+    let id = google_standup(&mut s, cal).await;
+    let (master, _) = s.remote_row(id).await.unwrap();
+    let nov3 = instant(Brussels, 2026, 11, 3, 9, 0);
+    let nov10 = instant(Brussels, 2026, 11, 10, 9, 0);
+
+    s.service
+        .update_event(
+            OccurrenceRef {
+                event_id: id,
+                original_start: nov3,
+            },
+            Scope::This,
+            standup_on(cal, "2026-11-03", "Retro"),
+            "UTC",
+        )
+        .await
+        .unwrap();
+    s.service
+        .delete_event(
+            OccurrenceRef {
+                event_id: id,
+                original_start: nov10,
+            },
+            Scope::This,
+        )
+        .await
+        .unwrap();
+
+    let rows = s.outbox().await;
+    let sent: Vec<_> = rows.iter().map(|r| (r.0.as_str(), r.1.as_str())).collect();
+    let (on_nov3, on_nov10) = (format!("{master}#{nov3}"), format!("{master}#{nov10}"));
+    assert_eq!(
+        sent,
+        vec![("update", on_nov3.as_str()), ("delete", on_nov10.as_str())]
+    );
+    // The occurrence lives in the series' resource: the edit is based on its ETag.
+    assert_eq!(rows[0].4.as_deref(), Some("\"e1\""));
 }
 
 #[tokio::test]

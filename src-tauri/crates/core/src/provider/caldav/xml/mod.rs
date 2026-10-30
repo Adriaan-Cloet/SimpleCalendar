@@ -20,10 +20,11 @@ pub(super) const CS: &str = "http://calendarserver.org/ns/";
 /// Apple's iCal: `calendar-color`.
 pub(super) const ICAL: &str = "http://apple.com/ns/ical/";
 
-/// Discovery: what a URL is, and where it points (RFC 6764 §6, RFC 4791 §6.2.1).
+/// Discovery: what a URL is, where it points, and the user's addresses (RFC 6764 §6,
+/// RFC 4791 §6.2.1, RFC 6638 §2.4.1).
 pub(super) const PROPFIND_DISCOVER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-<d:prop><d:resourcetype/><d:current-user-principal/><c:calendar-home-set/></d:prop>
+<d:prop><d:resourcetype/><d:current-user-principal/><c:calendar-home-set/><c:calendar-user-address-set/></d:prop>
 </d:propfind>"#;
 
 /// The properties of a calendar collection, for the calendar list.

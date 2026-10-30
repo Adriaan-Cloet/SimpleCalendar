@@ -21,7 +21,7 @@ use crate::CoreEvent;
 use crate::db::occurrences;
 use crate::model::{Occurrence, SourceKind, TimeKind};
 use crate::outbox::{self, Op};
-use crate::provider::{MAX_REMINDER_MINUTES, ReminderMethod};
+use crate::provider::{MAX_REMINDER_MINUTES, ReminderMethod, caldav};
 use crate::recurrence::rule::{Frequency, SimpleRule};
 use crate::recurrence::{Series, resolve_local, wall_clock};
 
@@ -286,9 +286,9 @@ impl CalendarService {
     /// Creates an event, or a series when the draft repeats, and returns its (first)
     /// occurrence with times in the viewer's zone `tz`, as `list_occurrences` would.
     ///
-    /// The calendar must be writable. The event gets a fresh remote id in the form Google
-    /// accepts, sent with the insert so a retry cannot create it twice (§7.3), and is the
-    /// calendar's own (`is_organizer`, the column default), so it is always editable.
+    /// The calendar must be writable. The event gets a fresh remote id (`new_remote_id`), sent
+    /// with the insert so a retry cannot create it twice (§7.3), and is the calendar's own
+    /// (`is_organizer`, the column default), so it is always editable.
     pub async fn create_event(
         &self,
         draft: EventDraft,
@@ -299,7 +299,6 @@ impl CalendarService {
         if valid.rule == Some(Rule::Custom) {
             return Err(ServiceError::InvalidInput(NO_RULE.into()));
         }
-        let remote_id = uuid::Uuid::new_v4().simple().to_string();
         let occurrence = self
             .db
             .write(move |c| {
@@ -307,6 +306,7 @@ impl CalendarService {
                 if let Err(refused) = check_calendar(&tx, valid.fields.calendar_id)? {
                     return Ok(Err(refused));
                 }
+                let remote_id = new_remote_id(&tx, valid.fields.calendar_id)?;
                 tx.execute(
                     "INSERT INTO events (calendar_id, remote_id, title, start_utc, end_utc)
                      VALUES (?1, ?2, '', 0, 0)",
@@ -571,6 +571,27 @@ fn non_blank(value: Option<String>) -> Option<String> {
 /// database's, the inner one the refusal (see `update_calendar`).
 ///
 /// `access` is `write` only where the provider writes too (§4), so a subscription never is.
+/// A fresh remote id for a new event in `calendar_id` (§7.3): a UUID in hex, which Google takes
+/// as the event's id. A CalDAV calendar names its events by path (§7.8), so there it becomes a
+/// resource in the calendar's collection.
+pub(super) fn new_remote_id(c: &Connection, calendar_id: i64) -> rusqlite::Result<String> {
+    let name = uuid::Uuid::new_v4().simple().to_string();
+    let calendar: Option<(String, String)> = c
+        .query_row(
+            "SELECT s.kind, c.remote_id FROM calendars c JOIN sources s ON s.id = c.source_id
+             WHERE c.id = ?1",
+            [calendar_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match calendar {
+        Some((kind, collection)) if kind == SourceKind::Caldav.as_str() => {
+            caldav::new_event_id(&collection, &name)
+        }
+        _ => name,
+    })
+}
+
 fn check_calendar(c: &Connection, calendar_id: i64) -> rusqlite::Result<Result<(), ServiceError>> {
     let writable: Option<bool> = c
         .query_row(

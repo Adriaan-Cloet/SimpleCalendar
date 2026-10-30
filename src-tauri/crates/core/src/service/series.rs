@@ -18,7 +18,8 @@
 //! - No rule at all makes the series the single event in the form.
 //!
 //! On a remote calendar (#18) every change also queues an outbox row: for one occurrence an
-//! update or delete of Google's instance, for all events an update of the master. The server
+//! update or delete of that occurrence (Google's instance, a CalDAV `RECURRENCE-ID`), for all
+//! events an update of the master. The server
 //! then decides what happens to the exceptions, so when all events move or get a new rule the
 //! local exceptions are dropped and the calendar is pulled again in full, after the push.
 //
@@ -31,9 +32,11 @@ use super::ServiceError;
 use super::events::{
     EVENT_GONE, Fields, Scope, Stored, Valid, load, now, set_recurrence, write_event,
 };
-use crate::model::TimeKind;
+use rusqlite::OptionalExtension;
+
+use crate::model::{SourceKind, TimeKind};
 use crate::outbox::{self, Op};
-use crate::provider::google;
+use crate::provider::{caldav, google};
 use crate::recurrence::{from_wall_clock, wall_clock};
 
 const ONLY_ALL_REPEAT: &str = "A change to how an event repeats applies to all events.";
@@ -138,10 +141,12 @@ pub(super) fn cancel(
 /// A new exception to `series` for its occurrence at `original_start`, with the series' values
 /// at that time. Returns its id.
 ///
-/// On a remote calendar its remote id is Google's id of that occurrence, so the outbox can
-/// address it and a later pull updates this row instead of adding a second one. On a local
-/// calendar it gets a random one: a name built from the start would collide once "all events"
-/// moves the series.
+/// On a remote calendar its remote id is the server's id of that occurrence, so the outbox can
+/// address it and a later pull updates this row instead of adding a second one: Google's
+/// instance id, or for CalDAV the series' path and the original start (§7.8). A CalDAV
+/// exception lives in its series' resource, so it starts with the series' ETag, which the
+/// edit is based on. On a local calendar it gets a random one: a name built from the start
+/// would collide once "all events" moves the series.
 fn insert_exception(
     c: &rusqlite::Connection,
     series: i64,
@@ -153,10 +158,21 @@ fn insert_exception(
         [series],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    // Google is the only remote calendar that can be written so far.
-    let remote_id = match outbox::remote_source(c, calendar_id)? {
-        Some(_) => google::instance_id(&master, original_start, all_day),
-        None => uuid::Uuid::new_v4().simple().to_string(),
+    let kind: Option<String> = c
+        .query_row(
+            "SELECT s.kind FROM calendars c JOIN sources s ON s.id = c.source_id
+             WHERE c.id = ?1",
+            [calendar_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let caldav = kind.as_deref() == Some(SourceKind::Caldav.as_str());
+    let remote_id = match kind.as_deref() {
+        Some(k) if k == SourceKind::Google.as_str() => {
+            google::instance_id(&master, original_start, all_day)
+        }
+        Some(_) if caldav => caldav::occurrence_id(&master, original_start),
+        _ => uuid::Uuid::new_v4().simple().to_string(),
     };
     c.execute(
         "INSERT INTO events (calendar_id, remote_id, ical_uid, status, title, description,
@@ -176,6 +192,12 @@ fn insert_exception(
          SELECT ?2, method, minutes_before FROM event_reminders WHERE event_id = ?1",
         [series, id],
     )?;
+    if caldav {
+        c.execute(
+            "UPDATE events SET etag = (SELECT etag FROM events WHERE id = ?1) WHERE id = ?2",
+            [series, id],
+        )?;
+    }
     Ok(id)
 }
 

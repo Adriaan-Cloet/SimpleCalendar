@@ -504,3 +504,124 @@ fn a_calendar_zone_that_is_not_a_zone_is_none() {
     assert_eq!(calendar_zone("not a calendar"), None);
     assert_eq!(calendar_zone("BEGIN:VCALENDAR\nEND:VCALENDAR\n"), None);
 }
+
+// ---- reminders -----------------------------------------------------------------------------
+
+/// The reminders of an event whose `VEVENT` holds `alarms`.
+fn reminders_of(alarms: &str) -> Reminders {
+    one(&format!(
+        "UID:a\nDTSTART:20260601T090000Z\nDTEND:20260601T100000Z\n{alarms}"
+    ))
+    .reminders
+}
+
+fn popup(minutes_before: u32) -> Reminder {
+    Reminder {
+        method: ReminderMethod::Popup,
+        minutes_before,
+    }
+}
+
+#[test]
+fn alarms_before_the_start_are_reminders() {
+    let r = reminders_of(
+        "BEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:x\nTRIGGER:-PT15M\nEND:VALARM
+         BEGIN:VALARM\nACTION:EMAIL\nSUMMARY:x\nDESCRIPTION:x\nTRIGGER;RELATED=START:-P1D\nEND:VALARM
+         BEGIN:VALARM\nACTION:AUDIO\nTRIGGER:-PT1H30M\nEND:VALARM
+         BEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:x\nTRIGGER:PT0S\nEND:VALARM",
+    );
+    assert!(!r.use_default);
+    assert_eq!(
+        r.overrides,
+        vec![
+            popup(0),
+            popup(15),
+            popup(90),
+            Reminder {
+                method: ReminderMethod::Email,
+                minutes_before: 1440
+            }
+        ]
+    );
+}
+
+#[test]
+fn alarms_a_reminder_cannot_hold_are_left_out() {
+    let r = reminders_of(
+        "BEGIN:VALARM\nACTION:DISPLAY\nTRIGGER;VALUE=DATE-TIME:20260601T080000Z\nEND:VALARM
+         BEGIN:VALARM\nACTION:DISPLAY\nTRIGGER;RELATED=END:-PT5M\nEND:VALARM
+         BEGIN:VALARM\nACTION:DISPLAY\nTRIGGER:PT10M\nEND:VALARM
+         BEGIN:VALARM\nACTION:PROCEDURE\nTRIGGER:-PT10M\nEND:VALARM
+         BEGIN:VALARM\nACTION:DISPLAY\nTRIGGER:-P5W\nEND:VALARM
+         BEGIN:VALARM\nACTION:DISPLAY\nTRIGGER:-PT10M\nEND:VALARM
+         BEGIN:VALARM\nACTION:AUDIO\nTRIGGER:-PT10M\nEND:VALARM",
+    );
+    // The last two are the same reminder.
+    assert_eq!(r.overrides, vec![popup(10)]);
+}
+
+#[test]
+fn an_event_without_alarms_has_no_reminders() {
+    let r = reminders_of("SUMMARY:A");
+    assert_eq!((r.use_default, r.overrides), (false, vec![]));
+}
+
+// ---- organizer -----------------------------------------------------------------------------
+
+#[test]
+fn an_invitation_names_its_organizer() {
+    let feed = parse_feed(&feed(
+        "BEGIN:VEVENT\nUID:a\nDTSTART:20260601T090000Z
+         ORGANIZER;CN=Bob:MAILTO:Bob@Example.com\nATTENDEE:mailto:alice@example.com\nEND:VEVENT
+         BEGIN:VEVENT\nUID:b\nDTSTART:20260601T090000Z\nORGANIZER:mailto:bob@example.com\nEND:VEVENT
+         BEGIN:VEVENT\nUID:c\nDTSTART:20260601T090000Z\nEND:VEVENT",
+    ))
+    .unwrap();
+    let by_uid = |uid: &str| feed.events.iter().find(|e| e.remote_id == uid).unwrap();
+    // Without anyone invited, nobody else has a say in the event.
+    assert!(!by_uid("a").is_organizer);
+    assert!(by_uid("b").is_organizer);
+    assert!(by_uid("c").is_organizer);
+    assert_eq!(
+        feed.organizers,
+        BTreeMap::from([("a".to_owned(), "bob@example.com".to_owned())])
+    );
+}
+
+// ---- layout --------------------------------------------------------------------------------
+
+#[test]
+fn layout_lists_each_vevent_with_its_role_and_zone() {
+    let text = feed(
+        "BEGIN:VEVENT\nUID:s\nDTSTART;TZID=Europe/Brussels:20261102T140000\nRRULE:FREQ=WEEKLY\nEND:VEVENT
+         BEGIN:VEVENT\nUID:s\nRECURRENCE-ID;TZID=Europe/Brussels:20261109T140000
+         DTSTART;TZID=Europe/Brussels:20261109T160000\nEND:VEVENT
+         BEGIN:VEVENT\nUID:s\nRECURRENCE-ID:nonsense\nDTSTART:20261116T140000\nEND:VEVENT
+         BEGIN:VEVENT\nUID:d\nDTSTART;VALUE=DATE:20261102\nEND:VEVENT",
+    );
+    assert_eq!(
+        layout(&text).unwrap(),
+        vec![
+            Layout {
+                role: Role::Master,
+                start_zone: Some("Europe/Brussels".into()),
+                all_day: false,
+            },
+            Layout {
+                role: Role::Exception(brussels(2026, 11, 9, 14, 0)),
+                start_zone: Some("Europe/Brussels".into()),
+                all_day: false,
+            },
+            Layout {
+                role: Role::Broken,
+                start_zone: None,
+                all_day: false,
+            },
+            Layout {
+                role: Role::Master,
+                start_zone: None,
+                all_day: true,
+            },
+        ]
+    );
+}

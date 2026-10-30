@@ -63,7 +63,7 @@ impl Item {
 
 /// An exception's remote id: the resource's path and the occurrence it replaces. A path never
 /// contains a bare `#`, so the two parts cannot be confused.
-fn exception_id(href: &str, original_start_utc: i64) -> String {
+pub(super) fn exception_id(href: &str, original_start_utc: i64) -> String {
     format!("{href}#{original_start_utc}")
 }
 

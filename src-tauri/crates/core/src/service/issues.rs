@@ -21,7 +21,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::events::{EVENT_GONE, now};
+use super::events::{EVENT_GONE, new_remote_id, now};
 use super::series::{drop_exceptions, pull_again};
 use super::{CalendarService, ServiceError};
 use crate::CoreEvent;
@@ -270,7 +270,7 @@ fn redo(c: &Connection, issue: &Issue) -> rusqlite::Result<Result<Option<String>
 /// Creates the event `data` in `calendar_id` under a new id, as `create_event` does, and queues
 /// it. Returns the source to sync.
 fn create(c: &Connection, calendar_id: i64, data: &EventData) -> rusqlite::Result<Option<String>> {
-    let remote_id = uuid::Uuid::new_v4().simple().to_string();
+    let remote_id = new_remote_id(c, calendar_id)?;
     c.execute(
         "INSERT INTO events (calendar_id, remote_id, title, start_utc, end_utc)
          VALUES (?1, ?2, '', 0, 0)",

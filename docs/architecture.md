@@ -446,6 +446,12 @@ trait for every provider. The cost is about 100 bytes per resource, so 100 KB fo
 with 1000 events, read and written once per pull. The list also tells a pull which exception
 rows to delete when a resource lost one, which `events.etag` alone could not.
 
+Writing came in #27, also without a change to the traits. Two things follow from CalDAV's
+ETag belonging to a whole resource rather than to one event, both handled inside the provider
+(§7.8 "Writing"): it remembers which ETag each of its own writes replaced, so the next edit of
+another event in the same resource is not taken for a conflict; and deleting one occurrence is
+never a conflict, since it only adds an `EXDATE`.
+
 ## 6. SQLite schema
 
 _Needed from: v0.1 (ICS subscriptions). The table after the DDL says from which version each
@@ -1185,7 +1191,8 @@ _Needed from: v0.1 (ICS subscriptions)._
 - `remote_id` is the event's `UID`, combined with `RECURRENCE-ID` for exceptions. The master's
   remote id of an exception is the plain `UID`.
 - Components may appear in any order in the file (§7.2).
-- Alarms inside a feed (`VALARM`) are ignored in v1.
+- Alarms inside a feed (`VALARM`) are ignored in v1: they are the publisher's, not the user's.
+  The parser reads them since #27, for CalDAV (§7.8), and the ICS provider sets them aside.
 
 Implementation notes (`provider/ics/`):
 
@@ -1319,6 +1326,11 @@ The test cases for all of this are listed in §12.
 
 _Needed from: v0.4 (CalDAV). Reading is #26; writing is #27._
 
+Discovery also reads the principal's `calendar-user-address-set` (RFC 6638 §2.4.1): the user's
+own addresses, to know which invitations they organize (below). Radicale and Nextcloud list
+only the principal's path there unless the user has an e-mail address, so a login that is an
+e-mail address counts as one too.
+
 The source's keychain entry holds the address the user gave, the username and the password
 (§8). The address may be a server, a principal or one calendar.
 
@@ -1343,8 +1355,9 @@ Calendars:
 - `remote_id` is the collection's full URL, so a pull needs no discovery.
 - The name is `displayname`, else the last path segment. Apple's `calendar-color`
   (`#RRGGBBAA`) becomes `#rrggbb`. `calendar-timezone` is resolved like an ICS `TZID` (§7.7).
-- Access is `read` until #27, whatever `current-user-privilege-set` says. No calendar is
-  primary.
+- Access is `write` if `current-user-privilege-set` holds `all`, `write` or `write-content`,
+  else `read`. A server that does not list privileges is taken as `write`: a write it refuses
+  becomes a `failed` row in the sync issues (§7.3). No calendar is primary.
 
 A pull, by what the cursor holds (§5):
 
@@ -1378,6 +1391,13 @@ Events:
 - `etag` is the resource's ETag on every event of the resource.
 - A resource that does not parse is logged; its events stay as they were, and the cursor keeps
   its old ETag, so the next pull tries again.
+- Reminders are the event's `VALARM`s that a reminder can hold: `DISPLAY` or `AUDIO` as
+  `popup`, `EMAIL` as `email`, a whole number of minutes up to four weeks before the start.
+  An alarm at a fixed time, before the end or after the start is left out (and kept on
+  write). `use_default` is always false: CalDAV has no calendar defaults.
+- An invitation, an event with an `ORGANIZER` and an `ATTENDEE`, is the user's own
+  (`is_organizer`) only if the organizer is one of the user's addresses. Otherwise it is
+  read-only, as on Google (§4). An event without attendees is always the user's.
 
 Requests:
 
@@ -1391,10 +1411,57 @@ Requests:
   `Retry-After` in seconds, other statuses `Permanent`. Answers over 32 MiB are refused. Logs
   leave out URLs.
 
+Writing (#27):
+
+- **A whole object per write.** A create puts a new resource with `If-None-Match: *`; a 412
+  means an earlier attempt got through, and the resource is fetched and taken as created
+  (§7.3). An edit `GET`s the resource, writes the change into it and `PUT`s it back with
+  `If-Match` on the ETag just fetched. A 412 there means the object changed in between: it is
+  fetched again, up to three times, then the row waits (`Transient`).
+- **New ids are paths.** The service names a new CalDAV event `<collection path>/<uuid>.ics`
+  (`caldav::new_event_id`) and its `UID` is the UUID. A changed occurrence is
+  `<path>#<original start>` (`caldav::occurrence_id`), the id a pull gives its exception, and
+  starts with its series' ETag.
+- **Only the changed fields are rewritten** (`EventUpdate.changed`). Every other line stays as
+  the server sent it: attendees, categories, other apps' `X-` lines, alarms a reminder cannot
+  hold, `ALTREP` on an unchanged description. A changed description drops `X-ALT-DESC`, its
+  HTML copy. `SEQUENCE` goes up by one, `DTSTAMP` and `LAST-MODIFIED` are set to now.
+- **Times** are written as a date for all-day events, a local time with its IANA `TZID`, a UTC
+  time for UTC and fixed offsets, or a floating time. Each `TZID` that has no `VTIMEZONE` in
+  the object gets one (RFC 5545 requires it), built from the zone's offsets in the event's
+  year: each change of offset becomes a yearly rule on that weekday of the month ("last Sunday
+  of March").
+- **Reminders**: an alarm that is still wanted stays as it is; one that is no longer wanted
+  goes; a new popup is `ACTION:DISPLAY`, a new e-mail `ACTION:EMAIL`.
+- **Occurrences.** A changed occurrence that is no exception yet becomes a `VEVENT` with
+  `RECURRENCE-ID` in the series' resource: a copy of the series (so it keeps its attendees and
+  other lines) without its rule, with every field written. Its `RECURRENCE-ID` takes the form of
+  the series' `DTSTART` (date, UTC, or local time with the same `TZID`). A deleted occurrence
+  becomes an `EXDATE` in that form on the series, and its exception, if any, goes. New times or
+  a new rule for the whole series drop its exceptions, as the app drops its own (§7.3).
+- **Deletes.** A series or single event is a `DELETE` of its resource with `If-Match`; 404 and
+  410 are success, 412 is `Conflict`.
+- **ETags of a whole resource.** The ETag covers every event in the resource. After the app
+  wrote one of them, the others it has stored still carry the ETag from before, and the next
+  edit of one of them would look like a conflict. The provider therefore remembers, in memory,
+  which ETag each of its own writes replaced (the last 20 per resource), and an edit based on
+  one of those counts as based on the newer one. An edit based on an ETag someone else
+  replaced is a `Conflict`, as on Google (§7.4). Deleting one occurrence is never a conflict:
+  it only adds an `EXDATE`, whatever else changed.
+- **No mail.** Every `ATTENDEE` without `SCHEDULE-AGENT` gets `SCHEDULE-AGENT=CLIENT` (RFC 6638
+  §7.1), so a server that schedules (Nextcloud) does not mail attendees, as Google's
+  `sendUpdates=none`. This stays on the object, so the server will not mail those attendees
+  for later changes from other apps either.
+- A server that refuses the object (403, 409 or 415, RFC 4791 §5.3.2.1) is `Permanent`; the
+  reason it gives is logged.
+
 Implementation notes (`provider/caldav/`): `xml/` builds the request bodies and reads a
 `multistatus` into a small tree, matching elements by namespace, never by prefix.
-`cursor/` holds the cursor and the comparison, as pure functions. `live.rs` is the opt-in
-test against a real server (§12).
+`cursor/` holds the cursor and the comparison, as pure functions. `ical/` reads an object into
+components and raw lines and writes the changes; which `VEVENT` is which, and the zone of its
+start, come from the ICS parser (`parse::layout`), so they match a pull. `ical/zone.rs` builds
+a `VTIMEZONE`. `write.rs` holds the requests. `live.rs` is the opt-in test against a real
+server (§12).
 
 ## 8. Credentials
 
@@ -1537,6 +1604,8 @@ _Needed from: v0.3 (reminders). Confirmed in review: reminders are part of v1._
   event has not started yet. Otherwise it is skipped.
 - All-day and floating events have no zone of their own. Their reminders are scheduled in the
   display zone the frontend last reported (§10).
+- Reminders come from Google's `reminders`, the app's own events, and since #27 a CalDAV
+  event's `VALARM`s, which are written back (§7.8). Alarms in an ICS feed do not notify.
 - The scheduler does not know whether a window exists. Running it from a tray process later
   needs no change in the core.
 
@@ -1944,6 +2013,15 @@ comparison, no ETags, a rejected or unsupported sync-token, a cut-short report, 
 another host, plain HTTP, and a resource that does not parse. `caldav_live` (ignored) runs
 against any server given in `SIMPLECALENDAR_CALDAV_URL`, `_USER` and `_PASSWORD`; it creates
 and deletes its own calendar.
+
+CalDAV write (#27): `ical/tests.rs` checks that what is written reads back through the ICS
+parser as the same `EventData` (zoned, all-day, floating, UTC, escaped text, reminders, a
+series), that unknown lines survive, and the `VTIMEZONE` for zones with and without daylight
+saving, north and south. `write/tests.rs` checks the requests against `wiremock`: the
+conditions sent, a lost create, a 412 between fetch and put, a conflict, an ETag the app
+replaced itself, and deletes. `caldav_live` also writes through the provider; it passed on
+Radicale 3 and Nextcloud 35. The principal answers in the fixtures were recorded again for
+`calendar-user-address-set`.
 
 ### Sync engine (v0.1, then v0.2 and v0.3)
 
