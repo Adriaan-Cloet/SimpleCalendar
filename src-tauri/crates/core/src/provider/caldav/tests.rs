@@ -215,8 +215,8 @@ async fn radicale_calendars_are_found_from_the_server_address() {
     assert_eq!(work.remote_id, format!("{}/alice/work/", server.uri()));
     assert_eq!(work.color.as_deref(), Some("#ff9500"));
     assert_eq!(work.time_zone.as_deref(), Some("Europe/Brussels"));
-    // Read-only until the provider writes (#27), though the server allows writing.
-    assert_eq!(work.access, Access::Read);
+    // The server lists the user's privileges, writing among them.
+    assert_eq!(work.access, Access::Write);
     assert!(!work.is_primary);
 }
 
@@ -281,10 +281,11 @@ async fn a_home_that_moved_is_looked_for_again() {
     // What an earlier discovery found, which the server no longer has.
     provider.found.lock().unwrap().insert(
         cx.source_id.clone(),
-        (
-            server.uri(),
-            Found::Home(Url::parse(&format!("{}/old-home/", server.uri())).unwrap()),
-        ),
+        Discovered {
+            given: server.uri(),
+            found: Found::Home(Url::parse(&format!("{}/old-home/", server.uri())).unwrap()),
+            addresses: Vec::new(),
+        },
     );
     let calendars = provider.list_calendars(&cx).await.unwrap();
     assert_eq!(names(&calendars), ["Work", "simplecalendar-test"]);
@@ -308,6 +309,105 @@ async fn the_address_of_one_calendar_is_that_calendar() {
     // A path was given, so the well-known address was never tried.
     let requests = server.received_requests().await.unwrap();
     assert!(requests.iter().all(|r| r.url.path() == "/dav/cal/123/"));
+}
+
+#[tokio::test]
+async fn a_calendar_is_writable_unless_its_privileges_say_otherwise() {
+    let server = MockServer::start().await;
+    let calendar = |href: &str, name: &str, privileges: &str| {
+        format!(
+            r#"<d:response><d:href>{href}</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+            <d:displayname>{name}</d:displayname>{privileges}
+            </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#
+        )
+    };
+    let home = format!(
+        r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{}{}{}</d:multistatus>"#,
+        calendar(
+            "/home/shared/",
+            "Shared",
+            "<d:current-user-privilege-set><d:privilege><d:read/></d:privilege></d:current-user-privilege-set>"
+        ),
+        calendar(
+            "/home/mine/",
+            "Mine",
+            "<d:current-user-privilege-set><d:privilege><d:read/></d:privilege><d:privilege><d:write-content/></d:privilege></d:current-user-privilege-set>"
+        ),
+        calendar("/home/quiet/", "Quiet", ""),
+    );
+    let principal = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+        <d:response><d:href>/home/</d:href><d:propstat><d:prop>
+        <c:calendar-home-set><d:href>/home/</d:href></c:calendar-home-set>
+        </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+    propfind(&server, "/home/", "0", multistatus(principal)).await;
+    propfind(&server, "/home/", "1", multistatus(home)).await;
+    let provider = CaldavProvider::new().unwrap();
+    let calendars = provider
+        .list_calendars(&cx(format!("{}/home/", server.uri())))
+        .await
+        .unwrap();
+    let access = |name: &str| calendars.iter().find(|c| c.name == name).unwrap().access;
+    assert_eq!(access("Shared"), Access::Read);
+    assert_eq!(access("Mine"), Access::Write);
+    // Without a list the server is asked; it refuses a write if it must.
+    assert_eq!(access("Quiet"), Access::Write);
+}
+
+#[tokio::test]
+async fn discovery_finds_the_users_addresses() {
+    for server in [radicale().await, nextcloud().await] {
+        let provider = CaldavProvider::new().unwrap();
+        let cx = cx(server.uri());
+        provider.list_calendars(&cx).await.unwrap();
+        let account = Account::of(&cx).unwrap();
+        let addresses = provider.remembered(&cx, &account).unwrap().addresses;
+        // Both list only the principal, without an e-mail address.
+        assert_eq!(addresses.len(), 1, "{addresses:?}");
+        assert!(addresses[0].ends_with("/alice/"), "{addresses:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_login_that_is_an_e_mail_address_is_the_users_address() {
+    let server = radicale().await;
+    let provider = CaldavProvider::new().unwrap();
+    let mut cx = cx(server.uri());
+    if let Some(Secret::Caldav { username, .. }) = &mut cx.secret {
+        *username = "Alice@Example.com".into();
+    }
+    provider.list_calendars(&cx).await.unwrap();
+    let account = Account::of(&cx).unwrap();
+    let addresses = provider.remembered(&cx, &account).unwrap().addresses;
+    assert!(
+        addresses.contains(&"alice@example.com".to_owned()),
+        "{addresses:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_address_of_one_calendar_asks_its_principal_for_the_users_addresses() {
+    let server = MockServer::start().await;
+    let one = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+        <d:response><d:href>/dav/cal/123/</d:href><d:propstat><d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:current-user-principal><d:href>/dav/me/</d:href></d:current-user-principal>
+        <d:displayname>Agenda</d:displayname>
+        </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+    let me = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+        <d:response><d:href>/dav/me/</d:href><d:propstat><d:prop>
+        <c:calendar-user-address-set><d:href>MAILTO:Alice@Example.com</d:href>
+        <d:href>/dav/me/</d:href></c:calendar-user-address-set>
+        </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+    propfind(&server, "/dav/cal/123/", "0", multistatus(one)).await;
+    propfind(&server, "/dav/me/", "0", multistatus(me)).await;
+    let provider = CaldavProvider::new().unwrap();
+    let cx = cx(format!("{}/dav/cal/123/", server.uri()));
+    let calendars = provider.list_calendars(&cx).await.unwrap();
+    assert_eq!(names(&calendars), ["Agenda"]);
+    let account = Account::of(&cx).unwrap();
+    let discovered = provider.remembered(&cx, &account).unwrap();
+    assert_eq!(discovered.addresses, ["alice@example.com", "/dav/me/"]);
 }
 
 #[tokio::test]

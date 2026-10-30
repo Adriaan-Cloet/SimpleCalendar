@@ -8,14 +8,16 @@
 mod tests;
 mod zones;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{Days, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
 use icalendar::parser::{self, Component, Property};
 
 use crate::model::EventStatus;
-use crate::provider::{Reminders, RemoteEvent, SeriesRole};
+use crate::provider::{
+    MAX_REMINDER_MINUTES, Reminder, ReminderMethod, Reminders, RemoteEvent, SeriesRole,
+};
 use crate::recurrence::resolve_local;
 use zones::{Zone, Zones, local_time};
 
@@ -33,6 +35,10 @@ pub(in crate::provider) struct Feed {
     /// Problems the user should know about, such as a time zone that could not be resolved
     /// (§7.7). Each is listed once, however many events it affects.
     pub warnings: Vec<String>,
+    /// The organizer of each invitation: an event with an `ORGANIZER` and an `ATTENDEE`. By
+    /// remote id, the address in lower case without `mailto:`. Such an event is parsed with
+    /// `is_organizer = false`; a CalDAV account that has this address sets it back (§7.8).
+    pub organizers: BTreeMap<String, String>,
 }
 
 /// Every event in the feed. Events without a `UID` or a usable `DTSTART` are logged and left
@@ -53,25 +59,87 @@ pub(in crate::provider) fn parse_feed(text: &str) -> Result<Feed, ParseError> {
     // `VJOURNAL`s are skipped here, and `VTIMEZONE`s are read by `Zones`.
     let mut events = Vec::new();
     let mut warnings = BTreeSet::new();
+    let mut organizers = BTreeMap::new();
     for calendar in calendars {
         let mut zones = Zones::of(calendar);
-        events.extend(
-            calendar
-                .components
-                .iter()
-                .filter(|c| is(c, "VEVENT"))
-                .filter_map(|c| {
-                    event(c, &mut zones)
-                        .inspect_err(|e| log::warn!("skipping an event in the feed: {e}"))
-                        .ok()
-                }),
-        );
+        for c in calendar.components.iter().filter(|c| is(c, "VEVENT")) {
+            match event(c, &mut zones) {
+                Ok(event) => {
+                    if let Some(organizer) = invited_by(c) {
+                        organizers.insert(event.remote_id.clone(), organizer);
+                    }
+                    events.push(event);
+                }
+                Err(e) => log::warn!("skipping an event in the feed: {e}"),
+            }
+        }
         warnings.extend(zones.into_warnings());
     }
     Ok(Feed {
         events,
         warnings: warnings.into_iter().collect(),
+        organizers,
     })
+}
+
+/// What a `VEVENT` is within its resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::provider) enum Role {
+    /// No `RECURRENCE-ID`: a single event or the master of a series.
+    Master,
+    /// An exception, by the stored value of its `RECURRENCE-ID`.
+    Exception(i64),
+    /// A `RECURRENCE-ID` that cannot be read.
+    Broken,
+}
+
+/// One `VEVENT`, as much as a writer needs to find it and write times in its form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::provider) struct Layout {
+    pub role: Role,
+    /// The `start_tz` its `DTSTART` resolves to (§4); `None` if floating, all-day or unreadable.
+    pub start_zone: Option<String>,
+    pub all_day: bool,
+}
+
+/// Every `VEVENT` in the text, in order, also those `parse_feed` would skip. `None` if the text
+/// is not iCalendar.
+pub(in crate::provider) fn layout(text: &str) -> Option<Vec<Layout>> {
+    let unfolded = parser::unfold(text.trim_start_matches('\u{feff}'));
+    let roots = parser::read_calendar_simple(&unfolded).ok()?;
+    let mut layout = Vec::new();
+    for calendar in roots.iter().filter(|c| is(c, "VCALENDAR")) {
+        let mut zones = Zones::of(calendar);
+        for c in calendar.components.iter().filter(|c| is(c, "VEVENT")) {
+            let role = match prop(c, "RECURRENCE-ID") {
+                None => Role::Master,
+                Some(p) => {
+                    Time::parse(p, &mut zones).map_or(Role::Broken, |t| Role::Exception(t.stored))
+                }
+            };
+            let start = prop(c, "DTSTART").and_then(|p| Time::parse(p, &mut zones).ok());
+            layout.push(Layout {
+                role,
+                start_zone: start.and_then(|t| t.zone_name()),
+                all_day: start.is_some_and(|t| t.all_day),
+            });
+        }
+    }
+    Some(layout)
+}
+
+/// The organizer's address if the event invites anyone (RFC 5545 §3.8.4.3).
+fn invited_by(c: &Component<'_>) -> Option<String> {
+    prop(c, "ATTENDEE")?;
+    Some(address(prop(c, "ORGANIZER")?.val.as_str()))
+}
+
+/// A calendar user address compared without case and without `mailto:`.
+pub(in crate::provider) fn address(value: &str) -> String {
+    let value = value.trim().to_ascii_lowercase();
+    value
+        .strip_prefix("mailto:")
+        .map_or(value.clone(), str::to_owned)
 }
 
 /// The IANA name for the zone of a CalDAV `calendar-timezone`: a `VCALENDAR` with one
@@ -153,9 +221,65 @@ fn event(c: &Component<'_>, zones: &mut Zones) -> Result<RemoteEvent, String> {
             .map(|t| t.stored),
         // A feed is read-only through its calendar's access; these only matter for writing.
         etag: None,
-        is_organizer: true,
+        is_organizer: invited_by(c).is_none(),
         guests_can_modify: false,
-        reminders: Reminders::default(),
+        reminders: Reminders {
+            use_default: false,
+            overrides: alarms(c),
+        },
+    })
+}
+
+/// The `VALARM`s of an event that a reminder can hold (§9): shown or sounded, or mailed, a
+/// whole number of minutes up to four weeks before the start. Others, such as one at a fixed
+/// time or before the end, are left out. Sorted, without repeats.
+fn alarms(c: &Component<'_>) -> Vec<Reminder> {
+    let reminders: BTreeSet<Reminder> = c
+        .components
+        .iter()
+        .filter(|a| is(a, "VALARM"))
+        .filter_map(alarm)
+        .collect();
+    reminders.into_iter().collect()
+}
+
+/// The reminder a `VALARM` written on its own holds, if it can hold one.
+pub(in crate::provider) fn alarm_text(text: &str) -> Option<Reminder> {
+    let unfolded = parser::unfold(text);
+    let roots = parser::read_calendar_simple(&unfolded).ok()?;
+    roots.iter().find(|c| is(c, "VALARM")).and_then(alarm)
+}
+
+/// One `VALARM` as a reminder, if it can be one.
+fn alarm(a: &Component<'_>) -> Option<Reminder> {
+    let method = match prop(a, "ACTION")?
+        .val
+        .as_str()
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "DISPLAY" | "AUDIO" => ReminderMethod::Popup,
+        "EMAIL" => ReminderMethod::Email,
+        _ => return None,
+    };
+    let trigger = prop(a, "TRIGGER")?;
+    if param(trigger, "VALUE").is_some_and(|v| !v.eq_ignore_ascii_case("DURATION"))
+        || param(trigger, "RELATED").is_some_and(|r| !r.eq_ignore_ascii_case("START"))
+    {
+        return None;
+    }
+    let d = Duration::parse(trigger.val.as_str()).ok()?;
+    let seconds = -(d.days * DAY + d.seconds);
+    if seconds < 0 || seconds % 60 != 0 {
+        return None;
+    }
+    let minutes_before = u32::try_from(seconds / 60)
+        .ok()
+        .filter(|&m| m <= MAX_REMINDER_MINUTES)?;
+    Some(Reminder {
+        method,
+        minutes_before,
     })
 }
 
