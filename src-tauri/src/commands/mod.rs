@@ -37,6 +37,28 @@ pub async fn add_ics_source(
     service.add_ics_source(&url, &name).await
 }
 
+/// Adds a CalDAV account once the server accepted the login. The password goes to the keychain
+/// only.
+#[tauri::command]
+pub async fn add_caldav_source(
+    service: State<'_, CalendarService>,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<SourceInfo, ServiceError> {
+    service.add_caldav_source(&url, &username, &password).await
+}
+
+/// Replaces a CalDAV account's password once the server accepted it.
+#[tauri::command]
+pub async fn update_caldav_password(
+    service: State<'_, CalendarService>,
+    source: String,
+    password: String,
+) -> Result<SourceInfo, ServiceError> {
+    service.update_caldav_password(&source, &password).await
+}
+
 /// Removes a source, its calendars and events, and its keychain entry.
 #[tauri::command]
 pub async fn remove_source(

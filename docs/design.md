@@ -396,21 +396,26 @@ which is built to show a full day.
 | Double click   | Nothing: one click already opens the day, and "New event" is in the toolbar                                                                                                                     |
 | Arrows         | Move a month, keeping the day, or the month's last day if it is shorter                                                                                                                         |
 
-## 12. Subscriptions dialog
+## 12. Accounts dialog
 
-Opened from "Subscriptions" in the sidebar footer, next to the appearance control. A modal
+Opened from "Accounts" in the sidebar footer, next to the appearance control. A modal
 `<dialog>`: the browser handles focus, Escape and the backdrop in both webviews.
 
-| Element         | Look                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------- |
-| Dialog          | 480px wide, `--surface-elevated`, `--radius-lg`, `--shadow-3`; grows from 96% while fading in           |
-| Source row      | Name (medium), then host and status in footnote grey; warnings below it. Rows separated by hairlines    |
-| Status          | "Syncing…", "Updated 5 minutes ago", "Not synced yet", or the last error in `--danger`                  |
-| Row actions     | Refresh icon (disabled while syncing) and a quiet "Remove", which asks again: "Cancel" and red "Remove" |
-| Keyring problem | The message from architecture §8 on a `--fill-hover` panel, with "Try again". Subscribing is disabled   |
-| Add form        | Feed address and an optional name, a note that the address goes to the keyring, primary "Subscribe"     |
+| Element         | Look                                                                                                                                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Dialog          | 480px wide, `--surface-elevated`, `--radius-lg`, `--shadow-3`; grows from 96% while fading in                                                                                                                      |
+| Source row      | Name (medium), then host and status in footnote grey; warnings below it. Rows separated by hairlines                                                                                                               |
+| Status          | "Syncing…", "Updated 5 minutes ago", "Not synced yet" after the host; a problem on its own line in `--danger`                                                                                                      |
+| Row controls    | Below the status: the sync interval and, for CalDAV, "Update password", both quiet footnote text that shows a hairline or fill on hover. "Update password" is `--accent` while the server refuses the password     |
+| New password    | Opens below the row: one password field, "Cancel" and primary "Save", which reads "Checking…" while the server is asked                                                                                            |
+| Row actions     | Refresh icon (disabled while syncing) and a quiet "Remove", which asks again: "Cancel" and red "Remove"                                                                                                            |
+| Keyring problem | The message from architecture §8 on a `--fill-hover` panel, with "Try again". Adding is disabled                                                                                                                   |
+| Google          | A note on what is kept, "Use your own client…" and "Sign in with Google"                                                                                                                                           |
+| CalDAV form     | Server address, username, app password; one hint line (iCloud, Nextcloud, use an app password); primary "Add account", "Checking…" while the server is asked. A refusal shows above the button and the fields stay |
+| Feed form       | Feed address and an optional name, a note that the address goes to the keyring, primary "Subscribe"                                                                                                                |
 
-The host is shown, never the address: a private feed address is a secret.
+The host is shown, never the address: a private feed address is a secret. A problem gets its own
+line because the row's buttons leave little room beside the host.
 
 ## 13. Event editor
 

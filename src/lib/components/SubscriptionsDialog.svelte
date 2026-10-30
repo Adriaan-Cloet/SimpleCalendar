@@ -1,10 +1,11 @@
 <script lang="ts">
-	// Add, refresh and remove ICS subscriptions (issue #9) and Google accounts (#13). The feed
-	// address and the Google sign-in token go straight to the keychain in Rust; this dialog only
-	// ever shows the host or the account's address.
+	// Add, refresh and remove ICS subscriptions (issue #9), Google accounts (#13) and CalDAV
+	// accounts (#28). The feed address, the Google sign-in token and the CalDAV password go
+	// straight to the keychain in Rust; this dialog only ever shows the host or the account.
 	import { displayLocale } from '#lib/display-format.js';
 	import { intervalChoices } from '#lib/sync-summary.js';
 	import {
+		addCaldavSource,
 		addIcsSource,
 		beginGoogleSignIn,
 		cancelGoogleSignIn,
@@ -17,6 +18,7 @@
 		removeSource,
 		serviceError,
 		syncNow,
+		updateCaldavPassword,
 		type GoogleClientInfo,
 		type SecretsUnavailable,
 		type SourceInfo
@@ -56,6 +58,18 @@
 	let savingClient = $state(false);
 	let clientError = $state<string | null>(null);
 
+	let davUrl = $state('');
+	let davUser = $state('');
+	let davPassword = $state('');
+	/** While the server checks the login */
+	let davAdding = $state(false);
+	let davError = $state<string | null>(null);
+	/** The CalDAV source whose new password is being entered */
+	let passwordFor = $state<string | null>(null);
+	let newPassword = $state('');
+	let savingPassword = $state(false);
+	let passwordError = $state<string | null>(null);
+
 	$effect(() => {
 		if (!dialog) return;
 		if (open && !dialog.open) dialog.showModal();
@@ -69,6 +83,9 @@
 		listError = null;
 		addError = null;
 		googleError = null;
+		davError = null;
+		davPassword = '';
+		passwordFor = null;
 		client = null;
 		void refreshStatus();
 		void reload();
@@ -120,6 +137,57 @@
 			else addError = error.message;
 		} finally {
 			adding = false;
+		}
+	}
+
+	/** Adds the CalDAV account once the server accepted the login; until then nothing is stored */
+	async function addCaldav(event: SubmitEvent) {
+		event.preventDefault();
+		if (davAdding || !davReady) return;
+		davAdding = true;
+		davError = null;
+		try {
+			const source = await addCaldavSource(davUrl, davUser, davPassword);
+			sources = [...sources, source];
+			syncing[source.id] = true;
+			davUrl = '';
+			davUser = '';
+			davPassword = '';
+		} catch (e) {
+			const error = serviceError(e);
+			if (error.kind === 'secrets_unavailable') keyring = error;
+			else davError = error.message;
+		} finally {
+			davAdding = false;
+		}
+	}
+
+	let davReady = $derived(davUrl.trim() !== '' && davUser.trim() !== '' && davPassword !== '');
+
+	function editPassword(source: SourceInfo) {
+		confirming = null;
+		passwordFor = source.id;
+		newPassword = '';
+		passwordError = null;
+	}
+
+	async function savePassword(event: SubmitEvent, source: SourceInfo) {
+		event.preventDefault();
+		if (savingPassword || !newPassword) return;
+		savingPassword = true;
+		passwordError = null;
+		try {
+			const changed = await updateCaldavPassword(source.id, newPassword);
+			sources = sources.map((s) => (s.id === changed.id ? changed : s));
+			syncing[source.id] = true;
+			passwordFor = null;
+			newPassword = '';
+		} catch (e) {
+			const error = serviceError(e);
+			if (error.kind === 'secrets_unavailable') keyring = error;
+			else passwordError = error.message;
+		} finally {
+			savingPassword = false;
 		}
 	}
 
@@ -220,7 +288,11 @@
 	function statusLine(source: SourceInfo): { text: string; problem: boolean } {
 		if (syncing[source.id]) return { text: 'Syncing…', problem: false };
 		if (source.state === 'auth_required') {
-			return { text: 'Sign in again to keep this account in sync.', problem: true };
+			const text =
+				source.kind === 'caldav'
+					? 'The server refused the password. Enter a new app password.'
+					: 'Sign in again to keep this account in sync.';
+			return { text, problem: true };
 		}
 		if (source.state === 'offline') {
 			return { text: 'Offline. Trying again soon.', problem: false };
@@ -263,7 +335,9 @@
 	{/if}
 
 	{#if sources.length === 0}
-		<p class="empty">No accounts yet. Sign in with Google or add a calendar feed below.</p>
+		<p class="empty">
+			No accounts yet. Sign in with Google, add a CalDAV account or a calendar feed below.
+		</p>
 	{:else}
 		<ul class="sources">
 			{#each sources as source (source.id)}
@@ -274,25 +348,40 @@
 						<span class="meta">
 							{#if source.account_label && source.account_label !== source.display_name}
 								<span class="host">{source.account_label}</span>
-								<span aria-hidden="true">·</span>
+								{#if !status.problem}<span aria-hidden="true">·</span>{/if}
 							{/if}
-							<span class={{ status: true, problem: status.problem }}>{status.text}</span>
+							{#if !status.problem}<span class="status">{status.text}</span>{/if}
 						</span>
+						<!-- A problem gets a line of its own: it is longer, and the row's buttons leave
+						     little room beside the host -->
+						{#if status.problem}<span class="problem">{status.text}</span>{/if}
 						{#each source.warnings as warning (warning)}
 							<span class="warning">{warning}</span>
 						{/each}
-						{#if source.default_interval_s !== null}
-							<select
-								class="interval"
-								aria-label="How often {source.display_name} syncs"
-								value={source.sync_interval_s?.toString() ?? ''}
-								onchange={(e) => changeInterval(source, e.currentTarget.value)}
-							>
-								{#each intervalChoices(source.default_interval_s, source.sync_interval_s) as choice (choice.value)}
-									<option value={choice.value?.toString() ?? ''}>{choice.label}</option>
-								{/each}
-							</select>
-						{/if}
+						<div class="controls">
+							{#if source.default_interval_s !== null}
+								<select
+									class="interval"
+									aria-label="How often {source.display_name} syncs"
+									value={source.sync_interval_s?.toString() ?? ''}
+									onchange={(e) => changeInterval(source, e.currentTarget.value)}
+								>
+									{#each intervalChoices(source.default_interval_s, source.sync_interval_s) as choice (choice.value)}
+										<option value={choice.value?.toString() ?? ''}>{choice.label}</option>
+									{/each}
+								</select>
+							{/if}
+							{#if source.kind === 'caldav' && passwordFor !== source.id}
+								<button
+									type="button"
+									class={{ 'text-action': true, urgent: source.state === 'auth_required' }}
+									disabled={keyring !== null}
+									onclick={() => editPassword(source)}
+								>
+									Update password
+								</button>
+							{/if}
+						</div>
 					</div>
 					<div class="row-actions">
 						{#if confirming === source.id}
@@ -331,6 +420,36 @@
 							</button>
 						{/if}
 					</div>
+					{#if passwordFor === source.id}
+						<form class="password" onsubmit={(e) => savePassword(e, source)}>
+							<label class="field">
+								<span class="label">New app password for {source.display_name}</span>
+								<!-- svelte-ignore a11y_autofocus -->
+								<input
+									type="password"
+									bind:value={newPassword}
+									autocomplete="new-password"
+									autofocus
+									required
+								/>
+							</label>
+							{#if passwordError}
+								<p class="error" role="alert">{passwordError}</p>
+							{/if}
+							<div class="form-actions">
+								<button type="button" class="button quiet" onclick={() => (passwordFor = null)}>
+									Cancel
+								</button>
+								<button
+									type="submit"
+									class="button primary"
+									disabled={savingPassword || keyring !== null || !newPassword}
+								>
+									{savingPassword ? 'Checking…' : 'Save'}
+								</button>
+							</div>
+						</form>
+					{/if}
 				</li>
 			{/each}
 		</ul>
@@ -418,6 +537,53 @@
 			</div>
 		{/if}
 	</section>
+
+	<form class="add" onsubmit={addCaldav}>
+		<h3 class="section-title">Add a CalDAV account</h3>
+		<label class="field">
+			<span class="label">Server address</span>
+			<input
+				type="text"
+				bind:value={davUrl}
+				placeholder="cloud.example.com"
+				autocomplete="off"
+				autocapitalize="off"
+				spellcheck="false"
+				required
+			/>
+		</label>
+		<label class="field">
+			<span class="label">Username</span>
+			<input
+				type="text"
+				bind:value={davUser}
+				autocomplete="off"
+				autocapitalize="off"
+				spellcheck="false"
+				required
+			/>
+		</label>
+		<label class="field">
+			<span class="label">App password</span>
+			<input type="password" bind:value={davPassword} autocomplete="new-password" required />
+		</label>
+		<p class="hint">
+			For iCloud: caldav.icloud.com. For Nextcloud: your server address. Use an app password, not
+			your normal password. It is kept in the system keyring, never in a file.
+		</p>
+		{#if davError}
+			<p class="error" role="alert">{davError}</p>
+		{/if}
+		<div class="form-actions">
+			<button
+				type="submit"
+				class="button primary"
+				disabled={davAdding || keyring !== null || !davReady}
+			>
+				{davAdding ? 'Checking…' : 'Add account'}
+			</button>
+		</div>
+	</form>
 
 	<form class="add" onsubmit={add}>
 		<h3 class="section-title">Add a subscription</h3>
@@ -540,6 +706,7 @@
 
 	.source {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: var(--space-md);
 		padding: var(--space-sm) 0;
@@ -585,9 +752,10 @@
 		max-width: 50%;
 	}
 
-	.status.problem {
+	.problem {
+		font-size: var(--text-footnote);
+		line-height: var(--leading-footnote);
 		color: var(--danger);
-		white-space: normal;
 	}
 
 	.warning {
@@ -597,13 +765,24 @@
 		color: var(--text-secondary);
 	}
 
-	/* How often it syncs: quiet until hovered, like the meta line above it */
-	.interval {
-		align-self: flex-start;
-		max-width: 100%;
-		height: 22px;
+	/* The interval and, for CalDAV, the password: quiet until hovered, like the meta line */
+	.controls {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+		min-width: 0;
 		margin-top: var(--space-2xs);
 		margin-left: calc(-1 * var(--space-2xs));
+	}
+
+	.controls:empty {
+		display: none;
+	}
+
+	.interval,
+	.text-action {
+		min-width: 0;
+		height: 22px;
 		padding: 0 var(--space-2xs);
 		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
@@ -615,6 +794,26 @@
 
 	.interval:hover {
 		border-color: var(--separator);
+	}
+
+	.text-action {
+		flex: none;
+		font-weight: var(--weight-medium);
+		transition: background-color var(--duration-fast) var(--ease-standard);
+	}
+
+	.text-action:hover {
+		background: var(--fill-hover);
+	}
+
+	/* The password was refused: this is what to do next */
+	.text-action.urgent {
+		color: var(--accent);
+	}
+
+	.text-action:disabled {
+		opacity: 0.4;
+		pointer-events: none;
 	}
 
 	.interval option {
@@ -694,6 +893,19 @@
 	/* A secondary action on the left of a row of actions */
 	.leading {
 		margin-right: auto;
+	}
+
+	/* A CalDAV account's new password, below its row */
+	.password {
+		display: flex;
+		flex-direction: column;
+		flex-basis: 100%;
+		gap: var(--space-sm);
+		padding-bottom: var(--space-xs);
+	}
+
+	.password .error {
+		margin-top: 0;
 	}
 
 	.client {

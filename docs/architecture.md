@@ -1644,23 +1644,25 @@ _Needed from: v0.1 (ICS subscriptions). Each row says from which version it is n
 
 Commands (all async, all return `Result`):
 
-| Command                                    | Purpose                                                       | Needed from             |
-| ------------------------------------------ | ------------------------------------------------------------- | ----------------------- |
-| `list_calendars`, `update_calendar`        | Visibility and colour override                                | v0.1, ICS subscriptions |
-| `create_local_calendar`, `remove_calendar` | New calendar in the local source; delete a local one          | v0.2, local calendars   |
-| `list_occurrences(from, to, tz)`           | Everything the views render                                   | v0.1, ICS subscriptions |
-| `get_event(target)`                        | Full detail of an event or occurrence, for the editor         | v0.2, local calendars   |
-| `create_event(draft, tz)`                  | Returns the new occurrence                                    | v0.2, local calendars   |
-| `update_event(target, scope, draft, tz)`   | `scope` is `this` or `all`                                    | v0.2, local calendars   |
-| `delete_event(target, scope)`              |                                                               | v0.2, local calendars   |
-| `get_status`                               | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
-| `list_sources`, `remove_source`            | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
-| `add_ics_source(url, name)`                | Subscribe to a feed                                           | v0.1, ICS subscriptions |
-| `sync_now(source?)`                        | Manual refresh                                                | v0.1, ICS subscriptions |
-| `set_sync_interval(source, seconds?)`      | Per-source interval override                                  | v0.3, sync triggers     |
-| `begin_google_sign_in`                     | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
-| `list_sync_issues`, `dismiss_sync_issue`   | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
-| `redo_sync_issue`                          | Make such a change again, as a new edit                       | v0.3, offline sync      |
+| Command                                      | Purpose                                                       | Needed from             |
+| -------------------------------------------- | ------------------------------------------------------------- | ----------------------- |
+| `list_calendars`, `update_calendar`          | Visibility and colour override                                | v0.1, ICS subscriptions |
+| `create_local_calendar`, `remove_calendar`   | New calendar in the local source; delete a local one          | v0.2, local calendars   |
+| `list_occurrences(from, to, tz)`             | Everything the views render                                   | v0.1, ICS subscriptions |
+| `get_event(target)`                          | Full detail of an event or occurrence, for the editor         | v0.2, local calendars   |
+| `create_event(draft, tz)`                    | Returns the new occurrence                                    | v0.2, local calendars   |
+| `update_event(target, scope, draft, tz)`     | `scope` is `this` or `all`                                    | v0.2, local calendars   |
+| `delete_event(target, scope)`                |                                                               | v0.2, local calendars   |
+| `get_status`                                 | Keyring availability, sources needing sign-in, open conflicts | v0.1, ICS subscriptions |
+| `list_sources`, `remove_source`              | Manage accounts and subscriptions                             | v0.1, ICS subscriptions |
+| `add_ics_source(url, name)`                  | Subscribe to a feed                                           | v0.1, ICS subscriptions |
+| `add_caldav_source(url, username, password)` | Add a CalDAV account once the server accepted the login       | v0.4, CalDAV            |
+| `update_caldav_password(source, password)`   | New password for a CalDAV account, checked the same way       | v0.4, CalDAV            |
+| `sync_now(source?)`                          | Manual refresh                                                | v0.1, ICS subscriptions |
+| `set_sync_interval(source, seconds?)`        | Per-source interval override                                  | v0.3, sync triggers     |
+| `begin_google_sign_in`                       | Start the OAuth flow; resolves when the browser step finishes | v0.2, Google read       |
+| `list_sync_issues`, `dismiss_sync_issue`     | `conflicted` and `failed` outbox rows                         | v0.3, offline sync      |
+| `redo_sync_issue`                            | Make such a change again, as a new edit                       | v0.3, offline sync      |
 
 Events from Rust to the webview:
 
@@ -1742,6 +1744,27 @@ Implementation notes (#13):
   user's own OAuth client. An empty id goes back to the built-in one.
 - New error kinds: `google_client_missing` (no client at all: the dialog asks for one),
   `sign_in` (the message says what went wrong) and `cancelled` (not shown).
+
+Implementation notes (#28):
+
+- `add_caldav_source` checks before it stores: unlike a feed, a wrong address or password is
+  refused in the form, not shown later as a failed sync. The service holds the engine's
+  `CaldavProvider` and calls its `list_calendars` with a `SourceContext` for the new source
+  id, so the check runs discovery and the first sync reuses what it found. No change to
+  `CalendarProvider` was needed. A login the server refuses, a server that cannot be reached,
+  an address with no CalDAV calendars and an account with no calendar yet are each
+  `invalid_input` with a message for the form (`service/caldav.rs`); nothing is stored then.
+- The address is checked first with the provider's own rule (`https://`, plain `http://` only
+  to this computer), and empty fields are refused, both without asking the server. Adding the
+  same username on the same host twice is refused too.
+- The source row has the username as `display_name` and the host, with a port that is not the
+  default, as `account_label`. The address, username and password go to the keychain only, as
+  one `Secret::Caldav` (§8).
+- `update_caldav_password` reads the address and username from the keychain, checks the new
+  password the same way, replaces the secret, sets the source back to `ok` and syncs it. A
+  refused password leaves the old one and the state as they were.
+- A locked keyring only shows at the first write (§8), so then the server is asked first and
+  the add fails with `secrets_unavailable` afterwards; nothing is stored.
 
 Implementation notes (#12):
 
@@ -2022,6 +2045,14 @@ conditions sent, a lost create, a 412 between fetch and put, a conflict, an ETag
 replaced itself, and deletes. `caldav_live` also writes through the provider; it passed on
 Radicale 3 and Nextcloud 35. The principal answers in the fixtures were recorded again for
 `calendar-user-address-set`.
+
+Adding an account (#28): `service/tests/caldav.rs` checks the service against a fake provider:
+what is stored where, each refusal and its message, duplicates, and a new password.
+`caldav_live_account` (ignored, same variables, run by the same `caldav_live` filter) adds the
+account with the real provider and sync engine: a wrong password is refused, the right one is
+added and its calendars arrive with the first sync, and the password can be changed. It passed
+on Radicale 3 (where a new user without a calendar is refused with "no calendars yet") and on
+Nextcloud 35 with an app password.
 
 ### Sync engine (v0.1, then v0.2 and v0.3)
 

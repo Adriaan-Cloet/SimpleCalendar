@@ -3,6 +3,7 @@
 //! Tauri commands are thin wrappers around these methods. Reads go straight to SQLite, sync
 //! requests go to the engine, and secrets go to the keychain only.
 
+mod caldav;
 mod events;
 mod google;
 mod issues;
@@ -32,6 +33,7 @@ use crate::CoreEvent;
 use crate::db::{Db, DbError, occurrences};
 use crate::google::GoogleAuth;
 use crate::model::{LOCAL_SOURCE_ID, Occurrence, SourceKind};
+use crate::provider::CalendarProvider;
 use crate::provider::ics::feed_url;
 use crate::recurrence::resolve_local;
 use crate::reminders::{self, ReminderHandle};
@@ -198,6 +200,8 @@ pub struct CalendarService {
     sync: SyncHandle,
     events: mpsc::UnboundedSender<CoreEvent>,
     google: Arc<GoogleAuth>,
+    /// The CalDAV provider, which checks a login before it is stored.
+    caldav: Arc<dyn CalendarProvider>,
     reminders: ReminderHandle,
     /// Cancels the Google sign-in that is waiting for the browser, if one is.
     sign_in: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -207,13 +211,15 @@ pub struct CalendarService {
 
 impl CalendarService {
     /// `events` is the same channel the sync engine reports on; `google` is shared with the
-    /// Google provider; `reminders` wakes the reminder scheduler when the display zone changes.
+    /// Google provider; `caldav` is the engine's CalDAV provider, so a check's discovery is
+    /// reused by the first sync; `reminders` wakes the reminder scheduler when the display zone changes.
     pub fn new(
         db: Db,
         secrets: Secrets,
         sync: SyncHandle,
         events: mpsc::UnboundedSender<CoreEvent>,
         google: Arc<GoogleAuth>,
+        caldav: Arc<dyn CalendarProvider>,
         reminders: ReminderHandle,
     ) -> CalendarService {
         CalendarService {
@@ -222,6 +228,7 @@ impl CalendarService {
             sync,
             events,
             google,
+            caldav,
             reminders,
             sign_in: Arc::new(Mutex::new(None)),
             display_zone: Arc::new(Mutex::new(None)),

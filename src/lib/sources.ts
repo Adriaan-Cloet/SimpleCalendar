@@ -1,4 +1,4 @@
-// Sources (ICS subscriptions, later Google and CalDAV accounts) through the Tauri commands of
+// Sources (ICS subscriptions, Google and CalDAV accounts) through the Tauri commands of
 // docs/architecture.md §10. The shapes mirror the Rust types in `simplecalendar_core::service`.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -70,6 +70,13 @@ export const getStatus = () => invoke<Status>('get_status');
 export const listSources = () => invoke<SourceInfo[]>('list_sources');
 export const addIcsSource = (url: string, name: string) =>
 	invoke<SourceInfo>('add_ics_source', { url, name });
+/** Resolves once the server accepted the login; rejects with `invalid_input` and a message for
+ * the form if it did not. The password goes to the keychain only. */
+export const addCaldavSource = (url: string, username: string, password: string) =>
+	invoke<SourceInfo>('add_caldav_source', { url, username, password });
+/** Checked against the server like `addCaldavSource`; the source syncs at once */
+export const updateCaldavPassword = (source: string, password: string) =>
+	invoke<SourceInfo>('update_caldav_password', { source, password });
 export const removeSource = (source: string) => invoke<void>('remove_source', { source });
 export const syncNow = (source: string | null = null) => invoke<void>('sync_now', { source });
 /** From 5 minutes to a day; `null` goes back to the default. The source syncs at once. */
