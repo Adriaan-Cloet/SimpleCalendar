@@ -12,7 +12,8 @@
 //!   series' value; an exception keeps a field it changed itself. The calendar always follows.
 //! - The times move by the same wall-clock amount as the base did, so moving the occurrence of
 //!   3 November from 09:00 to 10:00 moves every occurrence to 10:00, also after daylight saving
-//!   changes. Exceptions move with the series and stay linked.
+//!   changes. Exceptions move with the series and stay linked, and so do the `RDATE`s and
+//!   `EXDATE`s of a rule that is kept, so an occurrence deleted on a server stays deleted.
 //! - A new rule, or a switch between all-day and timed or to another zone, starts the series
 //!   again: its exceptions are dropped, as Google does.
 //! - No rule at all makes the series the single event in the form.
@@ -37,7 +38,7 @@ use rusqlite::OptionalExtension;
 use crate::model::{SourceKind, TimeKind};
 use crate::outbox::{self, Op};
 use crate::provider::{caldav, google};
-use crate::recurrence::{from_wall_clock, wall_clock};
+use crate::recurrence::{from_wall_clock, move_dates, wall_clock};
 
 const ONLY_ALL_REPEAT: &str = "A change to how an event repeats applies to all events.";
 const ONLY_ALL_CALENDAR: &str = "Only all events can move to another calendar.";
@@ -257,7 +258,17 @@ fn change_all(
             ..follow(old, old, base, new)
         },
     )?;
-    let recurrence = rule.to_recurrence(kind, series.recurrence.as_deref());
+    let mut recurrence = rule.to_recurrence(kind, series.recurrence.as_deref());
+    // A kept rule may hold `RDATE`s and `EXDATE`s, which move with the series (#68). A change
+    // that does not move it leaves them as they were written.
+    if let Some(lines) = recurrence.as_mut()
+        && (delta != chrono::TimeDelta::zero() || kind != kind_before)
+    {
+        match move_dates(lines, kind_before, kind, |at| shift(at, kind_before, kind)) {
+            Ok(moved) => *lines = moved,
+            Err(e) => log::warn!("dates of series {} not moved: {e}", series.id),
+        }
+    }
     set_recurrence(c, series.id, recurrence.as_deref())?;
 
     let moved = shift(original_start, kind_before, kind);

@@ -113,6 +113,19 @@ impl Setup {
             .unwrap()
     }
 
+    /// Writes the `recurrence` column of `id` as a sync would.
+    async fn set_recurrence(&self, id: i64, recurrence: &'static str) {
+        self.db
+            .write(move |c| {
+                c.execute(
+                    "UPDATE events SET recurrence = ?2 WHERE id = ?1",
+                    rusqlite::params![id, recurrence],
+                )
+            })
+            .await
+            .unwrap();
+    }
+
     async fn recurrence(&self, id: i64) -> Option<String> {
         self.db
             .read(move |c| {
@@ -792,6 +805,154 @@ async fn changing_how_all_events_repeat_drops_the_exceptions() {
             "Standup 2026-10-20T09:00",
             "Standup 2026-10-21T09:00",
             "Standup 2026-10-22T09:00"
+        ]
+    );
+}
+
+// A series from a server can hold `EXDATE` and `RDATE` lines; the editor shows its rule as
+// custom and keeps it. When all events move, those dates move with them (#68).
+
+/// The standup's draft for `date` at `start`-`end`, keeping its custom rule.
+fn custom_standup(calendar: i64, start: &str, end: &str) -> EventDraft {
+    let mut d = moved(standup(calendar), start, end);
+    d.repeat = repeat(RepeatFrequency::Custom, None);
+    d
+}
+
+#[tokio::test]
+async fn a_deleted_occurrence_stays_deleted_when_all_events_move() {
+    let mut s = setup();
+    let (cal, id) = s.standup().await;
+    // 3 November was deleted on the server; 17 November was added at 14:00.
+    s.set_recurrence(
+        id,
+        "RRULE:FREQ=WEEKLY\n\
+         EXDATE;TZID=Europe/Brussels:20261103T090000\n\
+         RDATE;TZID=Europe/Brussels:20261119T140000",
+    )
+    .await;
+
+    // One hour later, chosen in summer time; 3 November is in winter time.
+    s.change(
+        id,
+        at(10, 20, 9, 0),
+        Scope::All,
+        custom_standup(cal, "2026-10-20T10:00", "2026-10-20T10:30"),
+    )
+    .await;
+
+    assert_eq!(
+        s.shown().await,
+        vec![
+            "Standup 2026-10-20T10:00",
+            "Standup 2026-10-27T10:00",
+            "Standup 2026-11-10T10:00",
+            "Standup 2026-11-17T10:00",
+            "Standup 2026-11-19T15:00",
+            "Standup 2026-11-24T10:00",
+        ]
+    );
+    assert_eq!(
+        s.recurrence(id).await.as_deref(),
+        Some(
+            "RRULE:FREQ=WEEKLY\n\
+             EXDATE;TZID=Europe/Brussels:20261103T100000\n\
+             RDATE;TZID=Europe/Brussels:20261119T150000"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_day_stays_deleted_when_an_all_day_series_moves() {
+    let mut s = setup();
+    let cal = local(&mut s, "Home").await;
+    let mut d = draft(serde_json::json!({
+        "calendar_id": cal, "title": "Gym", "all_day": true,
+        "start": "2026-10-20", "end": "2026-10-21",
+    }));
+    d.repeat = repeat(RepeatFrequency::Weekly, None);
+    let id = s
+        .service
+        .create_event(d.clone(), "Europe/Brussels")
+        .await
+        .unwrap()
+        .event_id;
+    s.set_recurrence(id, "RRULE:FREQ=WEEKLY\nEXDATE;VALUE=DATE:20261103")
+        .await;
+
+    // Tuesday becomes Wednesday, chosen on 27 October, before the deleted day.
+    d.start = "2026-10-28".into();
+    d.end = "2026-10-29".into();
+    d.repeat = repeat(RepeatFrequency::Custom, None);
+    s.change(id, instant(UTC, 2026, 10, 27, 0, 0), Scope::All, d)
+        .await;
+
+    assert_eq!(
+        s.shown().await,
+        vec![
+            "Gym 2026-10-21",
+            "Gym 2026-10-28",
+            "Gym 2026-11-11",
+            "Gym 2026-11-18",
+            "Gym 2026-11-25",
+        ]
+    );
+    assert_eq!(
+        s.recurrence(id).await.as_deref(),
+        Some("RRULE:FREQ=WEEKLY\nEXDATE;VALUE=DATE:20261104")
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_occurrence_stays_deleted_when_all_events_become_all_day() {
+    let mut s = setup();
+    let (cal, id) = s.standup().await;
+    s.set_recurrence(
+        id,
+        "RRULE:FREQ=WEEKLY\nEXDATE;TZID=Europe/Brussels:20261103T090000",
+    )
+    .await;
+
+    let mut d = custom_standup(cal, "2026-10-27", "2026-10-28");
+    d.all_day = true;
+    d.time_zone = None;
+    s.change(id, at(10, 27, 9, 0), Scope::All, d).await;
+
+    assert_eq!(
+        &s.shown().await[..3],
+        [
+            "Standup 2026-10-20",
+            "Standup 2026-10-27",
+            "Standup 2026-11-10"
+        ]
+    );
+    assert_eq!(
+        s.recurrence(id).await.as_deref(),
+        Some("RRULE:FREQ=WEEKLY\nEXDATE;VALUE=DATE:20261103")
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_does_not_move_the_series_leaves_its_dates_as_written() {
+    let mut s = setup();
+    let (cal, id) = s.standup().await;
+    // 3 November at 09:00 in Brussels, written in UTC.
+    let recurrence = "RRULE:FREQ=WEEKLY\nEXDATE:20261103T080000Z";
+    s.set_recurrence(id, recurrence).await;
+
+    let d = titled(
+        custom_standup(cal, "2026-10-20T09:00", "2026-10-20T09:30"),
+        "Sync",
+    );
+    s.change(id, at(10, 20, 9, 0), Scope::All, d).await;
+
+    assert_eq!(s.recurrence(id).await.as_deref(), Some(recurrence));
+    assert_eq!(
+        &s.shown().await[..3],
+        [
+            "Sync 2026-10-20T09:00",
+            "Sync 2026-10-27T09:00",
+            "Sync 2026-11-10T09:00"
         ]
     );
 }

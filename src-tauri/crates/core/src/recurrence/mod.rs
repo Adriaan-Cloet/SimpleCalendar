@@ -120,6 +120,70 @@ pub fn expand(series: &Series<'_>, from: i64, to: i64) -> Result<Vec<i64>, Recur
         .collect())
 }
 
+/// `recurrence` with every `RDATE` and `EXDATE` value moved by `shift`, for a series that
+/// changes from `from` to `to` (#68). Without this, the dates would stay where the series was:
+/// an occurrence deleted earlier would come back, and an added one would stay behind.
+///
+/// `shift` takes a stored value of `from` and returns one of `to`. Moved values are written
+/// in the form of `to`'s `DTSTART`, so a server matches them to its occurrences: a date for an
+/// all-day series, the zone's local time with its `TZID`, UTC for a fixed offset, or a
+/// floating time. Every other line stays as it is.
+pub(crate) fn move_dates(
+    recurrence: &str,
+    from: TimeKind,
+    to: TimeKind,
+    shift: impl Fn(i64) -> i64,
+) -> Result<String, RecurrenceError> {
+    let mut lines = Vec::new();
+    for line in recurrence.lines().filter(|l| !l.trim().is_empty()) {
+        let (name, params, value) = split_line(line.trim())?;
+        if name != "RDATE" && name != "EXDATE" {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let values = value
+            .split(',')
+            .map(|v| Ok(shift(DateValue::parse(v, &params)?.to_stored(from))))
+            .collect::<Result<Vec<_>, RecurrenceError>>()?;
+        lines.push(date_line(&name, &values, to));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// An `RDATE` or `EXDATE` line with stored `values` of a series of `kind`, in the form of its
+/// `DTSTART`.
+fn date_line(name: &str, values: &[i64], kind: TimeKind) -> String {
+    // Rust note: a closure cannot be generic, so `join` takes `&dyn Fn`: a reference to any
+    // function-like value, called through a pointer. Each arm below passes its own closure.
+    let join = |text: &dyn Fn(i64) -> String| {
+        values
+            .iter()
+            .map(|&v| text(v))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let local = "%Y%m%dT%H%M%S";
+    match kind {
+        TimeKind::AllDay => format!(
+            "{name};VALUE=DATE:{}",
+            join(&|v| as_written(v).format("%Y%m%d").to_string())
+        ),
+        TimeKind::Zoned(tz) if tz != chrono_tz::UTC => format!(
+            "{name};TZID={}:{}",
+            tz.name(),
+            join(&|v| wall_clock(v, kind).format(local).to_string())
+        ),
+        TimeKind::Zoned(_) | TimeKind::Offset(_) => format!(
+            "{name}:{}",
+            join(&|v| instant(v).format("%Y%m%dT%H%M%SZ").to_string())
+        ),
+        TimeKind::Floating => format!(
+            "{name}:{}",
+            join(&|v| as_written(v).format(local).to_string())
+        ),
+    }
+}
+
 /// Whether `series` has an occurrence that starts at the stored value `start`. A series that
 /// cannot be expanded has only its first one, as `list_occurrences` shows it.
 pub fn produces(series: &Series<'_>, start: i64) -> bool {

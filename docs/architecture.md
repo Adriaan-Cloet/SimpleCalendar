@@ -1865,8 +1865,12 @@ Implementation notes (#17):
   master's value; an exception keeps what it changed itself, and the calendar always follows.
   The start moves by the same wall-clock amount as the base did, in the series' zone, so
   09:00 → 10:00 stays 10:00 after DST changes; the length changes by as much as the base's.
-  Exceptions move along (start and `original_start_utc`), so they stay linked. A new rule, or a
-  change between all-day and timed or to another zone, drops the exceptions, as Google does.
+  Exceptions move along (start and `original_start_utc`), so they stay linked. A kept (custom)
+  rule's `RDATE`s and `EXDATE`s move the same way (`recurrence::move_dates`, #68) and are
+  written in the form of the new `DTSTART`, so an occurrence deleted on a server stays deleted;
+  a change that does not move the series leaves them as written. A new rule replaces them. A
+  new rule, or a change between all-day and timed or to another zone, drops the exceptions, as
+  Google does.
   Saving without a repeat makes the series the single event in the form. Deleting with `all`
   removes the series and its exceptions (`ON DELETE CASCADE`).
 - `update_event` returns the changed occurrence, or `null` when after `all` the rule no longer
