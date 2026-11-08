@@ -302,7 +302,8 @@ impl Object {
 }
 
 /// A new resource holding `event` as a single event or series, with `uid` as its `UID`.
-pub(super) fn create(uid: &str, event: &EventData, now: i64) -> String {
+/// `owner` is the user's own e-mail address, which e-mail reminders go to (`write_alarms`).
+pub(super) fn create(uid: &str, event: &EventData, owner: Option<&str>, now: i64) -> String {
     let stamp = utc_text(now);
     let mut vevent = Component::new(
         "VEVENT",
@@ -314,7 +315,7 @@ pub(super) fn create(uid: &str, event: &EventData, now: i64) -> String {
             "SEQUENCE:0".to_owned(),
         ],
     );
-    write_fields(&mut vevent, event, &Field::ALL.into_iter().collect());
+    write_fields(&mut vevent, event, &Field::ALL.into_iter().collect(), owner);
     let mut calendar = Component::new(
         "VCALENDAR",
         ["VERSION:2.0".to_owned(), format!("PRODID:{PRODID}")],
@@ -333,12 +334,14 @@ pub(super) fn create(uid: &str, event: &EventData, now: i64) -> String {
 /// series with every field written.
 ///
 /// New times or a new rule for a series drop its exceptions: they name occurrences of the old
-/// series. The app drops its own copies of them too (`service/series.rs`).
+/// series. The app drops its own copies of them too (`service/series.rs`). `owner` is as for
+/// `create`.
 pub(super) fn update(
     text: &str,
     occurrence: Option<i64>,
     desired: &EventData,
     changed: &FieldSet,
+    owner: Option<&str>,
     now: i64,
 ) -> Result<String, EditError> {
     let mut object = Object::parse(text).ok_or(EditError::Unreadable)?;
@@ -349,7 +352,7 @@ pub(super) fn update(
         None => {
             let (at, _) = master.ok_or(EditError::NoEvent)?;
             let event = object.at(*at);
-            write_fields(event, desired, changed);
+            write_fields(event, desired, changed, owner);
             touch(event, now);
             if changed.contains(&Field::Times) || changed.contains(&Field::Recurrence) {
                 // Backwards, so the positions still to remove stay valid.
@@ -367,7 +370,7 @@ pub(super) fn update(
             {
                 Some((at, _)) => {
                     let event = object.at(*at);
-                    write_fields(event, desired, &fields);
+                    write_fields(event, desired, &fields, owner);
                     touch(event, now);
                 }
                 None => {
@@ -378,7 +381,7 @@ pub(super) fn update(
                         .into_iter()
                         .filter(|&f| f != Field::Recurrence)
                         .collect();
-                    write_fields(&mut exception, desired, &all);
+                    write_fields(&mut exception, desired, &all, owner);
                     touch(&mut exception, now);
                     let last = events
                         .iter()
@@ -452,7 +455,7 @@ fn exception_of(master: &Component, original_start: i64, layout: &Layout) -> Com
 }
 
 /// Writes the `fields` of `event` into `vevent`.
-fn write_fields(vevent: &mut Component, event: &EventData, fields: &FieldSet) {
+fn write_fields(vevent: &mut Component, event: &EventData, fields: &FieldSet, owner: Option<&str>) {
     for field in fields {
         match field {
             Field::Title => vevent.replace(&["SUMMARY"], text_line("SUMMARY", Some(&event.title))),
@@ -495,14 +498,18 @@ fn write_fields(vevent: &mut Component, event: &EventData, fields: &FieldSet) {
                     .map(str::to_owned)
                     .collect(),
             ),
-            Field::Reminders => write_alarms(vevent, event),
+            Field::Reminders => write_alarms(vevent, event, owner),
         }
     }
 }
 
 /// Makes the alarms of `vevent` match the event's reminders. An alarm that is still wanted is
 /// kept as it is, with whatever else it holds; one a reminder cannot hold is always kept.
-fn write_alarms(vevent: &mut Component, event: &EventData) {
+///
+/// A new e-mail reminder goes to `owner`, the user's own address: RFC 5545 §3.6.6 asks for at
+/// least one `ATTENDEE` in an `EMAIL` alarm, and a strict server refuses one without (#69).
+/// Without an address it is written as a popup, which every server takes.
+fn write_alarms(vevent: &mut Component, event: &EventData, owner: Option<&str>) {
     let mut wanted = if event.reminders.use_default {
         Vec::new()
     } else {
@@ -533,15 +540,16 @@ fn write_alarms(vevent: &mut Component, event: &EventData) {
     };
     for reminder in wanted {
         let trigger = format!("TRIGGER:-PT{}M", reminder.minutes_before);
-        let lines = match reminder.method {
-            ReminderMethod::Popup => vec![
-                "ACTION:DISPLAY".to_owned(),
-                format!("DESCRIPTION:{}", escape(label)),
-                trigger,
-            ],
-            ReminderMethod::Email => vec![
+        let lines = match (reminder.method, owner) {
+            (ReminderMethod::Email, Some(owner)) => vec![
                 "ACTION:EMAIL".to_owned(),
                 format!("SUMMARY:{}", escape(label)),
+                format!("DESCRIPTION:{}", escape(label)),
+                format!("ATTENDEE:mailto:{owner}"),
+                trigger,
+            ],
+            (ReminderMethod::Popup, _) | (ReminderMethod::Email, None) => vec![
+                "ACTION:DISPLAY".to_owned(),
                 format!("DESCRIPTION:{}", escape(label)),
                 trigger,
             ],

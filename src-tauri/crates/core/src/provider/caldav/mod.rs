@@ -443,6 +443,15 @@ fn addresses_of(principal: &Response) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The user's e-mail address among their own `addresses`, which e-mail reminders go to. The
+/// set may also list paths and other URIs (`/dav/me/`, `urn:uuid:…`).
+fn mail_address(addresses: &[String]) -> Option<&str> {
+    addresses
+        .iter()
+        .map(String::as_str)
+        .find(|a| a.contains('@') && !a.contains([':', '/']))
+}
+
 /// Marks the invitations the user organizes as theirs: the parser cannot know their address.
 fn own_invitations(feed: &mut Feed, addresses: &[String]) {
     for event in &mut feed.events {

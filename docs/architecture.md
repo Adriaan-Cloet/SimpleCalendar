@@ -1432,7 +1432,10 @@ Writing (#27):
   year: each change of offset becomes a yearly rule on that weekday of the month ("last Sunday
   of March").
 - **Reminders**: an alarm that is still wanted stays as it is; one that is no longer wanted
-  goes; a new popup is `ACTION:DISPLAY`, a new e-mail `ACTION:EMAIL`.
+  goes; a new popup is `ACTION:DISPLAY`, a new e-mail `ACTION:EMAIL` with the user's own
+  address as its `ATTENDEE` (RFC 5545 §3.6.6, #69): the first e-mail address in
+  `calendar-user-address-set`, or the login if it is one. Without an address it is written as
+  a popup, which every server takes.
 - **Occurrences.** A changed occurrence that is no exception yet becomes a `VEVENT` with
   `RECURRENCE-ID` in the series' resource: a copy of the series (so it keeps its attendees and
   other lines) without its rule, with every field written. Its `RECURRENCE-ID` takes the form of

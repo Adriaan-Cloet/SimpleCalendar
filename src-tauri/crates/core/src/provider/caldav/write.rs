@@ -20,8 +20,8 @@ use reqwest::Url;
 
 use super::ical::{self, EditError};
 use super::{
-    Account, Answer, CaldavProvider, collection_of, cursor, own_invitations, parse_feed,
-    status_error,
+    Account, Answer, CaldavProvider, collection_of, cursor, mail_address, own_invitations,
+    parse_feed, status_error,
 };
 use crate::provider::{
     CalendarRef, Etag, EventData, EventUpdate, ProviderError, RemoteEvent, SourceContext,
@@ -260,7 +260,12 @@ impl WritableProvider for CaldavProvider {
             ));
         }
         let url = Self::resource(&collection, remote_id)?;
-        let text = ical::create(uid_of(remote_id), event, now());
+        let text = ical::create(
+            uid_of(remote_id),
+            event,
+            mail_address(&account.addresses),
+            now(),
+        );
         match self.put(&account, &url, &text, None).await? {
             Put::Stored(etag) => {
                 self.written(&account, &url, remote_id, &text, None, etag, remote_id)
@@ -303,8 +308,15 @@ impl WritableProvider for CaldavProvider {
             {
                 return Err(ProviderError::Conflict);
             }
-            let changed = ical::update(&text, occurrence, &update.desired, &update.changed, now())
-                .map_err(edit_error)?;
+            let changed = ical::update(
+                &text,
+                occurrence,
+                &update.desired,
+                &update.changed,
+                mail_address(&account.addresses),
+                now(),
+            )
+            .map_err(edit_error)?;
             // Refused: the object changed after it was fetched. Fetch it again.
             if let Put::Stored(new) = self.put(&account, &url, &changed, Some(&etag)).await? {
                 return self

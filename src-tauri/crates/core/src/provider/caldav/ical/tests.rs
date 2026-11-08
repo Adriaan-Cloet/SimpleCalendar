@@ -7,6 +7,8 @@ use crate::provider::{Field, Reminder, ReminderMethod, Reminders, RemoteEvent, S
 
 const HOUR: i64 = 3600;
 const NOW: i64 = 1_793_000_000; // 2026-10-26 07:33:20 UTC
+/// The user's own address, which e-mail reminders go to (RFC 5545 §3.6.6).
+const OWNER: Option<&str> = Some("alice@example.com");
 
 // ---- helpers -------------------------------------------------------------------------------
 
@@ -222,7 +224,7 @@ fn a_new_event_reads_back_as_written() {
         ..data()
     });
     for case in cases {
-        let text = create("abc", &case, NOW);
+        let text = create("abc", &case, OWNER, NOW);
         let event = only(&text);
         assert_eq!(EventData::from(&event), case, "{text}");
         assert_eq!(event.ical_uid.as_deref(), Some("abc"));
@@ -231,7 +233,7 @@ fn a_new_event_reads_back_as_written() {
 
 #[test]
 fn a_new_event_has_the_lines_servers_ask_for() {
-    let text = create("abc", &data(), NOW);
+    let text = create("abc", &data(), OWNER, NOW);
     for line in [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -263,6 +265,7 @@ fn a_reminder_on_a_new_event_is_an_alarm() {
             },
             ..data()
         },
+        OWNER,
         NOW,
     );
     let alarm = lines(&text)
@@ -289,7 +292,15 @@ fn a_change_rewrites_only_the_changed_lines() {
         title: "Weekly sync".into(),
         ..EventData::from(&master_of(&series()))
     };
-    let text = update(&series(), None, &desired, &changed(&[Field::Title]), NOW).unwrap();
+    let text = update(
+        &series(),
+        None,
+        &desired,
+        &changed(&[Field::Title]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(has_line(&text, "SUMMARY:Weekly sync"));
     for kept in [
         "CATEGORIES:Work,Team",
@@ -322,7 +333,15 @@ fn a_changed_description_drops_its_html_copy() {
         description: Some("new".into()),
         ..EventData::from(&only(&text))
     };
-    let text = update(&text, None, &desired, &changed(&[Field::Description]), NOW).unwrap();
+    let text = update(
+        &text,
+        None,
+        &desired,
+        &changed(&[Field::Description]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(has_line(&text, "DESCRIPTION:new"));
     assert!(starting(&text, "X-ALT-DESC").is_empty());
 }
@@ -334,7 +353,15 @@ fn new_times_replace_the_duration_and_drop_the_exceptions() {
         end_utc: brussels(2026, 11, 3, 9, 30),
         ..EventData::from(&master_of(&series()))
     };
-    let text = update(&series(), None, &desired, &changed(&[Field::Times]), NOW).unwrap();
+    let text = update(
+        &series(),
+        None,
+        &desired,
+        &changed(&[Field::Times]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(starting(&text, "DURATION").is_empty());
     assert!(has_line(
         &text,
@@ -361,6 +388,7 @@ fn a_new_rule_replaces_the_recurrence_lines() {
         None,
         &desired,
         &changed(&[Field::Recurrence]),
+        OWNER,
         NOW,
     )
     .unwrap();
@@ -377,7 +405,15 @@ fn a_new_rule_replaces_the_recurrence_lines() {
         recurrence: None,
         ..desired
     };
-    let text = update(&text, None, &desired, &changed(&[Field::Recurrence]), NOW).unwrap();
+    let text = update(
+        &text,
+        None,
+        &desired,
+        &changed(&[Field::Recurrence]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(starting(&text, "RRULE:FREQ=DAILY").is_empty());
     assert_eq!(master_of(&text).series, SeriesRole::Single);
 }
@@ -398,7 +434,15 @@ fn reminders_keep_the_alarms_that_stay_and_those_a_reminder_cannot_hold() {
         },
         ..EventData::from(&only(&text))
     };
-    let text = update(&text, None, &desired, &changed(&[Field::Reminders]), NOW).unwrap();
+    let text = update(
+        &text,
+        None,
+        &desired,
+        &changed(&[Field::Reminders]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(has_line(&text, "X-WR-ALARMUID:keep"));
     assert!(has_line(&text, "X-WR-ALARMUID:fixed"));
     assert!(!has_line(&text, "X-WR-ALARMUID:drop"));
@@ -409,13 +453,137 @@ fn reminders_keep_the_alarms_that_stay_and_those_a_reminder_cannot_hold() {
     );
 }
 
+fn email(minutes_before: u32) -> Reminder {
+    Reminder {
+        method: ReminderMethod::Email,
+        minutes_before,
+    }
+}
+
+/// The lines of every `VALARM` in `text`, one list per alarm.
+fn alarms(text: &str) -> Vec<Vec<String>> {
+    let mut alarms = Vec::new();
+    let mut current: Option<Vec<String>> = None;
+    for line in lines(text) {
+        match line.as_str() {
+            "BEGIN:VALARM" => current = Some(Vec::new()),
+            "END:VALARM" => alarms.extend(current.take()),
+            _ => {
+                if let Some(alarm) = current.as_mut() {
+                    alarm.push(line);
+                }
+            }
+        }
+    }
+    alarms
+}
+
+#[test]
+fn an_email_reminder_is_addressed_to_the_owner() {
+    // RFC 5545 §3.6.6: an `EMAIL` alarm has at least one `ATTENDEE`.
+    let mut event = data();
+    event.reminders = Reminders {
+        use_default: false,
+        overrides: vec![email(1440)],
+    };
+
+    let text = create("abc", &event, Some("alice@example.com"), NOW);
+
+    let alarms = alarms(&text);
+    assert_eq!(alarms.len(), 1, "{text}");
+    assert!(alarms[0].contains(&"ACTION:EMAIL".to_owned()), "{text}");
+    assert!(
+        alarms[0].contains(&"ATTENDEE:mailto:alice@example.com".to_owned()),
+        "{text}"
+    );
+    assert_eq!(only(&text).reminders.overrides, vec![email(1440)]);
+}
+
+#[test]
+fn without_an_address_an_email_reminder_is_written_as_a_popup() {
+    let mut event = data();
+    event.reminders = Reminders {
+        use_default: false,
+        overrides: vec![email(1440), popup(10)],
+    };
+
+    let text = create("abc", &event, None, NOW);
+
+    assert!(starting(&text, "ACTION:EMAIL").is_empty(), "{text}");
+    assert!(starting(&text, "ATTENDEE").is_empty(), "{text}");
+    assert_eq!(
+        only(&text).reminders.overrides,
+        vec![popup(10), popup(1440)]
+    );
+}
+
+#[test]
+fn an_email_reminder_added_to_an_event_is_addressed_to_the_owner() {
+    let text = create("abc", &data(), OWNER, NOW);
+    let desired = EventData {
+        reminders: Reminders {
+            use_default: false,
+            overrides: vec![email(60)],
+        },
+        ..data()
+    };
+
+    let text = update(
+        &text,
+        None,
+        &desired,
+        &changed(&[Field::Reminders]),
+        Some("bob@example.com"),
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(
+        starting(&text, "ATTENDEE"),
+        ["ATTENDEE:mailto:bob@example.com"]
+    );
+}
+
+#[test]
+fn an_email_alarm_from_the_server_is_kept_as_it_is() {
+    let text = resource(
+        "BEGIN:VEVENT\nUID:a\nDTSTART:20261102T140000Z\nSUMMARY:A
+         BEGIN:VALARM\nACTION:EMAIL\nSUMMARY:A\nDESCRIPTION:A\nTRIGGER:-PT60M
+         ATTENDEE:mailto:carol@example.com\nEND:VALARM\nEND:VEVENT",
+    );
+    let desired = EventData::from(&only(&text));
+
+    let text = update(
+        &text,
+        None,
+        &desired,
+        &changed(&[Field::Reminders]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(
+        starting(&text, "ATTENDEE"),
+        ["ATTENDEE:mailto:carol@example.com"]
+    );
+}
+
 #[test]
 fn attendees_are_not_mailed_by_the_server() {
     let desired = EventData {
         title: "Weekly sync".into(),
         ..EventData::from(&master_of(&series()))
     };
-    let text = update(&series(), None, &desired, &changed(&[Field::Title]), NOW).unwrap();
+    let text = update(
+        &series(),
+        None,
+        &desired,
+        &changed(&[Field::Title]),
+        OWNER,
+        NOW,
+    )
+    .unwrap();
     assert!(has_line(
         &text,
         "ATTENDEE;SCHEDULE-AGENT=CLIENT;CN=Bob:mailto:bob@example.com"
@@ -426,7 +594,7 @@ fn attendees_are_not_mailed_by_the_server() {
          ATTENDEE;SCHEDULE-AGENT=SERVER:mailto:b@example.com\nEND:VEVENT",
     );
     let desired = EventData::from(&only(&text));
-    let text = update(&text, None, &desired, &changed(&[Field::Title]), NOW).unwrap();
+    let text = update(&text, None, &desired, &changed(&[Field::Title]), OWNER, NOW).unwrap();
     assert!(has_line(
         &text,
         "ATTENDEE;SCHEDULE-AGENT=SERVER:mailto:b@example.com"
@@ -445,12 +613,20 @@ fn a_resource_without_the_event_is_not_found() {
             None,
             &data(),
             &changed(&[Field::Title]),
+            OWNER,
             NOW
         ),
         Err(EditError::NoEvent)
     );
     assert_eq!(
-        update("nonsense", None, &data(), &changed(&[Field::Title]), NOW),
+        update(
+            "nonsense",
+            None,
+            &data(),
+            &changed(&[Field::Title]),
+            OWNER,
+            NOW
+        ),
         Err(EditError::Unreadable)
     );
 }
@@ -475,6 +651,7 @@ fn a_changed_occurrence_becomes_an_exception_in_the_same_resource() {
         Some(original),
         &desired,
         &changed(&[Field::Title, Field::Times]),
+        OWNER,
         NOW,
     )
     .unwrap();
@@ -511,6 +688,7 @@ fn a_changed_exception_is_rewritten_in_place() {
         Some(original),
         &desired,
         &changed(&[Field::Title]),
+        OWNER,
         NOW,
     )
     .unwrap();
@@ -537,6 +715,7 @@ fn an_occurrence_of_an_all_day_series_is_named_by_its_date() {
         Some(original),
         &desired,
         &changed(&[Field::Title]),
+        OWNER,
         NOW,
     )
     .unwrap();
@@ -592,6 +771,7 @@ fn zone_lines(tz: &str) -> Vec<String> {
             end_tz: Some(tz.into()),
             ..data()
         },
+        OWNER,
         NOW,
     );
     lines(&text)
@@ -650,7 +830,7 @@ fn a_zone_without_daylight_saving_has_one_offset() {
 #[test]
 fn a_written_zone_gives_the_same_times_under_another_name() {
     // A reader that does not know the name goes by the rules alone.
-    let text = create("z", &data(), NOW).replace("Europe/Brussels", "Office");
+    let text = create("z", &data(), OWNER, NOW).replace("Europe/Brussels", "Office");
     let event = only(&text);
     assert_eq!(event.start_utc, brussels(2026, 11, 2, 14, 0));
     for (month, day) in [(1, 15), (7, 15)] {
@@ -659,7 +839,7 @@ fn a_written_zone_gives_the_same_times_under_another_name() {
             end_utc: brussels(2027, month, day, 10, 0),
             ..data()
         };
-        let text = create("z", &summer_or_winter, NOW).replace("Europe/Brussels", "Office");
+        let text = create("z", &summer_or_winter, OWNER, NOW).replace("Europe/Brussels", "Office");
         assert_eq!(only(&text).start_utc, summer_or_winter.start_utc);
     }
 }
