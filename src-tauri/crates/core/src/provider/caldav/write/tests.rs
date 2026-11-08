@@ -234,7 +234,7 @@ async fn a_create_that_got_through_before_is_a_success() {
         .respond_with(ResponseTemplate::new(412))
         .mount(&server)
         .await;
-    let earlier = ical::create("abc", &data("Planning"), 0);
+    let earlier = ical::create("abc", &data("Planning"), None, 0);
     get(&server, "/alice/work/abc.ics", earlier, "\"e1\"").await;
     let created = provider(&server)
         .create_event(

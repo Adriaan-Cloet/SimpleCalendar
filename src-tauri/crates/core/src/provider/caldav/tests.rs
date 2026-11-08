@@ -410,6 +410,22 @@ async fn the_address_of_one_calendar_asks_its_principal_for_the_users_addresses(
     assert_eq!(discovered.addresses, ["alice@example.com", "/dav/me/"]);
 }
 
+#[test]
+fn e_mail_reminders_go_to_the_first_address_that_is_an_e_mail_address() {
+    let addresses = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        mail_address(&addresses(&[
+            "/dav/me/",
+            "urn:uuid:12@34",
+            "alice@example.com",
+            "bob@example.com"
+        ])),
+        Some("alice@example.com")
+    );
+    assert_eq!(mail_address(&addresses(&["/dav/me/"])), None);
+    assert_eq!(mail_address(&[]), None);
+}
+
 #[tokio::test]
 async fn a_redirect_to_another_host_is_refused() {
     let server = MockServer::start().await;
