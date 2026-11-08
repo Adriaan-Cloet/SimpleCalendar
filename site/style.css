@@ -1,0 +1,135 @@
+/*
+ * The public site: homepage and privacy policy (#29). Plain CSS, no build step. The colours
+ * and fonts are the app's (src/lib/styles/tokens.css), at reading sizes.
+ */
+
+:root {
+	color-scheme: light dark;
+	--text: #1d1d1f;
+	--text-secondary: #6e6e73;
+	--surface: #ffffff;
+	--surface-sidebar: #f5f5f7;
+	--separator: rgba(0, 0, 0, 0.1);
+	--accent-text: #0066cc;
+	--font-ui:
+		'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Ubuntu Sans', Ubuntu,
+		Cantarell, 'Noto Sans', sans-serif;
+	--font-display:
+		'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'Ubuntu Sans', Ubuntu,
+		Cantarell, 'Noto Sans', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--text: #f5f5f7;
+		--text-secondary: #a1a1a6;
+		--surface: #1c1c1e;
+		--surface-sidebar: #2c2c2e;
+		--separator: rgba(255, 255, 255, 0.12);
+		--accent-text: #4da3ff;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--surface);
+	color: var(--text);
+	font-family: var(--font-ui);
+	font-size: 17px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+}
+
+main,
+header,
+footer {
+	max-width: 680px;
+	margin: 0 auto;
+	padding: 0 20px;
+}
+
+header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding-top: 32px;
+}
+
+header a {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	color: var(--text);
+	font-weight: 600;
+	text-decoration: none;
+}
+
+.hero {
+	padding: 56px 0 24px;
+	text-align: center;
+}
+
+h1,
+h2,
+h3 {
+	font-family: var(--font-display);
+	line-height: 1.2;
+}
+
+h1 {
+	margin: 0 0 12px;
+	font-size: 40px;
+	letter-spacing: -0.02em;
+}
+
+h2 {
+	margin: 40px 0 12px;
+	font-size: 24px;
+}
+
+h3 {
+	margin: 24px 0 8px;
+	font-size: 18px;
+}
+
+.lead {
+	margin: 0 auto;
+	max-width: 520px;
+	color: var(--text-secondary);
+	font-size: 20px;
+}
+
+a {
+	color: var(--accent-text);
+}
+
+ul {
+	padding-left: 1.2em;
+}
+
+li {
+	margin: 6px 0;
+}
+
+.note {
+	padding: 16px 20px;
+	border-radius: 12px;
+	background: var(--surface-sidebar);
+}
+
+footer {
+	margin-top: 64px;
+	padding-top: 24px;
+	padding-bottom: 48px;
+	border-top: 1px solid var(--separator);
+	color: var(--text-secondary);
+	font-size: 14px;
+}
+
+footer a {
+	margin-right: 16px;
+}

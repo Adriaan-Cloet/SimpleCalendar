@@ -53,6 +53,7 @@ npm run format       # prettier --write
 - Frontend tests are Vitest, on the Vite config, in Node without a DOM. Only pure functions in `src/lib/` are tested (overlap layout, week placement, the month layout, occurrence text, week dates, calendar colours, the event form, date and time fields, sync issue text, the sync summary, view ranges, scrolling an event into view); keep logic out of components. A single test file: `npx vitest run src/lib/overlap-layout.test.ts`.
 - Google sign-in needs an OAuth client: `docs/google-cloud.md`. The build reads `SIMPLECALENDAR_GOOGLE_CLIENT_ID` / `_SECRET` from the environment or the untracked root `.env` (`src-tauri/build.rs`); after creating `.env`, `touch src-tauri/build.rs`.
 - If `cargo` is not on PATH in a non-interactive shell, run `. ~/.cargo/env` first; `npm run tauri dev` fails without it.
+- `site/` is the public homepage and privacy policy, plain HTML and CSS, published by `.github/workflows/pages.yml` to `https://adriaan-cloet.github.io/SimpleCalendar/` on a push to `main`. Google's consent screen links to both, so keep the privacy policy in line with what the app does (`docs/google-verification.md`).
 - CI (`.github/workflows/ci.yml`) runs all checks plus a Tauri build on Ubuntu and Windows, and uploads the Windows installer and `.exe` as a workflow artifact.
 
 ## Architecture
