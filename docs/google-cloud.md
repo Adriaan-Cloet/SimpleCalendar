@@ -1,7 +1,8 @@
 # Google Cloud client for development
 
 Google sign-in needs an OAuth client from a Google Cloud project. The released app will have one
-compiled in (#29); for development you make your own. It takes about ten minutes. The console's
+compiled in, from a verified project ([google-verification.md](google-verification.md), #29); for
+development you make your own. It takes about ten minutes. The console's
 menu names change now and then; the steps below match the console as of October 2026.
 
 ## Create the client
