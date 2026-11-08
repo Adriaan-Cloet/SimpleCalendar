@@ -410,6 +410,115 @@ fn endless_series_far_in_the_future_returns_only_the_range() {
     assert_eq!(wall(Brussels, &got[..1]), ["2040-06-04 09:00 +02:00"]);
 }
 
+// ---- moving the dates of a series (#68) ------------------------------------------------------
+
+/// Moves a stored value of `kind` by `by` on its own wall clock, as "all events" does.
+fn later(kind: TimeKind, by: i64) -> impl Fn(i64) -> i64 {
+    move |stored| from_wall_clock(wall_clock(stored, kind) + Duration::seconds(by), kind)
+}
+
+#[test]
+fn moved_dates_keep_their_wall_clock_time_across_daylight_saving() {
+    let kind = TimeKind::Zoned(Brussels);
+    // 20 October is summer time, 3 and 10 November winter time; 12 November is in UTC form.
+    let recurrence = "RRULE:FREQ=WEEKLY\n\
+                      EXDATE;TZID=Europe/Brussels:20261020T090000,20261103T090000\n\
+                      RDATE:20261112T080000Z";
+
+    let moved = move_dates(recurrence, kind, kind, later(kind, HOUR)).unwrap();
+
+    assert_eq!(
+        moved,
+        "RRULE:FREQ=WEEKLY\n\
+         EXDATE;TZID=Europe/Brussels:20261020T100000,20261103T100000\n\
+         RDATE;TZID=Europe/Brussels:20261112T100000"
+    );
+}
+
+#[test]
+fn moved_dates_of_an_all_day_series_stay_dates() {
+    let recurrence = "RRULE:FREQ=YEARLY\nEXDATE;VALUE=DATE:20271225\nEXDATE:20281225";
+
+    let moved = move_dates(
+        recurrence,
+        TimeKind::AllDay,
+        TimeKind::AllDay,
+        later(TimeKind::AllDay, DAY),
+    )
+    .unwrap();
+
+    assert_eq!(
+        moved,
+        "RRULE:FREQ=YEARLY\nEXDATE;VALUE=DATE:20271226\nEXDATE;VALUE=DATE:20281226"
+    );
+}
+
+#[test]
+fn moved_dates_take_the_form_of_the_new_kind() {
+    // An all-day series that becomes 09:00 in Brussels, and back.
+    let zoned = TimeKind::Zoned(Brussels);
+    let to_nine = |stored: i64| {
+        from_wall_clock(
+            wall_clock(stored, TimeKind::AllDay) + Duration::hours(9),
+            zoned,
+        )
+    };
+    let timed = move_dates(
+        "RRULE:FREQ=WEEKLY\nEXDATE;VALUE=DATE:20261103",
+        TimeKind::AllDay,
+        zoned,
+        to_nine,
+    )
+    .unwrap();
+    assert_eq!(
+        timed,
+        "RRULE:FREQ=WEEKLY\nEXDATE;TZID=Europe/Brussels:20261103T090000"
+    );
+
+    let to_date = |stored: i64| {
+        let date = wall_clock(stored, zoned).date();
+        from_wall_clock(date.and_time(NaiveTime::MIN), TimeKind::AllDay)
+    };
+    let dated = move_dates(&timed, zoned, TimeKind::AllDay, to_date).unwrap();
+    assert_eq!(dated, "RRULE:FREQ=WEEKLY\nEXDATE;VALUE=DATE:20261103");
+}
+
+#[test]
+fn moved_floating_and_offset_dates_keep_their_forms() {
+    let floating = move_dates(
+        "RDATE:20261103T090000\nRRULE:FREQ=DAILY",
+        TimeKind::Floating,
+        TimeKind::Floating,
+        later(TimeKind::Floating, HOUR),
+    )
+    .unwrap();
+    assert_eq!(floating, "RDATE:20261103T100000\nRRULE:FREQ=DAILY");
+
+    let offset = TimeKind::Offset(FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap());
+    let moved = move_dates(
+        "RRULE:FREQ=DAILY\nEXDATE:20261103T033000Z",
+        offset,
+        offset,
+        later(offset, HOUR),
+    )
+    .unwrap();
+    assert_eq!(moved, "RRULE:FREQ=DAILY\nEXDATE:20261103T043000Z");
+}
+
+#[test]
+fn a_date_that_cannot_be_read_cannot_be_moved() {
+    let kind = TimeKind::Zoned(Brussels);
+    assert!(
+        move_dates(
+            "RRULE:FREQ=DAILY\nRDATE;VALUE=PERIOD:20261103T090000Z/PT1H",
+            kind,
+            kind,
+            later(kind, HOUR),
+        )
+        .is_err()
+    );
+}
+
 // ---- errors --------------------------------------------------------------------------------
 
 #[test]
