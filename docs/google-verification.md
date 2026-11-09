@@ -42,8 +42,9 @@ the user site provides that root, and the project site lives under the same doma
 4. **Branding** (Google Auth Platform → Branding):
    - App name: `SimpleCalendar`
    - User support e-mail and developer contact: cloetadriaan@gmail.com
-   - App logo: leave empty until the app has its own icon (it still ships Tauri's default).
-     A logo is optional, and a new one needs Google's approval again.
+   - App logo: leave empty. The app's icon (`src-tauri/icons/icon.svg`, also `site/logo.svg`)
+     is a placeholder until the branding after v1. A logo is optional, and each new one needs
+     Google's approval again, so it is added once, with the final branding.
    - Application home page and privacy policy link: the two URLs above.
    - Authorized domain: `adriaan-cloet.github.io`.
 5. **Audience:** External.
